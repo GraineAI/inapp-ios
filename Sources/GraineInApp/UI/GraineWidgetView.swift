@@ -1,0 +1,982 @@
+#if os(iOS)
+import Combine
+import SwiftUI
+
+/**
+ * THE COMPONENT THE AGENT PUT ON SCREEN — drawn by the SDK, not by the host.
+ *
+ * Kinds and their contents are built in the dashboard and arrive over the
+ * call, so a catalogue of cars today and a list of policies tomorrow need no
+ * release. This draws the common kinds the React Native renderer draws:
+ *
+ *   product_list / products   rows with a picture, badge, price and facts
+ *   plan_comparison           the same rows, from `plans`
+ *   info_card                 one row, from the card's title and summary
+ *   choices / quick_actions   a set of buttons
+ *   calendar_slots            a day, then its times
+ *
+ * and, for anything else, the agent's fallback sentence — guessing at an
+ * unknown shape produces something worse than words. The dashboard's preset
+ * (gallery, cards, list, spotlight, compact) picks the row shape; `select:
+ * "many"` lets the customer tick several and answer once ("Let's compare the
+ * Creta and the Seltos."). While the agent says a component is coming, it
+ * draws the loader with the dashboard's words for that moment.
+ *
+ * Mount it once, above your bar, and it appears when there is something to
+ * show. It is presented inline — never as a full-screen cover, which on iOS
+ * would take the engine's web view out of the window and deafen the call:
+ *
+ *     VStack { Spacer(); GraineWidgetView().padding(.horizontal, 12) }
+ */
+public struct GraineWidgetView: View {
+    private let graine: GraineInApp?
+    private let accent: Color?
+
+    /// - Parameters:
+    ///   - graine: defaults to the instance `GraineInApp.configure` made.
+    ///   - accent: overrides the component's and the dashboard's accent.
+    public init(graine: GraineInApp? = nil, accent: Color? = nil) {
+        self.graine = graine
+        self.accent = accent
+    }
+
+    public var body: some View {
+        if let graine = graine ?? GraineInApp.current {
+            GraineWidgetHost(graine: graine, accentOverride: accent)
+        }
+    }
+}
+
+/**
+ * The component's lifecycle — shown, loading, answered, dismissed — the way the
+ * React Native SDK's useGraineWidget runs it.
+ */
+final class GraineWidgetModel: ObservableObject, GraineListener {
+    @Published private(set) var widget: GraineWidget?
+    @Published private(set) var content: WidgetContent?
+    /// A component is on its way: its kind, while its content loads.
+    @Published private(set) var pendingKind: String?
+    /// What the customer just chose, kept on screen as one line.
+    @Published private(set) var answered: (title: String, detail: String)?
+    /// The customer tapped and the agent has not spoken since.
+    @Published private(set) var awaitingReply = false
+    /// Ids ticked so far, when the component lets them choose several.
+    @Published private(set) var ticked: [String] = []
+    @Published private(set) var appearance: [String: Any] = [:]
+    /// The agent's origin, where the dashboard's logo is served.
+    private(set) var baseUrl: String?
+
+    private weak var graine: GraineInApp?
+    private var wasLive = false
+    private var pendingShownAt: Date?
+    private var pendingTimer: DispatchWorkItem?
+    private var awaitingTimer: DispatchWorkItem?
+    private var showTimer: DispatchWorkItem?
+
+    init(graine: GraineInApp) {
+        self.graine = graine
+        if let session = graine.session { appearance = session.appearance }
+        baseUrl = graine.config.baseUrl
+        wasLive = graine.voice.connected
+        // SEEDED FROM WHAT THE AGENT ALREADY DREW: a view mounted after the component
+        // arrived must not open to nothing while the agent waits for an answer.
+        if let frame = graine.voice.pendingWidgetFrame,
+           let retained = GraineWidget(frame: frame, baseUrl: graine.config.baseUrl) {
+            show(retained)
+        }
+        graine.addListener(self)
+    }
+
+    // MARK: GraineListener
+
+    func onSessionReady(_ session: GraineSessionConfig) {
+        appearance = session.appearance
+    }
+
+    func onWidgetPending(_ hint: [String: Any]) {
+        pendingShownAt = Date()
+        pendingKind = JSON.string(hint["kind"])
+        pendingTimer?.cancel()
+        // The runtime gives the customer's API eight seconds; a loader that outlives that is a promise nothing keeps.
+        let item = DispatchWorkItem { [weak self] in
+            self?.pendingKind = nil
+            self?.pendingShownAt = nil
+        }
+        pendingTimer = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(WidgetRules.pendingWidgetMs), execute: item)
+    }
+
+    func onWidget(_ frame: [String: Any]) {
+        guard let graine = graine, let next = GraineWidget(frame: frame, baseUrl: graine.config.baseUrl) else { return }
+        stopAwaiting()
+        pendingTimer?.cancel()
+        pendingTimer = nil
+        // Let the loader finish being seen: one that appears and vanishes in a frame reads as a glitch.
+        let seen = pendingShownAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? WidgetRules.minLoaderMs
+        if seen >= WidgetRules.minLoaderMs {
+            show(next)
+        } else {
+            showTimer?.cancel()
+            let item = DispatchWorkItem { [weak self] in self?.show(next) }
+            showTimer = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(WidgetRules.minLoaderMs - seen), execute: item)
+        }
+    }
+
+    func onCaption(role: GraineRole, text: String, live: Bool) {
+        // The agent started: stop saying we are waiting.
+        if role == .agent { stopAwaiting() }
+    }
+
+    /// A call ended: nothing from it belongs on screen — not its component, not its answer.
+    func onEnded() {
+        reset()
+    }
+
+    /// A new call connected: the last call's component and answer go with it.
+    func onCallState(connected: Bool, connecting: Bool) {
+        if connected && !wasLive { reset() }
+        wasLive = connected
+    }
+
+    private func reset() {
+        pendingTimer?.cancel()
+        pendingTimer = nil
+        showTimer?.cancel()
+        showTimer = nil
+        pendingKind = nil
+        pendingShownAt = nil
+        widget = nil
+        content = nil
+        answered = nil
+        ticked = []
+        stopAwaiting()
+    }
+
+    // MARK: Actions
+
+    /**
+     * The customer answered. The app's own job first — a tap may name an in-app
+     * action (onSelect), fired without being awaited so a slow handler never
+     * delays the agent hearing the choice; a refusal is reported to the agent.
+     * Then the answer, with the sentence the agent hears.
+     */
+    func submit(data: [String: Any], summary: String) {
+        guard let graine = graine, let current = widget else { return }
+        var sentence = summary
+        var item = data
+        item["summary"] = summary
+        if let call = WidgetRules.selectCall(current.onSelect, item: item) {
+            let actionName = call.name
+            graine.executeAction(name: actionName, arguments: call.args) { [weak graine] result in
+                guard result.status != .ok else { return }
+                let why = result.message.isEmpty ? result.status.rawValue : result.message
+                graine?.voice.reportEvent(
+                    "in_app_action_failed",
+                    detail: "\"\(actionName)\" did not run: \(why). Do not describe a screen the customer cannot see."
+                )
+            }
+            if let say = current.onSelect.say { sentence = WidgetRules.fillTemplate(say, item: item) }
+        }
+        graine.voice.answerWidget(widgetId: current.id, data: data, summary: sentence)
+        graine.voice.clearPendingWidget()
+        widget = nil
+        content = nil
+        ticked = []
+        answered = WidgetRules.answeredLine(data)
+        // A tap is a turn, and the agent takes a moment to answer it. Say so until it starts.
+        awaitingReply = true
+        awaitingTimer?.cancel()
+        let timer = DispatchWorkItem { [weak self] in self?.awaitingReply = false }
+        awaitingTimer = timer
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(WidgetRules.awaitingReplyMs), execute: timer)
+    }
+
+    /**
+     * CLOSING IS NOT ANSWERING — but the agent is told, quietly, so it stops
+     * talking about options nobody can see. It does not speak up because
+     * someone closed a card.
+     */
+    func dismiss() {
+        showTimer?.cancel()
+        showTimer = nil
+        if let current = widget, let graine = graine {
+            let detail: [String: Any] = [
+                "tool_name": current.id.components(separatedBy: ":").first ?? "",
+                "kind": current.kind,
+                "title": JSON.string(current.data["title"]),
+                "answered": false,
+            ]
+            graine.voice.reportEvent(
+                "component_dismissed",
+                detail: "The customer closed the component without choosing. Do not refer to options they cannot see; offer to show it again if they want it.",
+                data: ["quiet": true, "data": detail]
+            )
+        }
+        graine?.voice.clearPendingWidget()
+        widget = nil
+        content = nil
+        answered = nil
+        pendingKind = nil
+        pendingShownAt = nil
+        ticked = []
+        stopAwaiting()
+    }
+
+    func toggle(_ id: String) {
+        guard let current = content else { return }
+        ticked = WidgetRules.toggle(ticked, id: id, max: current.maxSelect)
+    }
+
+    private func show(_ next: GraineWidget) {
+        showTimer = nil
+        pendingShownAt = nil
+        pendingKind = nil
+        widget = next
+        content = WidgetContent(next)
+        ticked = []
+        // A new question replaces the last answer.
+        answered = nil
+    }
+
+    private func stopAwaiting() {
+        awaitingTimer?.cancel()
+        awaitingTimer = nil
+        if awaitingReply { awaitingReply = false }
+    }
+}
+
+/// Everything one component is drawn in: colours, corner, the phone's grammar, and the loader.
+struct GraineWidgetTheme {
+    let surface: Color
+    let border: Color
+    let text: Color
+    let muted: Color
+    let accent: Color
+    let onAccent: Color
+    let radius: CGFloat
+    let grammar: WidgetGrammar
+    let loader: GraineLoaderLook
+    let loaderColor: Color
+    let logoUrl: String?
+
+    /// A title's CSS weight as a SwiftUI weight.
+    var titleWeight: Font.Weight {
+        switch grammar.titleWeight {
+        case ..<550: return .medium
+        case ..<650: return .semibold
+        default: return .bold
+        }
+    }
+}
+
+struct GraineWidgetHost: View {
+    @StateObject private var model: GraineWidgetModel
+    @Environment(\.colorScheme) private var colorScheme
+    private let accentOverride: Color?
+
+    init(graine: GraineInApp, accentOverride: Color?) {
+        _model = StateObject(wrappedValue: GraineWidgetModel(graine: graine))
+        self.accentOverride = accentOverride
+    }
+
+    var body: some View {
+        let theme = makeTheme()
+        return VStack(spacing: 8) {
+            if let line = model.answered {
+                answeredRow(line, theme: theme)
+            }
+            if let widget = model.widget, let content = model.content {
+                GraineWidgetCard(widget: widget, content: content, theme: theme, model: model)
+            } else if model.pendingKind != nil {
+                loader(theme: theme)
+            }
+        }
+    }
+
+    /**
+     * Host code wins, then the component's own choice, then the dashboard's
+     * Appearance (widget.tsx's order). An explicitly chosen platform also
+     * brings that grammar's card radius; under "auto" the brand's radius stays.
+     */
+    private func makeTheme() -> GraineWidgetTheme {
+        let look = model.widget?.look ?? WidgetRules.resolveLook(WidgetStyle(), kind: model.pendingKind)
+        let dash = Appearance.resolve(model.appearance, accent: Appearance.defaultAccent, heading: "", origin: model.baseUrl)
+        let accentHex = look.accent ?? dash.accent
+        let palette = Appearance.palette(model.appearance, deviceDark: colorScheme == .dark, accent: accentHex)
+        let grammar = WidgetRules.grammar(for: look)
+        let radius = look.radius ?? (look.platform != .auto ? grammar.radius : dash.radius)
+        let loader = Loaders.resolve(model.appearance["loader"])
+        return GraineWidgetTheme(
+            surface: Color.graineHex(palette.surface),
+            border: Color.graineHex(palette.border),
+            text: Color.graineHex(palette.text),
+            muted: Color.graineHex(palette.muted),
+            accent: accentOverride ?? Color.graineHex(accentHex),
+            onAccent: accentOverride == nil ? Color.graineHex(palette.onAccent, fallback: .white) : .white,
+            radius: CGFloat(radius),
+            grammar: grammar,
+            loader: loader,
+            loaderColor: Color.graineHex(loader.color ?? dash.accent),
+            logoUrl: dash.logoUrl
+        )
+    }
+
+    /**
+     * A LOADER IS A LOADER: the one the brand chose, centred on the space the
+     * component will take, at a size you read from arm's length (bigger for a
+     * screen or a sheet), with the dashboard's words for this moment.
+     */
+    private func loader(theme: GraineWidgetTheme) -> some View {
+        let words = theme.loader.text.component ?? "Loading…"
+        let size: CGFloat?
+        switch WidgetRules.surface(kind: model.pendingKind) {
+        case .screen: size = 34
+        case .sheet: size = 26
+        case .card: size = nil
+        }
+        return GraineLoaderLabel(
+            look: theme.loader,
+            color: theme.loaderColor,
+            track: theme.border,
+            textColor: theme.muted,
+            label: words,
+            size: size,
+            stacked: true,
+            logoUrl: theme.logoUrl
+        )
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(words)
+    }
+
+    /// WAITING, THEN DONE: a tick that appears before the agent has said anything reads as "handled", which it is not yet.
+    private func answeredRow(_ line: (title: String, detail: String), theme: GraineWidgetTheme) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(theme.accent.opacity(0.18))
+                if model.awaitingReply {
+                    GraineLoaderMark(look: theme.loader, color: theme.loaderColor, track: theme.border, size: 12, logoUrl: theme.logoUrl)
+                } else {
+                    Text("✓")
+                        .font(.system(size: 14, weight: .heavy))
+                        .foregroundColor(theme.accent)
+                }
+            }
+            .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(line.title.isEmpty ? line.detail : line.title)
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(theme.text)
+                    .lineLimit(1)
+                if model.awaitingReply {
+                    Text(Appearance.loaderText(model.appearance, moment: "thinking"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(theme.muted)
+                        .lineLimit(1)
+                } else if !line.title.isEmpty && !line.detail.isEmpty {
+                    Text(line.detail)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(theme.muted)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if !model.awaitingReply {
+                Button(action: { model.dismiss() }) {
+                    Text("Clear")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(theme.muted)
+                        .frame(minHeight: 44)
+                        .padding(.horizontal, 4)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Clear what I chose")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+        }
+    }
+}
+
+private struct GraineWidgetBodyHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// One component, on the card that carries it.
+struct GraineWidgetCard: View {
+    let widget: GraineWidget
+    let content: WidgetContent
+    let theme: GraineWidgetTheme
+    @ObservedObject var model: GraineWidgetModel
+    @State private var bodyHeight: CGFloat = 0
+
+    init(widget: GraineWidget, content: WidgetContent, theme: GraineWidgetTheme, model: GraineWidgetModel) {
+        self.widget = widget
+        self.content = content
+        self.theme = theme
+        _model = ObservedObject(wrappedValue: model)
+    }
+
+    /// Pictures need room; a choice is a sheet's height; a fact interrupts as little as possible.
+    private var maxBodyHeight: CGFloat {
+        switch content.surface {
+        case .screen: return 520
+        case .sheet: return 420
+        case .card: return 300
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            ScrollView(.vertical, showsIndicators: false) {
+                bodyView
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(key: GraineWidgetBodyHeightKey.self, value: proxy.size.height)
+                    })
+            }
+            .frame(height: min(max(bodyHeight, 1), maxBodyHeight))
+            .onPreferenceChange(GraineWidgetBodyHeightKey.self) { height in
+                bodyHeight = height
+            }
+            footer
+        }
+        .padding(14)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                if !content.title.isEmpty {
+                    Text(content.title)
+                        .font(.system(size: 15, weight: .heavy))
+                        .foregroundColor(theme.text)
+                }
+                if !content.prompt.isEmpty {
+                    Text(content.prompt)
+                        .font(.system(size: 12.5))
+                        .foregroundColor(theme.muted)
+                }
+            }
+            Spacer(minLength: 0)
+            Button(action: { model.dismiss() }) {
+                Text("×")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(theme.text)
+                    .frame(width: 32, height: 32)
+                    .background(theme.border.opacity(0.4), in: Circle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel("Close and keep talking")
+        }
+    }
+
+    @ViewBuilder
+    private var bodyView: some View {
+        switch content.body {
+        case let .calendar(note, days):
+            calendar(note: note, days: days)
+        case .rows(let rows):
+            rowsView(rows)
+        case .chips(let chips):
+            chipsView(chips)
+        case .fallback(let text):
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundColor(theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Rows
+
+    private func variant(for preset: GraineWidgetPreset) -> GraineWidgetRowVariant {
+        switch preset {
+        case .gallery, .spotlight: return .hero
+        case .list: return .list
+        case .compact: return .compact
+        case .cards: return .row
+        }
+    }
+
+    private func rowsView(_ rows: [WidgetRow]) -> some View {
+        let look = content.look
+        return VStack(alignment: .leading, spacing: look.density == .compact ? 6 : 10) {
+            if look.preset == .spotlight {
+                // One card in view, the next one's edge showing: that edge is what says "there are more".
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(rows, id: \.index) { row in
+                            rowView(row, variant: .hero).frame(width: 260)
+                        }
+                    }
+                }
+            } else if look.columns == 2 {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    ForEach(rows, id: \.index) { row in
+                        rowView(row, variant: .hero)
+                    }
+                }
+            } else {
+                ForEach(rows, id: \.index) { row in
+                    rowView(row, variant: variant(for: look.preset))
+                }
+            }
+            if content.many {
+                manyButton(rows)
+            }
+        }
+    }
+
+    private func rowView(_ row: WidgetRow, variant: GraineWidgetRowVariant) -> some View {
+        GraineWidgetRowView(
+            row: row,
+            variant: variant,
+            look: content.look,
+            theme: theme,
+            picked: content.many ? model.ticked.contains(row.id) : nil,
+            onPick: { pick(row) }
+        )
+    }
+
+    private func pick(_ row: WidgetRow) {
+        if content.many {
+            model.toggle(row.id)
+            return
+        }
+        let answer = content.answer(row: row)
+        model.submit(data: answer.data, summary: answer.summary)
+    }
+
+    /// ONE BUTTON, ONE TURN. Disabled below two: a comparison of one is the single-tap case in disguise.
+    private func manyButton(_ rows: [WidgetRow]) -> some View {
+        let chosen: [WidgetRow] = model.ticked.compactMap { id in rows.first(where: { candidate in candidate.id == id }) }
+        let enabled = chosen.count >= 2
+        let label = WidgetRules.manyButtonLabel(chosen: chosen.count, selectLabel: content.selectLabel)
+        return Button(action: {
+            let answer = content.answer(rows: chosen)
+            model.submit(data: answer.data, summary: answer.summary)
+        }) {
+            Text(label)
+                .font(.system(size: 14.5, weight: .bold))
+                .foregroundColor(enabled ? theme.onAccent : theme.muted)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .background(
+                    enabled ? theme.accent : theme.border.opacity(0.5),
+                    in: RoundedRectangle(cornerRadius: min(24, CGFloat(theme.grammar.pillButtons ? 999 : theme.grammar.buttonRadius)), style: .continuous)
+                )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+    }
+
+    // MARK: Chips and slots
+
+    private func chipsView(_ chips: [WidgetChip]) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], alignment: .leading, spacing: 8) {
+            ForEach(0..<chips.count, id: \.self) { i in
+                Button(action: {
+                    let answer = content.answer(chip: chips[i])
+                    model.submit(data: answer.data, summary: answer.summary)
+                }) {
+                    Text(chips[i].label)
+                        .font(.system(size: 13.5, weight: .bold))
+                        .foregroundColor(theme.onAccent)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(theme.accent, in: Capsule())
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel(chips[i].label)
+            }
+        }
+    }
+
+    private func calendar(note: String?, days: [WidgetDay]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let note = note {
+                Text(note)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(0..<days.count, id: \.self) { d in
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(days[d].label)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(theme.text)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(0..<days[d].slots.count, id: \.self) { s in
+                            slotButton(day: days[d].label, slot: days[d].slots[s])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func slotButton(day: String, slot: String) -> some View {
+        Button(action: {
+            let answer = content.answer(day: day, slot: slot)
+            model.submit(data: answer.data, summary: answer.summary)
+        }) {
+            Text(slot)
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundColor(theme.text)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(theme.border, lineWidth: 1)
+                }
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel("\(day) at \(slot)")
+    }
+
+    // MARK: The way out
+
+    /// NOT ANSWERING IS AN ANSWER: without a way out that is not a choice, the only exits are a wrong pick or hanging up.
+    @ViewBuilder
+    private var footer: some View {
+        switch content.surface {
+        case .sheet:
+            Button(action: { model.dismiss() }) {
+                Text("None of these")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(theme.text)
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 44)
+                    .background(theme.border.opacity(0.4), in: Capsule())
+            }
+            .buttonStyle(PlainButtonStyle())
+        case .screen:
+            // The agent is still on the call. Saying so is the difference between a screen it opened and one that replaced it.
+            VStack(alignment: .leading, spacing: 2) {
+                Text("STILL LISTENING")
+                    .font(.system(size: 10.5, weight: .heavy))
+                    .foregroundColor(theme.muted)
+                Text(content.prompt.isEmpty ? "Tap one, or just say it." : content.prompt)
+                    .font(.system(size: 13.5))
+                    .foregroundColor(theme.text)
+                    .lineLimit(1)
+            }
+        case .card:
+            HStack {
+                Spacer(minLength: 0)
+                Button(action: { model.dismiss() }) {
+                    Text("Dismiss")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(theme.muted)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+    }
+}
+
+enum GraineWidgetRowVariant {
+    /// Picture on top, full-width button — Gallery and Spotlight.
+    case hero
+    /// Thumbnail left, pill button — Cards.
+    case row
+    /// Dense; the row is the button — List.
+    case list
+    /// No picture, outline button — Compact.
+    case compact
+}
+
+/// ONE ROW, FOUR SHAPES. Whatever the shape, the same things are on it: badge, title and price, facts as chips, a 44pt target.
+struct GraineWidgetRowView: View {
+    let row: WidgetRow
+    let variant: GraineWidgetRowVariant
+    let look: WidgetLook
+    let theme: GraineWidgetTheme
+    /// nil when choosing one; true/false when choosing several.
+    let picked: Bool?
+    let onPick: () -> Void
+
+    private var many: Bool { picked != nil }
+    /// Choosing several: the ROW toggles, always — a per-row button beside a tick is two controls for one decision.
+    private var rowIsButton: Bool { many || look.button == .row }
+    private var tight: Bool { look.density == .compact }
+    private var pad: CGFloat { (variant == .list ? (tight ? 6 : 9) : (tight ? 7 : 10)) + CGFloat(theme.grammar.padBoost) }
+    private var gap: CGFloat { tight ? 6 : 10 }
+    private var cornerRadius: CGFloat { max(10, theme.radius - 6) }
+
+    var body: some View {
+        if rowIsButton {
+            Button(action: onPick) { shape }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(row.unavailable)
+                .accessibilityLabel("\(row.selectLabel): \(row.title)")
+        } else {
+            shape
+        }
+    }
+
+    @ViewBuilder
+    private var shape: some View {
+        switch variant {
+        case .hero: hero
+        case .row: card
+        case .list: list
+        case .compact: compact
+        }
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !row.image.isEmpty {
+                picture
+                    .frame(maxWidth: .infinity)
+                    .frame(height: heroHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: max(8, theme.radius - 8), style: .continuous))
+            }
+            badge
+            titleLine(big: true)
+            facts
+            if !many && !rowIsButton {
+                actionButton(wide: true)
+            }
+        }
+        .padding(pad)
+        .overlay(alignment: .topTrailing) {
+            if many { tick.padding(pad + 6) }
+        }
+        .overlay { outline }
+        .opacity(row.unavailable ? 0.55 : 1)
+    }
+
+    private var card: some View {
+        HStack(spacing: gap) {
+            if !row.image.isEmpty { thumbnail(size: thumbSize) }
+            VStack(alignment: .leading, spacing: 3) {
+                badge
+                titleLine(big: false)
+                facts
+            }
+            if many {
+                tick
+            } else if !rowIsButton {
+                actionButton(wide: false)
+            }
+        }
+        .padding(pad)
+        .overlay { outline }
+        .opacity(row.unavailable ? 0.55 : 1)
+    }
+
+    private var list: some View {
+        HStack(spacing: gap) {
+            if !row.image.isEmpty { thumbnail(size: listThumbSize) }
+            VStack(alignment: .leading, spacing: 2) {
+                titleLine(big: false)
+                facts
+            }
+            if many {
+                tick
+            } else if rowIsButton {
+                Text("›")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(theme.muted)
+            } else {
+                actionButton(wide: false)
+            }
+        }
+        .padding(.vertical, pad)
+        .padding(.horizontal, 2)
+        .frame(minHeight: 44)
+        .overlay(alignment: .bottom) {
+            theme.border.frame(height: 1).padding(.leading, CGFloat(theme.grammar.separatorInset))
+        }
+        .opacity(row.unavailable ? 0.55 : 1)
+    }
+
+    private var compact: some View {
+        HStack(spacing: gap) {
+            VStack(alignment: .leading, spacing: 2) {
+                badge
+                titleLine(big: false)
+                facts
+            }
+            if many {
+                tick
+            } else if !rowIsButton {
+                actionButton(wide: false)
+            }
+        }
+        .padding(.vertical, pad)
+        .padding(.horizontal, pad + 2)
+        .frame(minHeight: 44)
+        .overlay { outline }
+        .opacity(row.unavailable ? 0.55 : 1)
+    }
+
+    // MARK: Parts
+
+    private var outline: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(picked == true ? theme.accent : theme.border, lineWidth: picked == true ? 2 : 1)
+    }
+
+    private var heroHeight: CGFloat {
+        switch look.imageSize {
+        case .small: return 100
+        case .medium: return 140
+        case .large: return 180
+        }
+    }
+
+    private var thumbSize: CGFloat {
+        switch look.imageSize {
+        case .small: return 56
+        case .medium: return 72
+        case .large: return 96
+        }
+    }
+
+    private var listThumbSize: CGFloat {
+        switch look.imageSize {
+        case .small: return 36
+        case .medium: return 44
+        case .large: return 56
+        }
+    }
+
+    private var picture: some View {
+        AsyncImage(url: URL(string: row.image)) { phase in
+            if let image = phase.image {
+                image.resizable().scaledToFill()
+            } else {
+                theme.border
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func thumbnail(size: CGFloat) -> some View {
+        picture
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: max(8, theme.radius - 8), style: .continuous))
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        if !row.subtitle.isEmpty {
+            Text(row.subtitle.uppercased())
+                .font(.system(size: 10.5, weight: .heavy))
+                .foregroundColor(theme.accent)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(theme.accent.opacity(0.15), in: Capsule())
+        }
+    }
+
+    private func titleLine(big: Bool) -> some View {
+        let size: CGFloat = big ? 16.5 : (variant == .list ? 13.5 : 14.5)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(row.title)
+                .font(.system(size: size, weight: theme.titleWeight))
+                .foregroundColor(theme.text)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            if !row.price.isEmpty {
+                Text(row.price)
+                    .font(.system(size: big ? 17 : size, weight: .heavy))
+                    .foregroundColor(theme.text)
+            }
+        }
+    }
+
+    /// Facts as chips: joined with dots they read as the sentence a component exists to replace.
+    @ViewBuilder
+    private var facts: some View {
+        let shown = variant == .list ? Array(row.facts.prefix(2)) : row.facts
+        if look.facts && !shown.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(0..<shown.count, id: \.self) { i in
+                    Text(shown[i])
+                        .font(.system(size: variant == .list ? 10.5 : 11.5, weight: .semibold))
+                        .foregroundColor(theme.muted)
+                        .lineLimit(1)
+                        .padding(.horizontal, variant == .list ? 6 : 8)
+                        .padding(.vertical, variant == .list ? 2 : 4)
+                        .background(
+                            theme.grammar.chipOutlined ? Color.clear : theme.border.opacity(0.35),
+                            in: RoundedRectangle(cornerRadius: min(12, CGFloat(theme.grammar.chipRadius)), style: .continuous)
+                        )
+                        .overlay {
+                            if theme.grammar.chipOutlined {
+                                RoundedRectangle(cornerRadius: min(12, CGFloat(theme.grammar.chipRadius)), style: .continuous)
+                                    .stroke(theme.border, lineWidth: 1)
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    private var tick: some View {
+        ZStack {
+            Circle().fill(picked == true ? theme.accent : Color.clear)
+            Circle().stroke(theme.border, lineWidth: picked == true ? 0 : 1.5)
+            if picked == true {
+                Text("✓")
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundColor(theme.onAccent)
+            }
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
+    }
+
+    private func actionButton(wide: Bool) -> some View {
+        let outlined = look.button == .outline
+        let hollow = row.unavailable || outlined
+        let label = row.unavailable ? "Unavailable" : row.selectLabel
+        let maxWidth: CGFloat? = wide ? CGFloat.infinity : nil
+        let textColor: Color = row.unavailable ? theme.muted : (outlined ? theme.accent : theme.onAccent)
+        let fill: Color = hollow ? Color.clear : theme.accent
+        let stroke: Color = row.unavailable ? theme.border : theme.accent
+        let grammar = theme.grammar
+        let corner = min(22, CGFloat(wide ? grammar.buttonRadius : (grammar.pillButtons ? 999 : grammar.buttonRadius)))
+        return Button(action: onPick) {
+            Text(label)
+                .font(.system(size: wide ? 14 : 12.5, weight: .bold))
+                .foregroundColor(textColor)
+                .padding(.horizontal, wide ? 12 : 14)
+                .frame(maxWidth: maxWidth, minHeight: 44)
+                .background(fill, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: corner, style: .continuous).stroke(stroke, lineWidth: hollow ? 1.5 : 0)
+                }
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(row.unavailable)
+        .accessibilityLabel("\(row.selectLabel): \(row.title)")
+    }
+}
+
+#endif
