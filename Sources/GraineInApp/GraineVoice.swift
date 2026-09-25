@@ -735,6 +735,11 @@ public final class GraineVoice: NSObject, ObservableObject {
             endBackgroundWork()
             // Back: whatever screen the app is on now is the one the agent must see.
             if connected, let frame = graine.currentContextFrame() { postContext(frame) }
+            // And idle: the warm registration very likely died while the app slept.
+            // Warm now rather than at the tap (see Warm).
+            if Warm.onForeground(ready: ready, startedCall: startedCall, connected: connected, connecting: connecting) {
+                post(GraineProtocol.out(GraineProtocol.Out.warm))
+            }
             return
         }
         guard graine.config.endOnBackground, connected || connecting else { return }

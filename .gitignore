@@ -1,0 +1,4 @@
+# SwiftPM build output and Xcode state: never part of the package.
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/

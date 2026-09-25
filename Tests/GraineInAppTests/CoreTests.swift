@@ -703,3 +703,24 @@ import Testing
         stop()
     }
 }
+
+/*
+ * Back in the foreground, the page is told to warm — when it is ready to hear
+ * it, and never during a call. The same rule as the React Native launcher
+ * (sdk/inapp/test/render/foreground-warm.test.mjs) and Android's WarmTest.
+ */
+@Suite struct WarmTests {
+    @Test func anIdleReadyPageIsWarmed() {
+        #expect(Warm.onForeground(ready: true, startedCall: false, connected: false, connecting: false))
+    }
+
+    @Test func aPageNotYetReadyIsNotToldAnything() {
+        #expect(!Warm.onForeground(ready: false, startedCall: false, connected: false, connecting: false))
+    }
+
+    @Test func aCallStartingOrUnderwayIsNeverRewarmed() {
+        #expect(!Warm.onForeground(ready: true, startedCall: true, connected: false, connecting: false))
+        #expect(!Warm.onForeground(ready: true, startedCall: false, connected: false, connecting: true))
+        #expect(!Warm.onForeground(ready: true, startedCall: false, connected: true, connecting: false))
+    }
+}

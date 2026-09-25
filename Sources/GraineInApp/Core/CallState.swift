@@ -77,6 +77,23 @@ enum CaptionLog {
  * are the sentences that keep that blame where it belongs. Same order as the
  * Android bar; "needs microphone" holds after a refusal until the next start.
  */
+/**
+ * When the app comes back to the foreground, should the page be told to warm?
+ *
+ * The page keeps a SIP registration warm so a tap costs only the INVITE
+ * (~0.2 s). A phone drops that idle socket while the app sleeps, and the page
+ * hears of it only when something wakes it — its own visibilitychange is not
+ * reliably that in a web view a point wide. The app knows it is back, so it
+ * says so: only when the page is ready to hear it, and never during a call,
+ * whose registration a warm would replace. The same rule as the React Native
+ * launcher's AppState listener and the Android SDK's Warm.
+ */
+enum Warm {
+    static func onForeground(ready: Bool, startedCall: Bool, connected: Bool, connecting: Bool) -> Bool {
+        ready && !startedCall && !connected && !connecting
+    }
+}
+
 enum BarStatus {
     struct Input {
         var connectivity: GraineConnectivity
