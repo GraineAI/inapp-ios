@@ -99,18 +99,24 @@ struct GraineAgentBarConfig {
     let autoAttach: Bool
 }
 
-/// What the bar hears that GraineVoice does not publish: the dashboard's appearance, and a refused microphone.
+/// What the bar hears that GraineVoice does not publish: the dashboard's appearance and design, and a refused microphone.
 final class GraineAgentBarModel: ObservableObject, GraineListener {
     @Published var appearance: [String: Any] = [:]
+    /// The brand's design; nil draws from `appearance`, exactly as before designs.
+    @Published var design: GraineDesign?
     @Published var micDenied = false
 
     init(graine: GraineInApp) {
-        if let session = graine.session { appearance = session.appearance }
+        if let session = graine.session {
+            appearance = session.appearance
+            design = session.design
+        }
         graine.addListener(self)
     }
 
     func onSessionReady(_ session: GraineSessionConfig) {
         appearance = session.appearance
+        design = session.design
     }
 
     func onMicDenied(reason: String) {
@@ -176,6 +182,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @State private var dragStart: CGFloat? = nil
     @State private var unitHeight: CGFloat = 0
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Space kept clear at the top — status bar, notch.
     private let topMargin: CGFloat = 48
@@ -245,6 +252,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             caption
             bar(placement: placement, resting: resting)
         }
+        // The design's motion as the call comes and goes (the caption, the mute button); none without a design.
+        .animation(look.animation, value: voice.connected)
         .background(GeometryReader { proxy in
             Color.clear.preference(key: GraineBarHeightKey.self, value: proxy.size.height)
         })
@@ -277,6 +286,40 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         Loaders.resolve(model.appearance["loader"])
     }
 
+    /// The design's tokens for this view's light or dark (SwiftUI re-draws when it switches); nil without a design.
+    private var tokens: GraineThemeTokens? {
+        model.design?.tokens(deviceDark: colorScheme == .dark)
+    }
+
+    /**
+     * Everything the bar is drawn in. With a design, DESIGN.md's voice bar:
+     * `surface` (glass-aware), a `borderWidth` outline in `border`, `radius.xl`,
+     * `elevation.floating`, the status in `textMuted`, the call button in the
+     * accent and the end button in `danger`. Without one, today's bar, unchanged.
+     */
+    private var look: GraineBarLook {
+        guard let t = tokens else {
+            return GraineBarLook(
+                tokens: nil, type: nil, animation: nil,
+                surface: palette.surface, border: palette.border, text: palette.text, sub: palette.sub, chip: palette.chip,
+                accent: accentColor, onAccent: onAccentColor, danger: palette.danger,
+                barRadius: min(26, radius + 8), borderWidth: 1
+            )
+        }
+        let c = t.colors
+        return GraineBarLook(
+            tokens: t,
+            type: GraineType(font: t.font, names: graine.config.fonts),
+            animation: t.motion.animation(reduceMotion: reduceMotion),
+            surface: .graineHex(c.surface), border: .graineHex(c.border), text: .graineHex(c.text),
+            sub: .graineHex(c.textMuted), chip: .graineHex(c.accentSoft),
+            accent: config.accent ?? .graineHex(c.accent),
+            onAccent: config.accent == nil ? .graineHex(c.onAccent, fallback: .white) : .white,
+            danger: .graineHex(c.danger),
+            barRadius: CGFloat(t.shape.radius.xl), borderWidth: CGFloat(t.shape.borderWidth)
+        )
+    }
+
     private var radius: CGFloat {
         CGFloat(dash.radius)
     }
@@ -306,20 +349,66 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     private var caption: some View {
         if voice.connected, let last = voice.captions.last,
            !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Text(last.text)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(palette.text)
-                .lineLimit(3)
-                .opacity(last.live ? 0.85 : 1)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(palette.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(palette.border, lineWidth: 1)
-                }
-                .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+            if let t = look.tokens {
+                designedCaption(last, tokens: t)
+                    .transition(.opacity)
+            } else {
+                legacyCaption(last)
+            }
         }
+    }
+
+    /**
+     * THE LINE AS A CHAT BUBBLE, in the design's bubble style: filled in the
+     * speaker's colours, outlined (the customer's in the accent, the agent's in
+     * the border colour), or minimal. It floats over the app rather than
+     * sitting on the chat page, so where the style has no fill the bar's own
+     * surface stands in for the page — plain text straight on somebody's
+     * screen would be unreadable. Corners `radius.lg`, the one nearest the
+     * speaker `radius.sm`.
+     */
+    private func designedCaption(_ line: GraineCaption, tokens t: GraineThemeTokens) -> some View {
+        let bubble = DesignRules.bubble(t, role: line.role)
+        let lg = CGFloat(t.shape.radius.lg)
+        let sm = CGFloat(t.shape.radius.sm)
+        let agent = line.role == .agent
+        let shape = GraineCornerShape(topLeading: lg, topTrailing: lg, bottomLeading: agent ? sm : lg, bottomTrailing: agent ? lg : sm)
+        let type = GraineType(font: t.font, names: graine.config.fonts)
+        let padding = CGFloat(t.spacing.cardPadding)
+        let glass = bubble.fill == nil ? t.glass : nil
+        return Text(line.text)
+            .font(type(.body))
+            .tracking(type.tracking(.body))
+            .lineSpacing(type.lineSpacing(.body))
+            .foregroundColor(.graineHex(bubble.text))
+            .lineLimit(3)
+            .opacity(line.live ? 0.85 : 1)
+            .padding(.horizontal, padding)
+            .padding(.vertical, padding * 0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GraineSurfaceFill(shape: shape, color: .graineHex(bubble.fill ?? t.colors.surface), glass: glass))
+            .overlay {
+                if let outline = bubble.outline {
+                    shape.stroke(Color.graineHex(outline), lineWidth: CGFloat(t.shape.borderWidth))
+                }
+            }
+            .background(GraineShadowLayer(shape: shape, shadow: t.elevation.floating, outsideOnly: glass != nil))
+    }
+
+    private func legacyCaption(_ last: GraineCaption) -> some View {
+        Text(last.text)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(palette.text)
+            .lineLimit(3)
+            .opacity(last.live ? 0.85 : 1)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(palette.border, lineWidth: 1)
+            }
+            .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
     }
 
     private func bar(placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
@@ -336,11 +425,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             callButton
         }
         .padding(8)
-        .background(palette.surface, in: RoundedRectangle(cornerRadius: min(26, radius + 8), style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: min(26, radius + 8), style: .continuous).stroke(palette.border, lineWidth: 1)
-        }
-        .shadow(color: Color.black.opacity(0.3), radius: 16, x: 0, y: 6)
+        .modifier(GraineBarSurface(look: look))
     }
 
     private var label: some View {
@@ -349,8 +434,10 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             avatar
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundColor(palette.text)
+                    .font(look.type.map { GraineTypeface.font(
+                        family: $0.font.heading, size: $0.font.scale.body, weight: $0.font.weights.title, names: $0.names
+                    ) } ?? .system(size: 15, weight: .bold))
+                    .foregroundColor(look.text)
                     .lineLimit(1)
                 status(input)
             }
@@ -368,7 +455,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 if let image = phase.image {
                     image.resizable().scaledToFill()
                 } else {
-                    palette.chip
+                    look.chip
                 }
             }
             .frame(width: 38, height: 38)
@@ -376,13 +463,33 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             .accessibilityHidden(true)
         } else {
             ZStack {
-                Circle().fill(accentColor)
-                Text("✦")
-                    .font(.system(size: 16))
-                    .foregroundColor(onAccentColor)
+                Circle().fill(look.accent)
+                if let t = look.tokens {
+                    // The design's mark: its launcher glyph, or the name's first letter when the brand chose its logo.
+                    designedMark(t, size: 38)
+                } else {
+                    Text("✦")
+                        .font(.system(size: 16))
+                        .foregroundColor(onAccentColor)
+                }
             }
             .frame(width: 38, height: 38)
             .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private func designedMark(_ t: GraineThemeTokens, size: CGFloat) -> some View {
+        let letter = Text(String(displayName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
+            .font(GraineTypeface.font(family: t.font.heading, size: Double(size) * 0.42, weight: t.font.weights.title, names: graine.config.fonts))
+            .foregroundColor(look.onAccent)
+        if let glyph = t.icons.launcher {
+            GraineGlyphView(
+                glyph: glyph, stroke: t.icons.stroke, color: look.onAccent,
+                size: size * CGFloat(DesignRules.launcherGlyphShare), fallback: letter
+            )
+        } else {
+            letter
         }
     }
 
@@ -392,17 +499,17 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         if let moment = BarStatus.waiting(input) {
             GraineLoaderLabel(
                 look: loader,
-                color: Color.graineHex(loader.color ?? dash.accent),
-                track: palette.border,
-                textColor: palette.sub,
+                color: Color.graineHex(loader.color ?? look.tokens?.colors.accent ?? dash.accent),
+                track: look.border,
+                textColor: look.sub,
                 label: loader.text.forMoment(moment),
                 size: 15,
                 logoUrl: dash.logoUrl
             )
         } else {
             Text(BarStatus.settled(input))
-                .font(.system(size: 12.5))
-                .foregroundColor(palette.sub)
+                .font(look.type.map { $0(.caption) } ?? .system(size: 12.5))
+                .foregroundColor(look.sub)
                 .lineLimit(1)
         }
     }
@@ -410,10 +517,18 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     /// Mute is on the bar because it is the control someone reaches for mid-sentence.
     private var muteButton: some View {
         Button(action: { voice.setMuted(!voice.muted) }) {
-            Text(voice.muted ? "🔇" : "🎙")
-                .font(.system(size: 16))
-                .frame(width: 38, height: 38)
-                .background(voice.muted ? palette.danger : palette.chip, in: Circle())
+            Group {
+                if let t = look.tokens {
+                    Image(systemName: GraineIcon.name(voice.muted ? "mic.slash" : "mic", style: t.icons.style))
+                        .font(.system(size: 15, weight: GraineIcon.weight(stroke: t.icons.stroke)))
+                        .foregroundColor(voice.muted ? .white : look.text)
+                } else {
+                    Text(voice.muted ? "🔇" : "🎙")
+                        .font(.system(size: 16))
+                }
+            }
+            .frame(width: 38, height: 38)
+            .background(voice.muted ? look.danger : look.chip, in: Circle())
         }
         .buttonStyle(PlainButtonStyle())
         .accessibilityLabel(voice.muted ? "Unmute" : "Mute")
@@ -433,11 +548,19 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 voice.start()
             }
         }) {
-            Text(glyph)
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(live ? .white : onAccentColor)
-                .frame(width: 38, height: 38)
-                .background(live ? palette.danger : accentColor, in: Circle())
+            Group {
+                if let t = look.tokens {
+                    let symbol = failed ? "arrow.clockwise" : (live ? "xmark" : GraineIcon.name("phone", style: t.icons.style))
+                    Image(systemName: symbol)
+                        .font(.system(size: 15, weight: GraineIcon.weight(stroke: t.icons.stroke)))
+                } else {
+                    Text(glyph)
+                        .font(.system(size: 16, weight: .bold))
+                }
+            }
+            .foregroundColor(live ? .white : look.onAccent)
+            .frame(width: 38, height: 38)
+            .background(live ? look.danger : look.accent, in: Circle())
         }
         .buttonStyle(PlainButtonStyle())
         .accessibilityLabel(spoken)
@@ -465,6 +588,44 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 dragStart = nil
                 if next != start { config.onPlacementChange?(next) }
             }
+    }
+}
+
+/// Everything the bar is drawn in, from the design or from today's palette.
+struct GraineBarLook {
+    /// Nil: no design — every value below is today's.
+    let tokens: GraineThemeTokens?
+    let type: GraineType?
+    let animation: Animation?
+    let surface: Color
+    let border: Color
+    let text: Color
+    let sub: Color
+    let chip: Color
+    let accent: Color
+    let onAccent: Color
+    let danger: Color
+    let barRadius: CGFloat
+    let borderWidth: CGFloat
+}
+
+/// The bar's own surface: the design's (glass, outline, floating shadow), or today's.
+struct GraineBarSurface: ViewModifier {
+    let look: GraineBarLook
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: look.barRadius, style: .continuous)
+        if let t = look.tokens {
+            content
+                .background(GraineSurfaceFill(shape: shape, color: look.surface, glass: t.glass))
+                .overlay { shape.stroke(look.border, lineWidth: look.borderWidth) }
+                .background(GraineShadowLayer(shape: shape, shadow: t.elevation.floating, outsideOnly: t.glass != nil))
+        } else {
+            content
+                .background(look.surface, in: shape)
+                .overlay { shape.stroke(look.border, lineWidth: 1) }
+                .shadow(color: Color.black.opacity(0.3), radius: 16, x: 0, y: 6)
+        }
     }
 }
 #endif

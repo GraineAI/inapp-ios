@@ -15,6 +15,12 @@ public struct GraineSessionConfig {
     public let declaredActions: Set<String>
     /// The dashboard's friction rules for this agent, as served. Applied under `GraineConfig.friction`.
     public let friction: [String: Any]?
+    /**
+     * The brand's design, resolved on the server into light and dark tokens.
+     * Nil from an older server (or an unreadable one): every surface then draws
+     * from `appearance`, exactly as before designs existed.
+     */
+    public let design: GraineDesign?
 
     public init(
         agentId: String,
@@ -23,7 +29,8 @@ public struct GraineSessionConfig {
         variables: [String: Any] = [:],
         pageVersion: String? = nil,
         declaredActions: Set<String> = [],
-        friction: [String: Any]? = nil
+        friction: [String: Any]? = nil,
+        design: GraineDesign? = nil
     ) {
         self.agentId = agentId
         self.webcallAgentId = webcallAgentId
@@ -32,6 +39,7 @@ public struct GraineSessionConfig {
         self.pageVersion = pageVersion
         self.declaredActions = declaredActions
         self.friction = friction
+        self.design = design
     }
 
     /// The dashboard's Call audio setting.
@@ -60,7 +68,8 @@ public struct GraineSessionConfig {
             variables: data["variables"] as? [String: Any] ?? [:],
             pageVersion: JSON.nonEmpty(data["pageVersion"]),
             declaredActions: declared,
-            friction: data["friction"] as? [String: Any]
+            friction: data["friction"] as? [String: Any],
+            design: GraineDesign.parse(data["design"])
         )
     }
 

@@ -141,7 +141,12 @@ public final class GraineVoice: NSObject, ObservableObject {
             if #available(iOS 16.4, *) { engine.isInspectable = true }
         }
 
-        let hostView = UIView(frame: frame)
+        let hostView = EngineHostView(frame: frame)
+        // It lives in the window for as long as the engine does, so its traits are the window's:
+        // the one place a UIKit app's light/dark switch (or override) can be heard.
+        hostView.onStyleChange = { [weak self] style in
+            self?.graine.deviceAppearanceChanged(dark: GraineInApp.isDark(style))
+        }
         hostView.alpha = 0
         hostView.isUserInteractionEnabled = false
         hostView.accessibilityElementsHidden = true
@@ -862,6 +867,23 @@ public final class GraineVoice: NSObject, ObservableObject {
             if let window = scene.windows.first(where: { $0.isKeyWindow }) { return window }
         }
         return scenes.flatMap { $0.windows }.first
+    }
+}
+
+/// The engine's host view, which also reports the window's light or dark as it changes.
+private final class EngineHostView: UIView {
+    var onStyleChange: ((UIUserInterfaceStyle) -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { onStyleChange?(traitCollection.userInterfaceStyle) }
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+            onStyleChange?(traitCollection.userInterfaceStyle)
+        }
     }
 }
 

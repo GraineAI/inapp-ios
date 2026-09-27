@@ -63,8 +63,12 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
     /// Ids ticked so far, when the component lets them choose several.
     @Published private(set) var ticked: [String] = []
     @Published private(set) var appearance: [String: Any] = [:]
+    /// The brand's design; nil draws from `appearance`, exactly as before designs.
+    @Published private(set) var design: GraineDesign?
     /// The agent's origin, where the dashboard's logo is served.
     private(set) var baseUrl: String?
+    /// `GraineConfig.fonts`: where the design's font families live in this app.
+    private(set) var fontNames: [String: String] = [:]
 
     private weak var graine: GraineInApp?
     private var wasLive = false
@@ -75,8 +79,12 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
 
     init(graine: GraineInApp) {
         self.graine = graine
-        if let session = graine.session { appearance = session.appearance }
+        if let session = graine.session {
+            appearance = session.appearance
+            design = session.design
+        }
         baseUrl = graine.config.baseUrl
+        fontNames = graine.config.fonts
         wasLive = graine.voice.connected
         // SEEDED FROM WHAT THE AGENT ALREADY DREW: a view mounted after the component
         // arrived must not open to nothing while the agent waits for an answer.
@@ -91,6 +99,7 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
 
     func onSessionReady(_ session: GraineSessionConfig) {
         appearance = session.appearance
+        design = session.design
     }
 
     func onWidgetPending(_ hint: [String: Any]) {
@@ -246,19 +255,33 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
     }
 }
 
-/// Everything one component is drawn in: colours, corner, the phone's grammar, and the loader.
+/// Everything one component is drawn in: colours, corner, the phone's grammar, the loader — and the design, when there is one.
 struct GraineWidgetTheme {
+    /// The card: `surfaceRaised` with a design, the palette's surface without.
     let surface: Color
     let border: Color
     let text: Color
     let muted: Color
     let accent: Color
     let onAccent: Color
+    /// Fact chips: `accentSoft` with a design, a tint of the border without.
+    let chip: Color
+    /// A badge's backing: `accentSoft` with a design, a tint of the accent without.
+    let badge: Color
     let radius: CGFloat
     let grammar: WidgetGrammar
     let loader: GraineLoaderLook
     let loaderColor: Color
     let logoUrl: String?
+    /// Nil without a design; then every value below is today's.
+    let tokens: GraineThemeTokens?
+    let type: GraineType?
+    let animation: Animation?
+    let borderWidth: CGFloat
+    let padding: CGFloat
+    let gap: CGFloat
+
+    var designed: Bool { tokens != nil }
 
     /// A title's CSS weight as a SwiftUI weight.
     var titleWeight: Font.Weight {
@@ -268,11 +291,28 @@ struct GraineWidgetTheme {
         default: return .bold
         }
     }
+
+    /// The design's font for a role, or exactly what this piece was drawn in before designs.
+    func font(_ role: GraineTextRole, _ legacy: Font) -> Font {
+        type.map { $0(role) } ?? legacy
+    }
+
+    /// A card's depth with a design: `elevation.card`, or the solid offset in `colors.text`. Nothing without one (see GraineCardDepth).
+    @ViewBuilder
+    func cardShadow<S: Shape>(_ shape: S) -> some View {
+        if let t = tokens {
+            GraineShadowLayer(
+                shape: shape, shadow: t.elevation.card,
+                hardOffset: t.elevation.hardOffset, hardColor: .graineHex(t.colors.text)
+            )
+        }
+    }
 }
 
 struct GraineWidgetHost: View {
     @StateObject private var model: GraineWidgetModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let accentOverride: Color?
 
     init(graine: GraineInApp, accentOverride: Color?) {
@@ -285,13 +325,20 @@ struct GraineWidgetHost: View {
         return VStack(spacing: 8) {
             if let line = model.answered {
                 answeredRow(line, theme: theme)
+                    .transition(.opacity)
             }
             if let widget = model.widget, let content = model.content {
                 GraineWidgetCard(widget: widget, content: content, theme: theme, model: model)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             } else if model.pendingKind != nil {
                 loader(theme: theme)
+                    .transition(.opacity)
             }
         }
+        // The design's motion as a component arrives, loads and leaves; none without a design, or with Reduce Motion.
+        .animation(theme.animation, value: model.widget?.id)
+        .animation(theme.animation, value: model.pendingKind)
+        .animation(theme.animation, value: model.answered?.title)
     }
 
     /**
@@ -302,23 +349,59 @@ struct GraineWidgetHost: View {
     private func makeTheme() -> GraineWidgetTheme {
         let look = model.widget?.look ?? WidgetRules.resolveLook(WidgetStyle(), kind: model.pendingKind)
         let dash = Appearance.resolve(model.appearance, accent: Appearance.defaultAccent, heading: "", origin: model.baseUrl)
-        let accentHex = look.accent ?? dash.accent
-        let palette = Appearance.palette(model.appearance, deviceDark: colorScheme == .dark, accent: accentHex)
-        let grammar = WidgetRules.grammar(for: look)
-        let radius = look.radius ?? (look.platform != .auto ? grammar.radius : dash.radius)
         let loader = Loaders.resolve(model.appearance["loader"])
+        let tokens = model.design?.tokens(deviceDark: colorScheme == .dark)
+        let grammar = DesignRules.widgetGrammar(look, tokens: tokens)
+        let radius = DesignRules.widgetRadius(look, tokens: tokens, appearanceRadius: dash.radius)
+
+        guard let t = tokens else {
+            let accentHex = look.accent ?? dash.accent
+            let palette = Appearance.palette(model.appearance, deviceDark: colorScheme == .dark, accent: accentHex)
+            let accent = accentOverride ?? Color.graineHex(accentHex)
+            let border = Color.graineHex(palette.border)
+            return GraineWidgetTheme(
+                surface: Color.graineHex(palette.surface),
+                border: border,
+                text: Color.graineHex(palette.text),
+                muted: Color.graineHex(palette.muted),
+                accent: accent,
+                onAccent: accentOverride == nil ? Color.graineHex(palette.onAccent, fallback: .white) : .white,
+                chip: border.opacity(0.35),
+                badge: accent.opacity(0.15),
+                radius: CGFloat(radius),
+                grammar: grammar,
+                loader: loader,
+                loaderColor: Color.graineHex(loader.color ?? dash.accent),
+                logoUrl: dash.logoUrl,
+                tokens: nil, type: nil, animation: nil,
+                borderWidth: 1, padding: 14, gap: 10
+            )
+        }
+
+        // DESIGN.md's components: the card on `surfaceRaised`, outlined, `radius.lg`, `cardPadding`, `gap`;
+        // chips on `accentSoft`; the loader in the accent. The component's own accent and radius still win.
+        let c = t.colors
+        let pair = DesignRules.widgetAccent(look, tokens: t, appearanceAccent: dash.accent, appearanceOnAccent: c.onAccent)
         return GraineWidgetTheme(
-            surface: Color.graineHex(palette.surface),
-            border: Color.graineHex(palette.border),
-            text: Color.graineHex(palette.text),
-            muted: Color.graineHex(palette.muted),
-            accent: accentOverride ?? Color.graineHex(accentHex),
-            onAccent: accentOverride == nil ? Color.graineHex(palette.onAccent, fallback: .white) : .white,
+            surface: .graineHex(c.surfaceRaised),
+            border: .graineHex(c.border),
+            text: .graineHex(c.text),
+            muted: .graineHex(c.textMuted),
+            accent: accentOverride ?? .graineHex(pair.accent),
+            onAccent: accentOverride == nil ? .graineHex(pair.onAccent, fallback: .white) : .white,
+            chip: .graineHex(c.accentSoft),
+            badge: .graineHex(c.accentSoft),
             radius: CGFloat(radius),
             grammar: grammar,
             loader: loader,
-            loaderColor: Color.graineHex(loader.color ?? dash.accent),
-            logoUrl: dash.logoUrl
+            loaderColor: .graineHex(loader.color ?? c.accent),
+            logoUrl: dash.logoUrl,
+            tokens: t,
+            type: GraineType(font: t.font, names: model.fontNames),
+            animation: t.motion.animation(reduceMotion: reduceMotion),
+            borderWidth: CGFloat(t.shape.borderWidth),
+            padding: CGFloat(t.spacing.cardPadding),
+            gap: CGFloat(t.spacing.gap)
         )
     }
 
@@ -349,8 +432,9 @@ struct GraineWidgetHost: View {
         .padding(.vertical, 18)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
         }
+        .background(theme.cardShadow(RoundedRectangle(cornerRadius: theme.radius, style: .continuous)))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(words)
     }
@@ -371,17 +455,17 @@ struct GraineWidgetHost: View {
             .frame(width: 26, height: 26)
             VStack(alignment: .leading, spacing: 1) {
                 Text(line.title.isEmpty ? line.detail : line.title)
-                    .font(.system(size: 13.5, weight: .bold))
+                    .font(theme.font(.strong, .system(size: 13.5, weight: .bold)))
                     .foregroundColor(theme.text)
                     .lineLimit(1)
                 if model.awaitingReply {
                     Text(Appearance.loaderText(model.appearance, moment: "thinking"))
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(theme.font(.caption, .system(size: 11.5, weight: .semibold)))
                         .foregroundColor(theme.muted)
                         .lineLimit(1)
                 } else if !line.title.isEmpty && !line.detail.isEmpty {
                     Text(line.detail)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(theme.font(.caption, .system(size: 11.5, weight: .semibold)))
                         .foregroundColor(theme.muted)
                         .lineLimit(1)
                 }
@@ -390,7 +474,7 @@ struct GraineWidgetHost: View {
             if !model.awaitingReply {
                 Button(action: { model.dismiss() }) {
                     Text("Clear")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(theme.font(.captionStrong, .system(size: 12, weight: .bold)))
                         .foregroundColor(theme.muted)
                         .frame(minHeight: 44)
                         .padding(.horizontal, 4)
@@ -403,7 +487,7 @@ struct GraineWidgetHost: View {
         .padding(.vertical, 4)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
         }
     }
 }
@@ -439,8 +523,18 @@ struct GraineWidgetCard: View {
         }
     }
 
+    /// A choice is a primary button: a capsule before designs; with one, `radius.md` (or the chosen platform's pill).
+    @ViewBuilder
+    private var choiceFill: some View {
+        if theme.designed && !theme.grammar.pillButtons {
+            RoundedRectangle(cornerRadius: CGFloat(theme.grammar.buttonRadius), style: .continuous).fill(theme.accent)
+        } else {
+            Capsule().fill(theme.accent)
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.gap) {
             header
             ScrollView(.vertical, showsIndicators: false) {
                 bodyView
@@ -455,12 +549,12 @@ struct GraineWidgetCard: View {
             }
             footer
         }
-        .padding(14)
+        .padding(theme.padding)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
         }
-        .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+        .modifier(GraineCardDepth(theme: theme))
     }
 
     private var header: some View {
@@ -468,12 +562,14 @@ struct GraineWidgetCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 if !content.title.isEmpty {
                     Text(content.title)
-                        .font(.system(size: 15, weight: .heavy))
+                        .font(theme.font(.title, .system(size: 15, weight: .heavy)))
+                        .tracking(theme.type?.tracking(.title) ?? 0)
+                        .lineSpacing(theme.type?.lineSpacing(.title) ?? 0)
                         .foregroundColor(theme.text)
                 }
                 if !content.prompt.isEmpty {
                     Text(content.prompt)
-                        .font(.system(size: 12.5))
+                        .font(theme.font(.caption, .system(size: 12.5)))
                         .foregroundColor(theme.muted)
                 }
             }
@@ -501,7 +597,8 @@ struct GraineWidgetCard: View {
             chipsView(chips)
         case .fallback(let text):
             Text(text)
-                .font(.system(size: 14))
+                .font(theme.font(.body, .system(size: 14)))
+                .lineSpacing(theme.type?.lineSpacing(.body) ?? 0)
                 .foregroundColor(theme.text)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -577,7 +674,7 @@ struct GraineWidgetCard: View {
             model.submit(data: answer.data, summary: answer.summary)
         }) {
             Text(label)
-                .font(.system(size: 14.5, weight: .bold))
+                .font(theme.font(.strong, .system(size: 14.5, weight: .bold)))
                 .foregroundColor(enabled ? theme.onAccent : theme.muted)
                 .frame(maxWidth: .infinity, minHeight: 48)
                 .background(
@@ -600,13 +697,13 @@ struct GraineWidgetCard: View {
                     model.submit(data: answer.data, summary: answer.summary)
                 }) {
                     Text(chips[i].label)
-                        .font(.system(size: 13.5, weight: .bold))
+                        .font(theme.font(.strong, .system(size: 13.5, weight: .bold)))
                         .foregroundColor(theme.onAccent)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 14)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(theme.accent, in: Capsule())
+                        .background(choiceFill)
                 }
                 .buttonStyle(PlainButtonStyle())
                 .accessibilityLabel(chips[i].label)
@@ -618,14 +715,14 @@ struct GraineWidgetCard: View {
         VStack(alignment: .leading, spacing: 12) {
             if let note = note {
                 Text(note)
-                    .font(.system(size: 12.5))
+                    .font(theme.font(.caption, .system(size: 12.5)))
                     .foregroundColor(theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(0..<days.count, id: \.self) { d in
                 VStack(alignment: .leading, spacing: 7) {
                     Text(days[d].label)
-                        .font(.system(size: 13, weight: .bold))
+                        .font(theme.font(.strong, .system(size: 13, weight: .bold)))
                         .foregroundColor(theme.text)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], alignment: .leading, spacing: 8) {
                         ForEach(0..<days[d].slots.count, id: \.self) { s in
@@ -643,11 +740,12 @@ struct GraineWidgetCard: View {
             model.submit(data: answer.data, summary: answer.summary)
         }) {
             Text(slot)
-                .font(.system(size: 13.5, weight: .semibold))
+                .font(theme.font(.strong, .system(size: 13.5, weight: .semibold)))
                 .foregroundColor(theme.text)
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(theme.border, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: theme.designed ? CGFloat(theme.grammar.buttonRadius) : 11, style: .continuous)
+                        .stroke(theme.border, lineWidth: theme.borderWidth)
                 }
         }
         .buttonStyle(PlainButtonStyle())
@@ -663,7 +761,7 @@ struct GraineWidgetCard: View {
         case .sheet:
             Button(action: { model.dismiss() }) {
                 Text("None of these")
-                    .font(.system(size: 13.5, weight: .bold))
+                    .font(theme.font(.strong, .system(size: 13.5, weight: .bold)))
                     .foregroundColor(theme.text)
                     .padding(.horizontal, 16)
                     .frame(minHeight: 44)
@@ -674,10 +772,10 @@ struct GraineWidgetCard: View {
             // The agent is still on the call. Saying so is the difference between a screen it opened and one that replaced it.
             VStack(alignment: .leading, spacing: 2) {
                 Text("STILL LISTENING")
-                    .font(.system(size: 10.5, weight: .heavy))
+                    .font(theme.font(.captionStrong, .system(size: 10.5, weight: .heavy)))
                     .foregroundColor(theme.muted)
                 Text(content.prompt.isEmpty ? "Tap one, or just say it." : content.prompt)
-                    .font(.system(size: 13.5))
+                    .font(theme.font(.body, .system(size: 13.5)))
                     .foregroundColor(theme.text)
                     .lineLimit(1)
             }
@@ -686,7 +784,7 @@ struct GraineWidgetCard: View {
                 Spacer(minLength: 0)
                 Button(action: { model.dismiss() }) {
                     Text("Dismiss")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(theme.font(.captionStrong, .system(size: 12.5, weight: .semibold)))
                         .foregroundColor(theme.muted)
                         .frame(minHeight: 44)
                 }
@@ -838,7 +936,7 @@ struct GraineWidgetRowView: View {
 
     private var outline: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .stroke(picked == true ? theme.accent : theme.border, lineWidth: picked == true ? 2 : 1)
+            .stroke(picked == true ? theme.accent : theme.border, lineWidth: picked == true ? theme.borderWidth + 1 : theme.borderWidth)
     }
 
     private var heroHeight: CGFloat {
@@ -886,11 +984,11 @@ struct GraineWidgetRowView: View {
     private var badge: some View {
         if !row.subtitle.isEmpty {
             Text(row.subtitle.uppercased())
-                .font(.system(size: 10.5, weight: .heavy))
+                .font(theme.font(.captionStrong, .system(size: 10.5, weight: .heavy)))
                 .foregroundColor(theme.accent)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(theme.accent.opacity(0.15), in: Capsule())
+                .background(theme.badge, in: Capsule())
         }
     }
 
@@ -898,13 +996,13 @@ struct GraineWidgetRowView: View {
         let size: CGFloat = big ? 16.5 : (variant == .list ? 13.5 : 14.5)
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(row.title)
-                .font(.system(size: size, weight: theme.titleWeight))
+                .font(theme.font(big ? .title : .strong, .system(size: size, weight: theme.titleWeight)))
                 .foregroundColor(theme.text)
                 .lineLimit(2)
             Spacer(minLength: 0)
             if !row.price.isEmpty {
                 Text(row.price)
-                    .font(.system(size: big ? 17 : size, weight: .heavy))
+                    .font(theme.font(big ? .title : .strong, .system(size: big ? 17 : size, weight: .heavy)))
                     .foregroundColor(theme.text)
             }
         }
@@ -918,19 +1016,19 @@ struct GraineWidgetRowView: View {
             HStack(spacing: 6) {
                 ForEach(0..<shown.count, id: \.self) { i in
                     Text(shown[i])
-                        .font(.system(size: variant == .list ? 10.5 : 11.5, weight: .semibold))
+                        .font(theme.font(.caption, .system(size: variant == .list ? 10.5 : 11.5, weight: .semibold)))
                         .foregroundColor(theme.muted)
                         .lineLimit(1)
                         .padding(.horizontal, variant == .list ? 6 : 8)
                         .padding(.vertical, variant == .list ? 2 : 4)
                         .background(
-                            theme.grammar.chipOutlined ? Color.clear : theme.border.opacity(0.35),
+                            theme.grammar.chipOutlined ? Color.clear : theme.chip,
                             in: RoundedRectangle(cornerRadius: min(12, CGFloat(theme.grammar.chipRadius)), style: .continuous)
                         )
                         .overlay {
                             if theme.grammar.chipOutlined {
                                 RoundedRectangle(cornerRadius: min(12, CGFloat(theme.grammar.chipRadius)), style: .continuous)
-                                    .stroke(theme.border, lineWidth: 1)
+                                    .stroke(theme.border, lineWidth: theme.borderWidth)
                             }
                         }
                 }
@@ -964,13 +1062,14 @@ struct GraineWidgetRowView: View {
         let corner = min(22, CGFloat(wide ? grammar.buttonRadius : (grammar.pillButtons ? 999 : grammar.buttonRadius)))
         return Button(action: onPick) {
             Text(label)
-                .font(.system(size: wide ? 14 : 12.5, weight: .bold))
+                .font(theme.font(wide ? .strong : .captionStrong, .system(size: wide ? 14 : 12.5, weight: .bold)))
                 .foregroundColor(textColor)
                 .padding(.horizontal, wide ? 12 : 14)
                 .frame(maxWidth: maxWidth, minHeight: 44)
                 .background(fill, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: corner, style: .continuous).stroke(stroke, lineWidth: hollow ? 1.5 : 0)
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .stroke(stroke, lineWidth: hollow ? (theme.designed ? max(1, theme.borderWidth) : 1.5) : 0)
                 }
         }
         .buttonStyle(PlainButtonStyle())
@@ -979,4 +1078,16 @@ struct GraineWidgetRowView: View {
     }
 }
 
+/// A card's depth: today's soft shadow without a design; with one, `elevation.card` or the hard offset.
+struct GraineCardDepth: ViewModifier {
+    let theme: GraineWidgetTheme
+
+    func body(content: Content) -> some View {
+        if theme.designed {
+            content.background(theme.cardShadow(RoundedRectangle(cornerRadius: theme.radius, style: .continuous)))
+        } else {
+            content.shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+        }
+    }
+}
 #endif

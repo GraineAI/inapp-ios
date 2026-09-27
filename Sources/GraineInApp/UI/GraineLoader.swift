@@ -46,14 +46,20 @@ public struct GraineLoader: View {
 /// Follows the session, so a loader drawn before the dashboard's appearance arrived takes it on when it does.
 final class GraineAppearanceModel: ObservableObject, GraineListener {
     @Published var appearance: [String: Any] = [:]
+    /// The brand's design; nil draws from `appearance`, as before designs.
+    @Published var design: GraineDesign?
 
     init(graine: GraineInApp) {
-        if let session = graine.session { appearance = session.appearance }
+        if let session = graine.session {
+            appearance = session.appearance
+            design = session.design
+        }
         graine.addListener(self)
     }
 
     func onSessionReady(_ session: GraineSessionConfig) {
         appearance = session.appearance
+        design = session.design
     }
 }
 
@@ -79,11 +85,13 @@ struct GraineLoaderHost: View {
         let look = Loaders.resolve(model.appearance["loader"])
         let dash = Appearance.resolve(model.appearance, accent: Appearance.defaultAccent, heading: "", origin: graine.config.baseUrl)
         let palette = Appearance.palette(model.appearance, deviceDark: colorScheme == .dark, accent: look.color ?? dash.accent)
+        // The design draws the loader in its accent, on its border and muted text; a colour chosen for the loader still wins.
+        let tokens = model.design?.tokens(deviceDark: colorScheme == .dark)
         return GraineLoaderLabel(
             look: look,
-            color: Color.graineHex(look.color ?? dash.accent),
-            track: Color.graineHex(palette.border),
-            textColor: Color.graineHex(palette.muted),
+            color: Color.graineHex(look.color ?? tokens?.colors.accent ?? dash.accent),
+            track: Color.graineHex(tokens?.colors.border ?? palette.border),
+            textColor: Color.graineHex(tokens?.colors.textMuted ?? palette.muted),
             label: label ?? moment.flatMap { look.text.forMoment($0) },
             size: size,
             stacked: stacked,

@@ -65,6 +65,14 @@ public struct GraineConfig {
      * seconds is already long.
      */
     public var friction: GraineFrictionConfig?
+    /**
+     * Where the design's fonts live in this app. The dashboard names a family
+     * ("Inter"); the SDK draws it only if this app bundles it, and in the
+     * system font — silently — if not. Map a family to the name your app
+     * registered it under when the two differ: `["Inter": "InterVariable"]`.
+     * Most apps set nothing.
+     */
+    public var fonts: [String: String]
 
     public init(
         baseUrl: String,
@@ -75,7 +83,8 @@ public struct GraineConfig {
         endOnBackground: Bool = true,
         timing: Timing = Timing(),
         debug: Bool = false,
-        friction: GraineFrictionConfig? = nil
+        friction: GraineFrictionConfig? = nil,
+        fonts: [String: String] = [:]
     ) {
         self.baseUrl = baseUrl
         self.publishableKey = publishableKey
@@ -86,6 +95,7 @@ public struct GraineConfig {
         self.timing = timing
         self.debug = debug
         self.friction = friction
+        self.fonts = fonts
     }
 }
 
@@ -120,6 +130,13 @@ public protocol GraineListener: AnyObject {
      * told; this is for the app — badge a control, count it.
      */
     func onFriction(_ signal: GraineFrictionSignal)
+    /**
+     * The brand's design tokens for the device's current appearance — when the
+     * session arrives, and again when the device switches between light and
+     * dark. For an app that draws its own UI in the brand's design. Never
+     * called when the session carries no design (then `appearance` is the look).
+     */
+    func onTheme(_ tokens: GraineThemeTokens?)
     /// Loud for you, invisible to the customer: a misconfigured agent is never the customer's problem.
     func onError(_ message: String)
 }
@@ -140,6 +157,7 @@ public extension GraineListener {
     func onActionRequested(name: String) {}
     func onActionCompleted(name: String, result: GraineActionResult) {}
     func onFriction(_ signal: GraineFrictionSignal) {}
+    func onTheme(_ tokens: GraineThemeTokens?) {}
     func onError(_ message: String) {}
 }
 
@@ -181,6 +199,7 @@ public final class GraineInApp {
     /// Guards the state below that the app may touch from any thread.
     private let stateLock = NSLock()
     private var sessionValue: GraineSessionConfig?
+    private var themeValue: GraineThemeTokens?
     private var screen: GraineScreen?
     private var screenSinceMs: Int64 = GraineInApp.wallClockMs()
     private var recentEvents: [[String: Any]] = []
@@ -199,6 +218,8 @@ public final class GraineInApp {
     private(set) var foreground = true
     private var foregroundWatchers: [UUID: (Bool) -> Void] = [:]
     private var lifecycleTokens: [NSObjectProtocol] = []
+    /// The device's light or dark, as the window last reported it; nil until it has. Main thread.
+    private var deviceDark: Bool?
     /**
      * Idle friction, the React Native SDK's `stalled_on_step`: the customer
      * has been on one screen, with a field outstanding, for the configured time
@@ -227,6 +248,24 @@ public final class GraineInApp {
         stateLock.lock()
         defer { stateLock.unlock() }
         return sessionValue
+    }
+
+    /**
+     * The brand's design, from the session: light and dark tokens and which to
+     * use. Nil before the session loads, and from a server that sends none —
+     * every surface then draws from `appearance`, as it always has.
+     */
+    public var design: GraineDesign? { session?.design }
+
+    /**
+     * The design's tokens to draw right now: the brand's fixed scheme, else the
+     * device's current appearance, picked again whenever the device switches.
+     * Nil without a design. `onTheme` reports each change.
+     */
+    public var theme: GraineThemeTokens? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return themeValue
     }
 
     #if os(iOS)
@@ -644,7 +683,8 @@ public final class GraineInApp {
         }
     }
 
-    private func finishSession(_ result: Result<GraineSessionConfig, Error>) {
+    /// Main thread. Internal so tests can deliver a session without the network.
+    func finishSession(_ result: Result<GraineSessionConfig, Error>) {
         var loaded: GraineSessionConfig?
         switch result {
         case .success(let session):
@@ -653,6 +693,8 @@ public final class GraineInApp {
             sessionValue = session
             stateLock.unlock()
             variables.setDashboardDefaults(session.variables.mapValues { Optional($0) })
+            // The design first, so `theme` is already right when onSessionReady is heard.
+            repickTheme()
             // The dashboard's friction rules, under the app's own.
             friction.configure(Friction.resolve([session.friction, appFriction?.json]))
             armStall()
@@ -698,6 +740,29 @@ public final class GraineInApp {
         task.resume()
     }
 
+    // MARK: - The design, light or dark
+
+    /**
+     * The device switched appearance (or reported it for the first time). The
+     * engine's host view reports it from inside the window, where the app's own
+     * override applies; the lifecycle reads it again on each return. Main thread.
+     */
+    func deviceAppearanceChanged(dark: Bool?) {
+        if dark == deviceDark { return }
+        deviceDark = dark
+        repickTheme()
+    }
+
+    /// Main thread. Tells listeners only when the tokens actually changed.
+    private func repickTheme() {
+        let next = session?.design?.tokens(deviceDark: deviceDark)
+        stateLock.lock()
+        let changed = next != themeValue
+        themeValue = next
+        stateLock.unlock()
+        if changed, next != nil { notifyListeners { $0.onTheme(next) } }
+    }
+
     // MARK: - The app's lifecycle
 
     /// Main thread. `true` on return to the foreground, `false` on entering the background.
@@ -725,13 +790,31 @@ public final class GraineInApp {
      */
     private func watchLifecycle() {
         foreground = UIApplication.shared.applicationState != .background
+        deviceAppearanceChanged(dark: GraineInApp.windowIsDark())
         let center = NotificationCenter.default
         lifecycleTokens.append(center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.setForeground(false) })
         lifecycleTokens.append(center.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.setForeground(true) })
+        ) { [weak self] _ in
+            self?.setForeground(true)
+            // The customer may have switched to dark in Control Centre while the app was away.
+            self?.deviceAppearanceChanged(dark: GraineInApp.windowIsDark())
+        })
+    }
+
+    /// The key window's light or dark; nil when it has not said.
+    static func windowIsDark() -> Bool? {
+        isDark(GraineVoice.keyWindow()?.traitCollection.userInterfaceStyle ?? UITraitCollection.current.userInterfaceStyle)
+    }
+
+    static func isDark(_ style: UIUserInterfaceStyle) -> Bool? {
+        switch style {
+        case .dark: return true
+        case .light: return false
+        default: return nil
+        }
     }
     #endif
 
