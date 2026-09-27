@@ -75,6 +75,39 @@ import Testing
         }
     }
 
+    /**
+     * Window chrome, case by case: the contract carries `chrome` in every
+     * scheme of every case, and each is read exactly. Desktop Buddy opens in
+     * windows; a design whose brand turned the knob on does too; the rest are
+     * plain surfaces.
+     */
+    @Test func everyCaseReadsItsChromeExactly() throws {
+        var windows = 0
+        var plain = 0
+        for c in try cases() {
+            let raw = try #require(c["design"] as? [String: Any])
+            let design = try #require(GraineDesign.parse(raw))
+            for (scheme, tokens) in [("light", design.light), ("dark", design.dark)] {
+                let json = try #require(raw[scheme] as? [String: Any])
+                let want = try #require(json["chrome"] as? String, "\(scheme) of \(String(describing: c["config"])) has no chrome")
+                #expect(tokens.chrome.rawValue == want, "\(scheme) of \(String(describing: c["config"]))")
+                if tokens.chrome == .window { windows += 1 } else { plain += 1 }
+            }
+        }
+        #expect(windows > 0, "the contract has designs that open in windows")
+        #expect(plain > 0, "and designs that do not")
+
+        let all = try cases()
+        let buddy = try #require(all.first { ($0["config"] as? [String: Any])?["preset"] as? String == "desktop-buddy" })
+        let buddyDesign = try #require(GraineDesign.parse(buddy["design"]))
+        #expect(buddyDesign.light.chrome == .window)
+        #expect(buddyDesign.dark.chrome == .window)
+        let knob = try #require(all.first { ($0["config"] as? [String: Any])?["chrome"] as? String == "window" })
+        let knobDesign = try #require(GraineDesign.parse(knob["design"]))
+        #expect(knobDesign.light.chrome == .window)
+        #expect(knobDesign.dark.chrome == .window)
+    }
+
     @Test func everyLauncherGlyphInTheContractIsDrawable() throws {
         for c in try cases() {
             let design = try #require(GraineDesign.parse(c["design"]))
@@ -163,6 +196,8 @@ import Testing
             #expect(t.glass == nil)
         }
         #expect(t.bubbles.rawValue == json["bubbles"] as? String)
+        // Absent from an older server's tokens: a plain surface.
+        #expect(t.chrome.rawValue == (json["chrome"] as? String ?? "none"))
     }
 
     private func expectShadow(_ shadow: GraineThemeTokens.Shadow?, _ json: Any?) {
@@ -264,6 +299,7 @@ import Testing
             t["icons"] = ["launcher": NSNull(), "stroke": 99]
             t["glass"] = [String: Any]()
             t["bubbles"] = "bubbly"
+            t["chrome"] = "skeuomorphic"
         }
         let t = try #require(GraineDesign.parse(bent)).light
         let d = DesignTokens.Fallback.self
@@ -288,11 +324,12 @@ import Testing
         #expect(t.icons.stroke == 4)
         #expect(t.glass == d.glass)
         #expect(t.bubbles == .filled)
+        #expect(t.chrome == .none)                                    // a frame this build does not know: plain
     }
 
     @Test func absentGroupsAreClassicsOwn() throws {
         let bare = edit(try classic(), scheme: "light") { t in
-            for key in ["font", "shape", "spacing", "elevation", "motion", "icons", "glass", "bubbles", "preset", "scheme"] {
+            for key in ["font", "shape", "spacing", "elevation", "motion", "icons", "glass", "bubbles", "chrome", "preset", "scheme"] {
                 t.removeValue(forKey: key)
             }
         }
@@ -306,6 +343,31 @@ import Testing
         #expect(t.icons.launcher == d.glyph)
         #expect(t.glass == nil)
         #expect(t.bubbles == .filled)
+        #expect(t.chrome == .none)
+    }
+
+    /**
+     * An older server sends no `chrome`: every surface stays plain. Read as
+     * the other token words are — trimmed, any case — and anything that is
+     * not a known word is a plain surface too, never an error.
+     */
+    @Test func tokensWithoutChromeReadAsNone() throws {
+        var older = try classic()
+        for scheme in ["light", "dark"] {
+            older = edit(older, scheme: scheme) { $0.removeValue(forKey: "chrome") }
+        }
+        let parsed = try #require(GraineDesign.parse(older))
+        #expect(parsed.light.chrome == .none)
+        #expect(parsed.dark.chrome == .none)
+
+        let words: [(Any, GraineDesignChrome)] = [
+            ("window", .window), (" Window ", .window), ("WINDOW", .window), ("none", .none),
+            ("skeuomorphic", .none), ("", .none), (NSNull(), .none), (42, .none), (true, .none), (["window"], .none),
+        ]
+        for (value, want) in words {
+            let bent = edit(try classic(), scheme: "light") { $0["chrome"] = value }
+            #expect(try #require(GraineDesign.parse(bent)).light.chrome == want, "\(value)")
+        }
     }
 
     /// What a missing token falls back to is Graine Classic's own value, so a partial set degrades toward "as it was".
@@ -321,6 +383,7 @@ import Testing
         #expect(classic.elevation.floating == d.floating)
         #expect(classic.motion == d.motion)
         #expect(classic.icons.launcher == d.glyph)
+        #expect(classic.chrome == .none)
     }
 
     @Test func anUnknownSchemeIsAuto() throws {

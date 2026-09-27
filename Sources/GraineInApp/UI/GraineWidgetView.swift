@@ -20,7 +20,9 @@ import SwiftUI
  * (gallery, cards, list, spotlight, compact) picks the row shape; `select:
  * "many"` lets the customer tick several and answer once ("Let's compare the
  * Creta and the Seltos."). While the agent says a component is coming, it
- * draws the loader with the dashboard's words for that moment.
+ * draws the loader with the dashboard's words for that moment. A design with
+ * window chrome opens every card as a desktop window, its title moved into the
+ * title bar; the loader and the answered row stay as they are.
  *
  * Mount it once, above your bar, and it appears when there is something to
  * show. It is presented inline — never as a full-screen cover, which on iOS
@@ -257,8 +259,14 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
 
 /// Everything one component is drawn in: colours, corner, the phone's grammar, the loader — and the design, when there is one.
 struct GraineWidgetTheme {
-    /// The card: `surfaceRaised` with a design, the palette's surface without.
+    /// The loader card and the answered row: `surfaceRaised` with a design, the palette's surface without.
     let surface: Color
+    /**
+     * The component card's body: the same as `surface` — except when the card
+     * opens as a window (window chrome), where it is the design's
+     * `colors.surface`, so the `surfaceRaised` title bar over it reads as one.
+     */
+    let cardFill: Color
     let border: Color
     let text: Color
     let muted: Color
@@ -364,6 +372,7 @@ struct GraineWidgetHost: View {
             let border = Color.graineHex(palette.border)
             return GraineWidgetTheme(
                 surface: Color.graineHex(palette.surface),
+                cardFill: Color.graineHex(palette.surface),
                 border: border,
                 text: Color.graineHex(palette.text),
                 muted: Color.graineHex(palette.muted),
@@ -381,12 +390,14 @@ struct GraineWidgetHost: View {
             )
         }
 
-        // DESIGN.md's components: the card on `surfaceRaised`, outlined, `radius.lg`, `cardPadding`, `gap`;
-        // chips on `accentSoft`; the loader in the accent. The component's own accent and radius still win.
+        // DESIGN.md's components: the card on `surfaceRaised` (on `surface` when it opens as a window), outlined,
+        // `radius.lg`, `cardPadding`, `gap`; chips on `accentSoft`; the loader in the accent. The component's own
+        // accent and radius still win. (A host overrides only the accent here: no card surface to keep.)
         let c = t.colors
         let pair = DesignRules.widgetAccent(look, tokens: t, appearanceAccent: dash.accent, appearanceOnAccent: c.onAccent)
         return GraineWidgetTheme(
             surface: .graineHex(c.surfaceRaised),
+            cardFill: .graineHex(WindowChrome.componentBodyFill(t)),
             border: .graineHex(c.border),
             text: .graineHex(c.text),
             muted: .graineHex(c.textMuted),
@@ -553,18 +564,26 @@ struct GraineWidgetCard: View {
             footer
         }
         .padding(theme.padding)
-        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .modifier(GraineWindowed(bar: windowBar, spoken: true))
+        .background(theme.cardFill, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
         }
         .modifier(GraineCardDepth(theme: theme))
     }
 
+    /// Window chrome (DESIGN.md): the card opens as a window titled with its own title, in its own corners. Nil without a design, or with a plain one.
+    private var windowBar: WindowChrome.TitleBar? {
+        guard let t = theme.tokens else { return nil }
+        return WindowChrome.titleBar(t, for: .component(title: content.title, radius: Double(theme.radius)))
+    }
+
+    /// The card's own title — unless it opens as a window, whose bar carries it instead.
     private var header: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                if !content.title.isEmpty {
-                    Text(content.title)
+                if let title = WindowChrome.componentBodyTitle(theme.tokens, title: content.title) {
+                    Text(title)
                         .font(theme.font(.title, .system(size: 15, weight: .heavy)))
                         .tracking(theme.type?.tracking(.title) ?? 0)
                         .lineSpacing(theme.type?.lineSpacing(.title) ?? 0)

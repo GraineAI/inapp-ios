@@ -51,6 +51,19 @@ public enum GraineBubbleStyle: String, Sendable {
     case minimal
 }
 
+/**
+ * How a surface that holds content is framed (contract/DESIGN.md "Window
+ * chrome"). A value this build does not know, or none at all (an older
+ * server), is `none`.
+ */
+public enum GraineDesignChrome: String, Sendable {
+    /// A plain surface.
+    case none
+    /// The chat window, the caption card and every component card open as desktop windows:
+    /// a title bar with traffic lights and a monospaced, lower-case title.
+    case window
+}
+
 /// One scheme's tokens: flat numbers and #RRGGBB strings. Lengths are points.
 public struct GraineThemeTokens: Equatable, Sendable {
 
@@ -208,6 +221,8 @@ public struct GraineThemeTokens: Equatable, Sendable {
     public let icons: Icons
     public let glass: Glass?
     public let bubbles: GraineBubbleStyle
+    /// `window`: the chat window, the caption card and every component card open as desktop windows.
+    public let chrome: GraineDesignChrome
 
     /**
      * The launcher glyph as an image, for a host that draws its own launcher
@@ -459,7 +474,9 @@ enum DesignTokens {
             motion: motion(t["motion"]),
             icons: icons(t["icons"]),
             glass: glass(t["glass"]),
-            bubbles: GraineBubbleStyle(rawValue: word(t["bubbles"])) ?? .filled
+            bubbles: GraineBubbleStyle(rawValue: word(t["bubbles"])) ?? .filled,
+            // Absent (an older server) or a kind of frame this build does not know: a plain surface.
+            chrome: GraineDesignChrome(rawValue: word(t["chrome"])) ?? .none
         )
     }
 

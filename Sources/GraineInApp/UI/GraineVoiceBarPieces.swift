@@ -99,7 +99,8 @@ struct GraineVoiceMeter: View {
  * the body family at `weights.strong`, two lines at most, faint while it is
  * still arriving — and "YOU" over the customer's own lines, because captions
  * carry both sides and an unlabelled "Take me to privacy" reads as the agent
- * talking to itself.
+ * talking to itself. With window chrome it opens as a window: a 24-point
+ * title bar, smaller lights, titled "captions".
  */
 struct GraineCaptionCard: View {
     let tokens: GraineThemeTokens
@@ -130,6 +131,7 @@ struct GraineCaptionCard: View {
         .padding(.horizontal, CGFloat(VoiceBar.Caption.paddingH))
         .padding(.vertical, CGFloat(VoiceBar.Caption.paddingV))
         .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(GraineWindowed(bar: WindowChrome.titleBar(t, for: .caption), spoken: false))
         .modifier(GraineDesignSurface(tokens: t, fill: t.colors.surface, frosted: true, radius: t.shape.radius.lg, shadow: t.elevation.card))
         .accessibilityElement(children: .combine)
     }
@@ -152,6 +154,11 @@ private struct GraineChatHeightKey: PreferenceKey {
  * "Online" after a `success` dot, and a chevron back to the call. Messages in
  * the design's bubble style, 84% wide at most. A 58-point composer: a
  * 40-point field on `surfaceRaised` and a round send button in `accent`.
+ *
+ * With window chrome a 32-point title bar replaces the header: the traffic
+ * lights, the heading lower case in SF Mono after the `success` dot while
+ * online (the heading alone while not — no "Connecting…"), and the same
+ * chevron at the bar's right end, 12 in — no launcher mark.
  *
  * This package carries calls only — there is no text channel for it to send
  * on — so GraineAgentBar mounts the window only once it can (see
@@ -181,7 +188,11 @@ struct GraineChatWindow: View {
     var body: some View {
         let r = tokens.shape.radius
         VStack(spacing: 0) {
-            header
+            if let bar = WindowChrome.titleBar(tokens, for: .chat(heading: heading, online: online)) {
+                GraineWindowTitleBar(bar: bar) { windowCollapse(bar) }
+            } else {
+                header
+            }
             messages
             composer
         }
@@ -220,7 +231,7 @@ struct GraineChatWindow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: onCollapse) {
-                GraineIconView(name: .chevron, style: t.icons.style, stroke: t.icons.stroke, color: .graineHex(c.textMuted), flipped: true)
+                chevron
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
@@ -233,6 +244,26 @@ struct GraineChatWindow: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.graineHex(c.border)).frame(height: CGFloat(t.shape.borderWidth))
         }
+    }
+
+    /// Back to the call (or closed, for a chat-only agent): the chevron, turned to point down.
+    private var chevron: some View {
+        GraineIconView(
+            name: .chevron, style: tokens.icons.style, stroke: tokens.icons.stroke,
+            color: .graineHex(tokens.colors.textMuted), flipped: true
+        )
+    }
+
+    /// The chevron at the title bar's right end, as far in from it as the lights are from the left.
+    private func windowCollapse(_ bar: WindowChrome.TitleBar) -> some View {
+        Button(action: onCollapse) {
+            chevron
+                .padding(.horizontal, CGFloat(bar.lightsInset))
+                .frame(height: CGFloat(bar.height))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel("Collapse")
     }
 
     /// The launcher's own shape and fill at 30 points: its glyph at 14, else the logo, else the first letter.

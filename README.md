@@ -13,7 +13,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.3.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.4.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -131,6 +131,9 @@ RootView()
 element: the design's colours, corners, outline, shadow or hard offset, glass,
 icon style (the SDK's own icons, drawn from their paths) and motion — the
 status meter moves at the design's pace, and arrivals rise with its easing.
+A design with window chrome (Desktop Buddy's) opens the caption and every
+component as a desktop window: a title bar with traffic lights and a
+monospaced title.
 The design's typeface is loaded by the SDK itself: it fetches the faces the
 design uses from Graine, keeps them on disk, registers them and redraws, and
 until they arrive (or if they never do) draws the system font at the same

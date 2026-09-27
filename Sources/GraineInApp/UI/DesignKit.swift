@@ -4,7 +4,8 @@ import UIKit
 
 /*
  * THE DESIGN TOKENS, AS SWIFTUI DRAWS THEM — the pieces every surface shares:
- * type, motion, surfaces (glass included), shadows, the launcher glyph.
+ * type, motion, surfaces (glass included), shadows, window chrome, the
+ * launcher glyph.
  *
  * Nothing here decides what a design looks like; contract/DESIGN.md does, and
  * the tokens carry it. This only turns a token into the SwiftUI value that
@@ -328,6 +329,110 @@ struct GraineCornerShape: Shape {
                  startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
         p.closeSubpath()
         return p
+    }
+}
+
+// MARK: - Window chrome
+
+/**
+ * A WINDOW'S TITLE BAR (DESIGN.md "Window chrome"), drawn from
+ * Core/WindowChrome.swift: `surfaceRaised` across the top of the surface with
+ * a `borderWidth` outline in `border` below it, the three traffic lights at
+ * the left, and the title centred on one line in the platform's monospace (SF
+ * Mono) at caption size, lower case, in `textMuted`. The surface clips it to
+ * its own top corners. `trailing` sits at the bar's right end: the chat
+ * window's collapse chevron.
+ */
+struct GraineWindowTitleBar<Trailing: View>: View {
+    let bar: WindowChrome.TitleBar
+    let trailing: Trailing
+
+    init(bar: WindowChrome.TitleBar, @ViewBuilder trailing: () -> Trailing) {
+        self.bar = bar
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        ZStack {
+            title
+                .padding(.horizontal, CGFloat(bar.titleInset))
+            lights
+                .padding(.leading, CGFloat(bar.lightsInset))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            trailing
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: CGFloat(bar.height))
+        .background(Color.graineHex(bar.fill))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.graineHex(bar.outline)).frame(height: CGFloat(bar.outlineWidth))
+        }
+    }
+
+    private var lights: some View {
+        HStack(spacing: CGFloat(bar.dotGap)) {
+            ForEach(Array(bar.lights.enumerated()), id: \.offset) { _, hex in
+                Circle().fill(Color.graineHex(hex)).frame(width: CGFloat(bar.dot), height: CGFloat(bar.dot))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// The online dot (the chat window's, while online), then the title. No title: the lights alone.
+    private var title: some View {
+        HStack(spacing: CGFloat(WindowChrome.onlineGap)) {
+            if let online = bar.onlineDot {
+                Circle()
+                    .fill(Color.graineHex(online))
+                    .frame(width: CGFloat(WindowChrome.onlineDotSize), height: CGFloat(WindowChrome.onlineDotSize))
+                    .accessibilityHidden(true)
+            }
+            if !bar.title.isEmpty {
+                Text(bar.title)
+                    .font(.system(size: CGFloat(bar.titleSize), weight: .regular, design: .monospaced))
+                    .foregroundColor(.graineHex(bar.titleColor))
+                    .lineLimit(1)
+                    // The window's name — and, where the dot shows, what the dot says.
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityValue(bar.onlineDot == nil ? "" : "Online")
+            }
+        }
+    }
+}
+
+extension GraineWindowTitleBar where Trailing == EmptyView {
+    init(bar: WindowChrome.TitleBar) {
+        self.init(bar: bar) { EmptyView() }
+    }
+}
+
+/**
+ * A SURFACE OPENING AS A WINDOW: the title bar above the content, the two
+ * clipped together to the surface's own corners — so the bar takes the top
+ * ones, and the outline and shadow the surface applies afterwards go round
+ * both. Nil: the surface exactly as it was.
+ */
+struct GraineWindowed: ViewModifier {
+    let bar: WindowChrome.TitleBar?
+    /**
+     * Whether VoiceOver reads the bar: yes where its title is the surface's
+     * name (a component card's own title lives only there), no where it only
+     * decorates (the caption card's "captions").
+     */
+    let spoken: Bool
+
+    func body(content: Content) -> some View {
+        if let bar = bar {
+            VStack(spacing: 0) {
+                GraineWindowTitleBar(bar: bar)
+                    .accessibilityHidden(!spoken)
+                content
+            }
+            .clipShape(RoundedRectangle(cornerRadius: CGFloat(bar.cornerRadius), style: .continuous))
+        } else {
+            content
+        }
     }
 }
 
