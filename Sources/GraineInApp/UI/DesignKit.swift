@@ -28,15 +28,17 @@ enum GraineTextRole {
     case captionStrong
 }
 
-/// The design's type, with the app's own font names: what a role is drawn in.
+/// The design's type, with the app's own font names and the faces the SDK loaded: what a role is drawn in.
 struct GraineType {
     let font: GraineThemeTokens.Typography
     /// `GraineConfig.fonts`: design family → the name this app registered it under.
     let names: [String: String]
+    /// GraineFontStore.faces: `family|weight` → the PostScript name of a face the SDK registered.
+    var faces: [String: String] = [:]
 
     func callAsFunction(_ role: GraineTextRole) -> Font {
         let spec = self.spec(role)
-        return GraineTypeface.font(family: spec.family, size: spec.size, weight: spec.weight, names: names)
+        return GraineTypeface.font(family: spec.family, size: spec.size, weight: spec.weight, names: names, faces: faces)
     }
 
     func size(_ role: GraineTextRole) -> CGFloat { CGFloat(spec(role).size) }
@@ -53,6 +55,29 @@ struct GraineType {
         return CGFloat(max(0, multiple - 1) * spec(role).size)
     }
 
+    // The voice bar sets its own sizes (a 14-point name, a 13-point caption), so it asks by size and weight.
+
+    /// The body family at `size` points and `weight`.
+    func body(_ size: Double, _ weight: Int) -> Font {
+        GraineTypeface.font(family: font.body, size: size, weight: weight, names: names, faces: faces)
+    }
+
+    /// The heading family at `size` points and `weight`.
+    func heading(_ size: Double, _ weight: Int) -> Font {
+        GraineTypeface.font(family: font.heading, size: size, weight: weight, names: names, faces: faces)
+    }
+
+    /// `letterSpacing.body` (em) as points at `size`.
+    func bodyTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.body * size) }
+
+    /// `letterSpacing.title` (em) as points at `size`.
+    func titleTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.title * size) }
+
+    /// The gap that makes a body-family line `lineHeight` points tall, in the face it actually resolves to.
+    func bodyLineSpacing(size: Double, weight: Int, lineHeight: Double) -> CGFloat {
+        GraineTypeface.lineSpacing(family: font.body, size: size, weight: weight, lineHeight: lineHeight, names: names, faces: faces)
+    }
+
     private func spec(_ role: GraineTextRole) -> (family: String, size: Double, weight: Int) {
         switch role {
         case .title: return (font.heading, font.scale.title, font.weights.title)
@@ -65,11 +90,17 @@ struct GraineType {
 }
 
 /**
- * A FAMILY THE APP BUNDLES, OR THE SYSTEM FONT — SILENTLY. The dashboard offers
- * families from Google Fonts; a phone has only what the app shipped. So a
- * family is looked up (through `GraineConfig.fonts` first, then by its own
- * name), and anything that does not resolve is the system font: never a crash,
- * never a warning the customer could see. Each name is looked up once, since
+ * THE DESIGN'S TYPEFACE, WHEREVER IT CAME FROM — OR THE SYSTEM FONT, SILENTLY.
+ *
+ * In order: a family the app maps in `GraineConfig.fonts` (the app's own file
+ * wins, per DESIGN.md); the face the SDK downloaded and registered
+ * (GraineFontStore); a family the app bundles under its own name; and
+ * otherwise the system font at the weight — until a face arrives, and for
+ * good if it never does. Never a crash, never a warning the customer could see.
+ *
+ * A face the SDK loaded IS its weight: it is asked for by its PostScript
+ * name, with no weight trait on top — a bold face asked to be bold again is
+ * drawn heavier than the brand chose. App font names are looked up once, since
  * views ask on every frame — so a font the app registers after the SDK first
  * drew with it is not picked up until the next launch.
  */
@@ -78,18 +109,42 @@ enum GraineTypeface {
     private static var resolved: [String: String] = [:]
     private static var missing: Set<String> = []
 
-    static func font(family: String, size: Double, weight: Int, names: [String: String]) -> Font {
-        if let custom = uiFont(family: family, size: size, weight: weight, names: names) {
+    static func font(family: String, size: Double, weight: Int, names: [String: String], faces: [String: String] = [:]) -> Font {
+        if let custom = uiFont(family: family, size: size, weight: weight, names: names, faces: faces) {
             return Font(custom as CTFont)
         }
         return .system(size: CGFloat(size), weight: swiftUIWeight(weight))
     }
 
-    /// The app's font for this family and weight, or nil for the system font.
-    static func uiFont(family: String, size: Double, weight: Int, names: [String: String]) -> UIFont? {
+    /// The design's font for this family and weight, or nil for the system font.
+    static func uiFont(family: String, size: Double, weight: Int, names: [String: String], faces: [String: String] = [:]) -> UIFont? {
         guard !DesignRules.isSystemFamily(family) else { return nil }
         let wanted = family.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = names[wanted] ?? names[wanted.lowercased()] ?? wanted
+        if let mapped = names[wanted] ?? names[wanted.lowercased()] {
+            return appFont(mapped, size: size, weight: weight)
+        }
+        if let key = GraineFonts.loadedKey(family: wanted, weight: weight), let postScript = faces[key],
+           let loaded = UIFont(name: postScript, size: CGFloat(size)) {
+            return loaded
+        }
+        return appFont(wanted, size: size, weight: weight)
+    }
+
+    /**
+     * Extra space between lines so a line is `lineHeight` points tall in the
+     * font this family and weight actually resolve to — the tokens and the
+     * Garage give line heights in points, SwiftUI only takes the gap.
+     */
+    static func lineSpacing(
+        family: String, size: Double, weight: Int, lineHeight: Double, names: [String: String], faces: [String: String]
+    ) -> CGFloat {
+        let font = uiFont(family: family, size: size, weight: weight, names: names, faces: faces)
+            ?? UIFont.systemFont(ofSize: CGFloat(size), weight: uiWeight(weight))
+        return max(0, CGFloat(lineHeight) - font.lineHeight)
+    }
+
+    /// A family (or face) the app installed, at the nearest weight it has; nil when it has none.
+    private static func appFont(_ name: String, size: Double, weight: Int) -> UIFont? {
         guard let familyName = familyName(for: name) else { return nil }
         // The nearest face the family has for this weight; the family's regular if it has no weights.
         let descriptor = UIFontDescriptor(fontAttributes: [
@@ -145,13 +200,19 @@ extension GraineThemeTokens.Motion {
         let ms = effectiveDurationMs(reduceMotion: reduceMotion || UIAccessibility.isReduceMotionEnabled)
         guard ms > 0 else { return nil }
         let seconds = ms / 1000
+        // The Garage's curves (its easingCss), so a surface arrives on the phone as it did in the preview.
         switch easing {
         case "linear": return .linear(duration: seconds)
-        case "emphasized": return .timingCurve(0.2, 0, 0, 1, duration: seconds)
+        case "emphasized": return .timingCurve(0.05, 0.7, 0.1, 1, duration: seconds)
         // iOS 17's spring(duration:bounce:), in the terms iOS 15 has: damping is 1 − bounce.
         case "spring": return .spring(response: seconds, dampingFraction: max(0.3, 1 - bounce), blendDuration: 0)
-        default: return .easeInOut(duration: seconds)
+        default: return .timingCurve(0.2, 0, 0, 1, duration: seconds)
         }
+    }
+
+    /// Reduce Motion as the SDK reads it: SwiftUI's environment, and UIKit's setting, which a host cannot override.
+    static func reduced(_ environment: Bool) -> Bool {
+        environment || UIAccessibility.isReduceMotionEnabled
     }
 }
 
@@ -159,17 +220,29 @@ extension GraineThemeTokens.Motion {
 
 /**
  * A surface: `surface` itself, or with `glass`, the surface at its opacity
- * over the system's blur — the app's own screen showing through, softened.
+ * over the system's blur (a material — UIVisualEffectView underneath) — the
+ * app's own screen showing through, softened. iOS offers no public blur
+ * radius, so `glass.blur` only decides whether there is one. The blur is
+ * tinted for the design's own light or dark, not the device's: a dark design
+ * on a light phone frosts dark.
  */
 struct GraineSurfaceFill<S: Shape>: View {
     let shape: S
     let color: Color
     let glass: GraineThemeTokens.Glass?
+    /// The design's scheme ("light"/"dark"); nil follows the device.
+    var scheme: String? = nil
 
     var body: some View {
         if let glass = glass {
             ZStack {
-                if glass.blur > 0 { shape.fill(.ultraThinMaterial) }
+                if glass.blur > 0 {
+                    if let scheme = scheme {
+                        shape.fill(.ultraThinMaterial).environment(\.colorScheme, scheme == "dark" ? .dark : .light)
+                    } else {
+                        shape.fill(.ultraThinMaterial)
+                    }
+                }
                 shape.fill(color.opacity(glass.surfaceOpacity))
             }
         } else {
@@ -323,23 +396,51 @@ struct GraineGlyphView<Fallback: View>: View {
 // MARK: - The SDK's own icons
 
 /**
- * The bar's controls as SF Symbols in the design's icon treatment: outline
- * symbols for "outline" and "sharp", their filled variants for "filled" and
- * "duotone", the weight following `icons.stroke`.
+ * One of the SDK's own icons, drawn from its path data in the design's icon
+ * style (DESIGN.md "Icons", Core/Icons.swift): the body filled or not, then
+ * stroked; the lines only ever stroked; round ends, or square ones with
+ * mitred corners for `sharp`. Widths are in the icon's 24-unit scale, as the
+ * Garage's SVG draws them. The same path data on every platform — not an SF
+ * Symbol that is only nearly the same drawing.
  */
-enum GraineIcon {
-    static func name(_ base: String, style: String) -> String {
-        style == "filled" || style == "duotone" ? base + ".fill" : base
+struct GraineIconView: View {
+    let name: GraineIconName
+    let style: String
+    let stroke: Double
+    let color: Color
+    var size: CGFloat = CGFloat(VoiceBar.icon)
+    /// Turned half a circle — the chat header's chevron, which points up as drawn.
+    var flipped = false
+
+    var body: some View {
+        let icon = GraineIcons.paths(name)
+        let paint = GraineIcons.paint(style: style, stroke: stroke)
+        let unit = size / 24
+        ZStack {
+            if let data = icon.body, let segments = GlyphPath.cached(data) {
+                let shape = GraineGlyphShape(segments: segments)
+                if paint.bodyFill > 0 {
+                    shape.fill(color.opacity(paint.bodyFill))
+                }
+                shape.stroke(color, style: line(paint, width: paint.bodyStroke * Double(unit)))
+            }
+            if let data = icon.lines, let segments = GlyphPath.cached(data) {
+                GraineGlyphShape(segments: segments).stroke(color, style: line(paint, width: paint.linesStroke * Double(unit)))
+            }
+        }
+        .frame(width: size, height: size)
+        .rotationEffect(flipped ? .degrees(180) : .zero)
+        .accessibilityHidden(true)
     }
 
-    static func weight(stroke: Double) -> Font.Weight {
-        switch stroke {
-        case ..<1.25: return .light
-        case ..<1.75: return .regular
-        case ..<2.25: return .medium
-        case ..<2.75: return .semibold
-        default: return .bold
-        }
+    /// SVG's own miter limit (4), so a `sharp` corner is cut where the Garage's is.
+    private func line(_ paint: GraineIcons.Paint, width: Double) -> StrokeStyle {
+        StrokeStyle(
+            lineWidth: CGFloat(width),
+            lineCap: paint.square ? .square : .round,
+            lineJoin: paint.square ? .miter : .round,
+            miterLimit: 4
+        )
     }
 }
 #endif

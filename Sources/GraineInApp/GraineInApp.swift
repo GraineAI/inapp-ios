@@ -66,11 +66,11 @@ public struct GraineConfig {
      */
     public var friction: GraineFrictionConfig?
     /**
-     * Where the design's fonts live in this app. The dashboard names a family
-     * ("Inter"); the SDK draws it only if this app bundles it, and in the
-     * system font — silently — if not. Map a family to the name your app
-     * registered it under when the two differ: `["Inter": "InterVariable"]`.
-     * Most apps set nothing.
+     * Fonts this app ships itself. The SDK fetches the design's typeface from
+     * Graine and draws it with no help from the app; a family named here, or
+     * one the app bundles under the family's own name, wins instead and is
+     * never downloaded. Map a family to the name your app registered it under
+     * when the two differ: `["Inter": "InterVariable"]`. Most apps set nothing.
      */
     public var fonts: [String: String]
 
@@ -273,11 +273,15 @@ public final class GraineInApp {
     public private(set) lazy var voice: GraineVoice = GraineVoice(graine: self)
     #endif
 
+    /// The design's typefaces, fetched and registered by the SDK; every surface draws from it.
+    let fonts: GraineFontStore
+
     /// Internal so tests can build an instance without the process-wide one.
-    init(config: GraineConfig) {
+    init(config: GraineConfig, fonts: GraineFontStore = GraineFontStore()) {
         self.config = config
         self.variables = VariableStore(buildTime: config.variables.mapValues { Optional($0) })
         self.appFriction = config.friction
+        self.fonts = fonts
     }
 
     deinit {
@@ -695,6 +699,10 @@ public final class GraineInApp {
             variables.setDashboardDefaults(session.variables.mapValues { Optional($0) })
             // The design first, so `theme` is already right when onSessionReady is heard.
             repickTheme()
+            #if os(iOS)
+            // Its typefaces start on their way now, so the bar is set in them by the time anyone taps it.
+            if let design = session.design { loadFonts(for: design) }
+            #endif
             // The dashboard's friction rules, under the app's own.
             friction.configure(Friction.resolve([session.friction, appFriction?.json]))
             armStall()
@@ -802,6 +810,22 @@ public final class GraineInApp {
             // The customer may have switched to dark in Control Centre while the app was away.
             self?.deviceAppearanceChanged(dark: GraineInApp.windowIsDark())
         })
+    }
+
+    /**
+     * Fetch the faces the design draws with, in either scheme — except a
+     * family the app ships itself, which wins over the download (DESIGN.md
+     * "Fonts"): one it maps in `GraineConfig.fonts`, or one it bundles under
+     * the family's own name. Asked before anything of ours is registered, so
+     * a family found installed here is the app's.
+     */
+    private func loadFonts(for design: GraineDesign) {
+        let own = config.fonts.keys
+        let wanted = GraineFonts.faces(for: design, origin: config.baseUrl).filter { face in
+            !own.contains { $0.caseInsensitiveCompare(face.family) == .orderedSame }
+                && UIFont.fontNames(forFamilyName: face.family).isEmpty
+        }
+        fonts.load(wanted)
     }
 
     /// The key window's light or dark; nil when it has not said.

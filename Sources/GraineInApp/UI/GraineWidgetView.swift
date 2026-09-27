@@ -311,12 +311,15 @@ struct GraineWidgetTheme {
 
 struct GraineWidgetHost: View {
     @StateObject private var model: GraineWidgetModel
+    /// Observed so a card on screen is redrawn in the design's typeface when it lands.
+    @ObservedObject private var fonts: GraineFontStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let accentOverride: Color?
 
     init(graine: GraineInApp, accentOverride: Color?) {
         _model = StateObject(wrappedValue: GraineWidgetModel(graine: graine))
+        _fonts = ObservedObject(wrappedValue: graine.fonts)
         self.accentOverride = accentOverride
     }
 
@@ -397,7 +400,7 @@ struct GraineWidgetHost: View {
             loaderColor: .graineHex(loader.color ?? c.accent),
             logoUrl: dash.logoUrl,
             tokens: t,
-            type: GraineType(font: t.font, names: model.fontNames),
+            type: GraineType(font: t.font, names: model.fontNames, faces: fonts.faces),
             animation: t.motion.animation(reduceMotion: reduceMotion),
             borderWidth: CGFloat(t.shape.borderWidth),
             padding: CGFloat(t.spacing.cardPadding),

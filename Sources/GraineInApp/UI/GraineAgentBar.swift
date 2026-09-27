@@ -4,7 +4,8 @@ import SwiftUI
 import UIKit
 
 /**
- * THE DEFAULT AGENT BAR — a working UI, not a requirement.
+ * THE AGENT BAR — what the customer sees during a call, drawn by the SDK in
+ * the brand's design. The app passes nothing about how it looks.
  *
  * A bar rather than a sheet: the agent can see the screen and tell the
  * customer what to tap, and a sheet would cover the very thing it is talking
@@ -15,9 +16,18 @@ import UIKit
  *     ContentView()
  *         .overlay(GraineAgentBar(onPlacementChange: { UserDefaults.standard.set($0, forKey: "graineBar") }))
  *
- * It says the network's name out loud — "weak connection", "no connection",
- * "reconnecting…" — because a customer whose agent goes quiet on a train reads
- * "listening" and concludes the agent is broken.
+ * With a design (every current session carries one) it is contract/DESIGN.md's
+ * voice bar, element by element as the dashboard's Garage draws it: the
+ * accent avatar with the launcher glyph, the name and a status line whose
+ * meter moves at the design's pace, the microphone and the hang-up — in the
+ * design's colours, corners, outline, shadow or hard offset, glass, icon style
+ * and typeface, which the SDK loads itself. The line being said rides above it
+ * as a caption card. Without a design (an older server) it is the bar it
+ * always was.
+ *
+ * It says the network's name out loud — "Weak connection", "No connection",
+ * "Reconnecting…" — because a customer whose agent goes quiet on a train reads
+ * "Listening" and concludes the agent is broken.
  *
  * The customer can DRAG it up or down (a bar fixed at one height covers
  * somebody's primary button on some screen of some app); a tap still does what
@@ -26,8 +36,9 @@ import UIKit
  * in it with `.accessory { … }` — a text field there is never under the keys.
  *
  * It fills the area it is given and draws only the bar; touches elsewhere pass
- * through. Every piece is public state on GraineVoice (an ObservableObject); an
- * app with its own design system should draw its own from that and ignore this.
+ * through. Every piece is public state on GraineVoice (an ObservableObject,
+ * `phase` included); an app with its own design system can draw its own from
+ * that instead.
  */
 public struct GraineAgentBar<Accessory: View>: View {
     let config: GraineAgentBarConfig
@@ -40,7 +51,7 @@ public struct GraineAgentBar<Accessory: View>: View {
 
     public var body: some View {
         if let graine = config.graine ?? GraineInApp.current {
-            GraineAgentBarContainer(graine: graine, voice: graine.voice, config: config, accessory: accessoryView)
+            GraineAgentBarContainer(graine: graine, voice: graine.voice, fonts: graine.fonts, config: config, accessory: accessoryView)
         }
     }
 
@@ -54,13 +65,15 @@ public extension GraineAgentBar where Accessory == EmptyView {
     /**
      * - Parameters:
      *   - graine: the instance; defaults to the one `GraineInApp.configure` made. Nothing draws before that.
-     *   - name: the name beside the status. Defaults to the dashboard's heading when it is short, else "Assistant".
-     *   - accent: overrides the dashboard's accent.
+     *   - name: the name beside the status, and what VoiceOver calls the agent. Defaults to the dashboard's heading.
+     *   - accent: overrides the design's and the dashboard's accent.
      *   - bottomInset: points above the bottom of the area — lift it clear of your tab bar.
      *   - draggable: let the customer move it up and down.
      *   - initialOffset: a position the app persisted, in points above the anchor.
      *   - onPlacementChange: the customer let go somewhere new. Persist it here.
      *   - autoAttach: mount the engine in the key window when the bar appears, if nothing has yet.
+     *   - onClose: the customer hung up, or closed the bar with no call to end — after the goodbye has had a
+     *     moment to leave the speaker. Take the bar away here if your app shows it on demand.
      */
     init(
         graine: GraineInApp? = nil,
@@ -70,7 +83,8 @@ public extension GraineAgentBar where Accessory == EmptyView {
         draggable: Bool = true,
         initialOffset: CGFloat = 0,
         onPlacementChange: ((CGFloat) -> Void)? = nil,
-        autoAttach: Bool = true
+        autoAttach: Bool = true,
+        onClose: (() -> Void)? = nil
     ) {
         self.init(
             config: GraineAgentBarConfig(
@@ -81,7 +95,8 @@ public extension GraineAgentBar where Accessory == EmptyView {
                 draggable: draggable,
                 initialOffset: initialOffset,
                 onPlacementChange: onPlacementChange,
-                autoAttach: autoAttach
+                autoAttach: autoAttach,
+                onClose: onClose
             ),
             accessory: EmptyView()
         )
@@ -97,14 +112,22 @@ struct GraineAgentBarConfig {
     let initialOffset: CGFloat
     let onPlacementChange: ((CGFloat) -> Void)?
     let autoAttach: Bool
+    var onClose: (() -> Void)? = nil
 }
 
-/// What the bar hears that GraineVoice does not publish: the dashboard's appearance and design, and a refused microphone.
+/// What the bar hears that GraineVoice does not publish: the dashboard's appearance and design, a refused microphone, a misconfiguration.
 final class GraineAgentBarModel: ObservableObject, GraineListener {
     @Published var appearance: [String: Any] = [:]
     /// The brand's design; nil draws from `appearance`, exactly as before designs.
     @Published var design: GraineDesign?
     @Published var micDenied = false
+    /**
+     * A misconfiguration the call reported (its transport `not_configured`):
+     * it never recovers on its own, so the bar says "Unavailable" rather than
+     * pretend. Cleared when a new attempt begins.
+     */
+    @Published var fault: String?
+    private var active = false
 
     init(graine: GraineInApp) {
         if let session = graine.session {
@@ -123,8 +146,16 @@ final class GraineAgentBarModel: ObservableObject, GraineListener {
         micDenied = true
     }
 
+    func onTransport(_ transport: GraineTransport, requested: GraineTransport, reason: String?, message: String?) {
+        if reason == "not_configured", let message = message { fault = message }
+    }
+
     func onCallState(connected: Bool, connecting: Bool) {
         if connected || connecting { micDenied = false }
+        // A new attempt: the last one's fault is not news. Not on connect — the fault arrives during it.
+        let now = connected || connecting
+        if now && !active { fault = nil }
+        active = now
     }
 }
 
@@ -173,6 +204,8 @@ private struct GraineBarHeightKey: PreferenceKey {
 struct GraineAgentBarContainer<Accessory: View>: View {
     let graine: GraineInApp
     @ObservedObject var voice: GraineVoice
+    /// Observed so a typeface that lands mid-call redraws the bar in place.
+    @ObservedObject var fonts: GraineFontStore
     let config: GraineAgentBarConfig
     let accessory: Accessory
 
@@ -181,15 +214,26 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @State private var offset: CGFloat
     @State private var dragStart: CGFloat? = nil
     @State private var unitHeight: CGFloat = 0
+    /// The customer switched to the chat — only possible where the switch shows (see `canSwitch`).
+    @State private var inChat = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Space kept clear at the top — status bar, notch.
     private let topMargin: CGFloat = 48
 
-    init(graine: GraineInApp, voice: GraineVoice, config: GraineAgentBarConfig, accessory: Accessory) {
+    /**
+     * Whether this package can carry the agent's chat. It cannot: the engine
+     * it hosts carries calls, and there is no text channel to send a message
+     * on. So the switch to the chat never shows here, whatever the dashboard
+     * offers — see AgentSurfaces.
+     */
+    static var carriesChat: Bool { false }
+
+    init(graine: GraineInApp, voice: GraineVoice, fonts: GraineFontStore, config: GraineAgentBarConfig, accessory: Accessory) {
         self.graine = graine
         _voice = ObservedObject(wrappedValue: voice)
+        _fonts = ObservedObject(wrappedValue: fonts)
         self.config = config
         self.accessory = accessory
         _model = StateObject(wrappedValue: GraineAgentBarModel(graine: graine))
@@ -245,15 +289,27 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         return KeyboardMath.liftFor(keyboardHeight: overlap, windowShrink: 0)
     }
 
-    /// The bar, its caption and any accessory: one unit, measured and moved together.
+    /// The bar and what rides above it: one unit, measured and moved together.
+    @ViewBuilder
     private func unit(placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
-        VStack(spacing: 8) {
-            accessory
-            caption
-            bar(placement: placement, resting: resting)
+        Group {
+            if let t = tokens {
+                VStack(spacing: CGFloat(VoiceBar.stackGap)) {
+                    accessory
+                    above(t)
+                    designedBar(t, placement: placement, resting: resting)
+                }
+                // Arrivals rise in the design's motion; nothing moves with none, or under Reduce Motion.
+                .animation(t.motion.animation(reduceMotion: reduceMotion), value: captionLine != nil)
+                .animation(t.motion.animation(reduceMotion: reduceMotion), value: showsChat)
+            } else {
+                VStack(spacing: 8) {
+                    accessory
+                    legacyCaption
+                    legacyBar(placement: placement, resting: resting)
+                }
+            }
         }
-        // The design's motion as the call comes and goes (the caption, the mute button); none without a design.
-        .animation(look.animation, value: voice.connected)
         .background(GeometryReader { proxy in
             Color.clear.preference(key: GraineBarHeightKey.self, value: proxy.size.height)
         })
@@ -262,28 +318,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         }
     }
 
-    // MARK: - Pieces
+    // MARK: - What the bar is drawn from
 
     /// The dashboard's appearance, translated: accent, heading, logo, radius. The dashboard decides; props override.
     private var dash: GraineNativeAppearance {
         Appearance.resolve(model.appearance, accent: Appearance.defaultAccent, heading: "Assistant", origin: graine.config.baseUrl)
-    }
-
-    /// The dashboard's light/dark/auto; auto follows the device.
-    private var palette: GraineBarPalette {
-        Appearance.prefersDark(model.appearance, deviceIsDark: colorScheme == .dark) ? .dark : .light
-    }
-
-    private var accentColor: Color {
-        config.accent ?? Color.graineHex(dash.accent)
-    }
-
-    private var onAccentColor: Color {
-        config.accent == nil ? Color.graineHex(Appearance.onAccent(dash.accent), fallback: .white) : .white
-    }
-
-    private var loader: GraineLoaderLook {
-        Loaders.resolve(model.appearance["loader"])
     }
 
     /// The design's tokens for this view's light or dark (SwiftUI re-draws when it switches); nil without a design.
@@ -291,37 +330,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         model.design?.tokens(deviceDark: colorScheme == .dark)
     }
 
-    /**
-     * Everything the bar is drawn in. With a design, DESIGN.md's voice bar:
-     * `surface` (glass-aware), a `borderWidth` outline in `border`, `radius.xl`,
-     * `elevation.floating`, the status in `textMuted`, the call button in the
-     * accent and the end button in `danger`. Without one, today's bar, unchanged.
-     */
-    private var look: GraineBarLook {
-        guard let t = tokens else {
-            return GraineBarLook(
-                tokens: nil, type: nil, animation: nil,
-                surface: palette.surface, border: palette.border, text: palette.text, sub: palette.sub, chip: palette.chip,
-                accent: accentColor, onAccent: onAccentColor, danger: palette.danger,
-                barRadius: min(26, radius + 8), borderWidth: 1
-            )
-        }
-        let c = t.colors
-        return GraineBarLook(
-            tokens: t,
-            type: GraineType(font: t.font, names: graine.config.fonts),
-            animation: t.motion.animation(reduceMotion: reduceMotion),
-            surface: .graineHex(c.surface), border: .graineHex(c.border), text: .graineHex(c.text),
-            sub: .graineHex(c.textMuted), chip: .graineHex(c.accentSoft),
-            accent: config.accent ?? .graineHex(c.accent),
-            onAccent: config.accent == nil ? .graineHex(c.onAccent, fallback: .white) : .white,
-            danger: .graineHex(c.danger),
-            barRadius: CGFloat(t.shape.radius.xl), borderWidth: CGFloat(t.shape.borderWidth)
-        )
-    }
-
-    private var radius: CGFloat {
-        CGFloat(dash.radius)
+    private var loader: GraineLoaderLook {
+        Loaders.resolve(model.appearance["loader"])
     }
 
     /// The name beside the status: the prop, else the dashboard's heading, else "Assistant".
@@ -329,7 +339,260 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         config.name ?? dash.heading
     }
 
-    private var statusInput: BarStatus.Input {
+    private var initial: String {
+        let first = String(displayName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased()
+        return first.isEmpty ? "A" : first
+    }
+
+    /// The line being said now, on a call. The whole transcript would push the bar off the screen.
+    private var captionLine: GraineCaption? {
+        guard voice.connected, let last = voice.captions.last,
+              !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return last
+    }
+
+    private var canSwitch: Bool {
+        AgentSurfaces.canSwitch(appearance: model.appearance, carriesChat: Self.carriesChat)
+    }
+
+    private var showsChat: Bool { inChat && canSwitch }
+
+    // MARK: - The designed bar (DESIGN.md "Voice bar")
+
+    private func type(_ t: GraineThemeTokens) -> GraineType {
+        GraineType(font: t.font, names: graine.config.fonts, faces: fonts.faces)
+    }
+
+    private func accent(_ t: GraineThemeTokens) -> Color {
+        config.accent ?? .graineHex(t.colors.accent)
+    }
+
+    private func onAccent(_ t: GraineThemeTokens) -> Color {
+        config.accent == nil ? .graineHex(t.colors.onAccent, fallback: .white) : .white
+    }
+
+    private var statusInput: VoiceBarStatus.Input {
+        VoiceBarStatus.Input(
+            error: model.fault != nil,
+            inChat: showsChat,
+            chatOnline: false,
+            online: voice.online,
+            reconnecting: voice.reconnecting,
+            connectivity: voice.connectivity,
+            micDenied: model.micDenied,
+            ready: voice.ready,
+            connecting: voice.connecting,
+            muted: voice.muted,
+            connected: voice.connected,
+            phase: voice.phase,
+            quality: voice.quality
+        )
+    }
+
+    /// Above the bar: the chat window while the customer is in the chat, else the caption on a call.
+    @ViewBuilder
+    private func above(_ t: GraineThemeTokens) -> some View {
+        if showsChat {
+            GraineChatWindow(
+                tokens: t, type: type(t), accent: accent(t), onAccent: onAccent(t),
+                heading: displayName, logoUrl: dash.logoUrl,
+                turns: [], online: false, lifted: keyboard.frame != nil,
+                onSend: { _ in }, onCollapse: { inChat = false }
+            )
+            .transition(.graineRise)
+        } else if let line = captionLine {
+            GraineCaptionCard(tokens: t, type: type(t), accent: accent(t), line: line)
+                .transition(.graineRise)
+        }
+    }
+
+    /**
+     * 60 high, 9 in from each side, items 10 apart: the avatar, the name and
+     * status taking the rest, the switch (only where the chat is offered and
+     * carried), the microphone (calls only), the hang-up. On `surface`,
+     * outlined, `radius.xl`, with the floating shadow or the hard offset.
+     */
+    private func designedBar(_ t: GraineThemeTokens, placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
+        let status = VoiceBarStatus.line(statusInput)
+        let spoken = status.waiting.flatMap { loader.text.forMoment($0) } ?? status.text
+        return HStack(spacing: CGFloat(VoiceBar.spacing)) {
+            HStack(spacing: CGFloat(VoiceBar.spacing)) {
+                designedAvatar(t)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(displayName)
+                        .font(type(t).body(VoiceBar.nameSize, t.font.weights.strong))
+                        .tracking(type(t).bodyTracking(VoiceBar.nameSize))
+                        .foregroundColor(.graineHex(t.colors.text))
+                        .lineLimit(1)
+                    designedStatus(t, status)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if voice.connectivity == .failed { voice.retry() }
+            }
+            .gesture(drag(placement: placement, resting: resting), including: config.draggable ? .all : .subviews)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(displayName), \(spoken)")
+            if canSwitch {
+                switchButton(t)
+            }
+            if !showsChat {
+                micButton(t)
+            }
+            endButton(t)
+        }
+        .padding(.horizontal, CGFloat(VoiceBar.sidePadding))
+        .frame(height: CGFloat(VoiceBar.height))
+        .modifier(GraineDesignSurface(tokens: t, fill: t.colors.surface, frosted: true, radius: t.shape.radius.xl, shadow: t.elevation.floating))
+    }
+
+    /// 38 round in `accent`: the launcher glyph in `onAccent` at 18; with none, the brand's logo filling the circle; else the first letter.
+    private func designedAvatar(_ t: GraineThemeTokens) -> some View {
+        let ink = onAccent(t)
+        let letter = Text(initial)
+            .font(.system(size: CGFloat(VoiceBar.initial), weight: .bold))
+            .foregroundColor(ink)
+        return ZStack {
+            Circle().fill(accent(t))
+            if let glyph = t.icons.launcher {
+                GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: ink, size: CGFloat(VoiceBar.icon), fallback: letter)
+            } else if let url = dash.logoUrl.flatMap({ URL(string: $0) }) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image): image.resizable().scaledToFill()
+                    case .failure: letter
+                    default: Color.clear
+                    }
+                }
+            } else {
+                letter
+            }
+        }
+        .frame(width: CGFloat(VoiceBar.button), height: CGFloat(VoiceBar.button))
+        .clipShape(Circle())
+        .accessibilityHidden(true)
+    }
+
+    /// The status: caption size, the body family at `weights.body`, `textMuted` — after the meter while it listens or speaks; the loader while it waits.
+    @ViewBuilder
+    private func designedStatus(_ t: GraineThemeTokens, _ status: VoiceBarStatus.Line) -> some View {
+        if let moment = status.waiting {
+            GraineLoaderLabel(
+                look: loader,
+                color: Color.graineHex(loader.color ?? t.colors.accent),
+                track: .graineHex(t.colors.border),
+                textColor: .graineHex(t.colors.textMuted),
+                label: loader.text.forMoment(moment) ?? status.text,
+                size: 14,
+                logoUrl: dash.logoUrl
+            )
+        } else {
+            HStack(spacing: CGFloat(VoiceBar.meterGap)) {
+                if status.meter {
+                    GraineVoiceMeter(
+                        color: accent(t),
+                        durationMs: t.motion.effectiveDurationMs(reduceMotion: GraineThemeTokens.Motion.reduced(reduceMotion))
+                    )
+                }
+                Text(status.text)
+                    .font(type(t).body(t.font.scale.caption, t.font.weights.body))
+                    .tracking(type(t).bodyTracking(t.font.scale.caption))
+                    .foregroundColor(.graineHex(t.colors.textMuted))
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func roundButton<Icon: View>(fill: Color, _ icon: Icon) -> some View {
+        icon
+            .frame(width: CGFloat(VoiceBar.button), height: CGFloat(VoiceBar.button))
+            .background(Circle().fill(fill))
+            .contentShape(Circle())
+    }
+
+    /// To the other surface: `accentSoft`, the chat icon on a call and the call icon in the chat, in `text`.
+    private func switchButton(_ t: GraineThemeTokens) -> some View {
+        Button(action: { inChat.toggle() }) {
+            roundButton(fill: .graineHex(t.colors.accentSoft), GraineIconView(
+                name: showsChat ? .call : .chat, style: t.icons.style, stroke: t.icons.stroke, color: .graineHex(t.colors.text)
+            ))
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel(showsChat ? "Switch to a call" : "Switch to chat")
+    }
+
+    /**
+     * Off a call the microphone STARTS one; on a call it is the mute (then
+     * `danger` with the struck-through microphone in white); after a failed
+     * load it retries. Faint and inert while it cannot act.
+     */
+    private func micButton(_ t: GraineThemeTokens) -> some View {
+        let failed = voice.connectivity == .failed
+        let blocked = model.fault != nil || model.micDenied || voice.connecting || (!voice.ready && !failed)
+        let label = !voice.connected ? "Start talking to \(displayName)" : (voice.muted ? "Unmute" : "Mute")
+        return Button(action: {
+            if failed {
+                voice.retry()
+            } else if voice.connected {
+                voice.setMuted(!voice.muted)
+            } else {
+                if !voice.isAttached { voice.attach() }
+                voice.start()
+            }
+        }) {
+            roundButton(fill: voice.muted ? .graineHex(t.colors.danger) : accent(t), GraineIconView(
+                name: voice.muted ? .micOff : .mic, style: t.icons.style, stroke: t.icons.stroke,
+                color: voice.muted ? .white : onAccent(t)
+            ))
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(blocked)
+        .opacity(blocked ? VoiceBar.blockedOpacity : 1)
+        .accessibilityLabel(label)
+    }
+
+    /// Loud only while there is a call to end (`danger`, the hang-up in white); otherwise it closes (`accentSoft`, a cross in `textMuted`).
+    private func endButton(_ t: GraineThemeTokens) -> some View {
+        let onCall = voice.connected
+        return Button(action: endOrClose) {
+            roundButton(fill: onCall ? .graineHex(t.colors.danger) : .graineHex(t.colors.accentSoft), GraineIconView(
+                name: onCall ? .end : .close, style: t.icons.style, stroke: t.icons.stroke,
+                color: onCall ? .white : .graineHex(t.colors.textMuted)
+            ))
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel(onCall ? "End call" : "Close")
+    }
+
+    /// Hang up (or cancel a call still being placed), then let the app take the bar away once the goodbye has left the speaker.
+    private func endOrClose() {
+        voice.end()
+        guard let close = config.onClose else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { close() }
+    }
+
+    // MARK: - The bar without a design — as it always was
+
+    /// The dashboard's light/dark/auto; auto follows the device.
+    private var palette: GraineBarPalette {
+        Appearance.prefersDark(model.appearance, deviceIsDark: colorScheme == .dark) ? .dark : .light
+    }
+
+    private var legacyAccent: Color {
+        config.accent ?? Color.graineHex(dash.accent)
+    }
+
+    private var legacyOnAccent: Color {
+        config.accent == nil ? Color.graineHex(Appearance.onAccent(dash.accent), fallback: .white) : .white
+    }
+
+    private var legacyRadius: CGFloat {
+        CGFloat(dash.radius)
+    }
+
+    private var legacyStatusInput: BarStatus.Input {
         BarStatus.Input(
             connectivity: voice.connectivity,
             online: voice.online,
@@ -344,102 +607,55 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         )
     }
 
-    /// Only the line being said now, above the bar. The whole transcript would push the bar off the screen.
     @ViewBuilder
-    private var caption: some View {
-        if voice.connected, let last = voice.captions.last,
-           !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let t = look.tokens {
-                designedCaption(last, tokens: t)
-                    .transition(.opacity)
-            } else {
-                legacyCaption(last)
-            }
+    private var legacyCaption: some View {
+        if let last = captionLine {
+            Text(last.text)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(palette.text)
+                .lineLimit(3)
+                .opacity(last.live ? 0.85 : 1)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: legacyRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: legacyRadius, style: .continuous).stroke(palette.border, lineWidth: 1)
+                }
+                .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
         }
     }
 
-    /**
-     * THE LINE AS A CHAT BUBBLE, in the design's bubble style: filled in the
-     * speaker's colours, outlined (the customer's in the accent, the agent's in
-     * the border colour), or minimal. It floats over the app rather than
-     * sitting on the chat page, so where the style has no fill the bar's own
-     * surface stands in for the page — plain text straight on somebody's
-     * screen would be unreadable. Corners `radius.lg`, the one nearest the
-     * speaker `radius.sm`.
-     */
-    private func designedCaption(_ line: GraineCaption, tokens t: GraineThemeTokens) -> some View {
-        let bubble = DesignRules.bubble(t, role: line.role)
-        let lg = CGFloat(t.shape.radius.lg)
-        let sm = CGFloat(t.shape.radius.sm)
-        let agent = line.role == .agent
-        let shape = GraineCornerShape(topLeading: lg, topTrailing: lg, bottomLeading: agent ? sm : lg, bottomTrailing: agent ? lg : sm)
-        let type = GraineType(font: t.font, names: graine.config.fonts)
-        let padding = CGFloat(t.spacing.cardPadding)
-        let glass = bubble.fill == nil ? t.glass : nil
-        return Text(line.text)
-            .font(type(.body))
-            .tracking(type.tracking(.body))
-            .lineSpacing(type.lineSpacing(.body))
-            .foregroundColor(.graineHex(bubble.text))
-            .lineLimit(3)
-            .opacity(line.live ? 0.85 : 1)
-            .padding(.horizontal, padding)
-            .padding(.vertical, padding * 0.75)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(GraineSurfaceFill(shape: shape, color: .graineHex(bubble.fill ?? t.colors.surface), glass: glass))
-            .overlay {
-                if let outline = bubble.outline {
-                    shape.stroke(Color.graineHex(outline), lineWidth: CGFloat(t.shape.borderWidth))
-                }
-            }
-            .background(GraineShadowLayer(shape: shape, shadow: t.elevation.floating, outsideOnly: glass != nil))
-    }
-
-    private func legacyCaption(_ last: GraineCaption) -> some View {
-        Text(last.text)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(palette.text)
-            .lineLimit(3)
-            .opacity(last.live ? 0.85 : 1)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(palette.border, lineWidth: 1)
-            }
-            .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
-    }
-
-    private func bar(placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
-        HStack(spacing: 8) {
-            label
+    private func legacyBar(placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: min(26, legacyRadius + 8), style: .continuous)
+        return HStack(spacing: 8) {
+            legacyLabel
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if voice.connectivity == .failed { voice.retry() }
                 }
                 .gesture(drag(placement: placement, resting: resting), including: config.draggable ? .all : .subviews)
             if voice.connected {
-                muteButton
+                legacyMuteButton
             }
-            callButton
+            legacyCallButton
         }
         .padding(8)
-        .modifier(GraineBarSurface(look: look))
+        .background(palette.surface, in: shape)
+        .overlay { shape.stroke(palette.border, lineWidth: 1) }
+        .shadow(color: Color.black.opacity(0.3), radius: 16, x: 0, y: 6)
     }
 
-    private var label: some View {
-        let input = statusInput
+    private var legacyLabel: some View {
+        let input = legacyStatusInput
         return HStack(spacing: 11) {
-            avatar
+            legacyAvatar
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(look.type.map { GraineTypeface.font(
-                        family: $0.font.heading, size: $0.font.scale.body, weight: $0.font.weights.title, names: $0.names
-                    ) } ?? .system(size: 15, weight: .bold))
-                    .foregroundColor(look.text)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(palette.text)
                     .lineLimit(1)
-                status(input)
+                legacyStatus(input)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(displayName), \(BarStatus.text(input))")
@@ -447,15 +663,15 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         }
     }
 
-    /// A face: the dashboard's logo when there is one, else the mark on the accent.
+    /// A face: the dashboard's logo when there is one, else Graine's waveform on the accent.
     @ViewBuilder
-    private var avatar: some View {
+    private var legacyAvatar: some View {
         if let url = dash.logoUrl.flatMap({ URL(string: $0) }) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
                 } else {
-                    look.chip
+                    palette.chip
                 }
             }
             .frame(width: 38, height: 38)
@@ -463,82 +679,54 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             .accessibilityHidden(true)
         } else {
             ZStack {
-                Circle().fill(look.accent)
-                if let t = look.tokens {
-                    // The design's mark: its launcher glyph, or the name's first letter when the brand chose its logo.
-                    designedMark(t, size: 38)
-                } else {
-                    Text("✦")
-                        .font(.system(size: 16))
-                        .foregroundColor(onAccentColor)
-                }
+                Circle().fill(legacyAccent)
+                GraineGlyphView(
+                    glyph: DesignTokens.Fallback.glyph, stroke: 2, color: legacyOnAccent, size: 18,
+                    fallback: Circle().fill(legacyOnAccent).frame(width: 6, height: 6)
+                )
             }
             .frame(width: 38, height: 38)
             .accessibilityHidden(true)
         }
     }
 
-    @ViewBuilder
-    private func designedMark(_ t: GraineThemeTokens, size: CGFloat) -> some View {
-        let letter = Text(String(displayName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
-            .font(GraineTypeface.font(family: t.font.heading, size: Double(size) * 0.42, weight: t.font.weights.title, names: graine.config.fonts))
-            .foregroundColor(look.onAccent)
-        if let glyph = t.icons.launcher {
-            GraineGlyphView(
-                glyph: glyph, stroke: t.icons.stroke, color: look.onAccent,
-                size: size * CGFloat(DesignRules.launcherGlyphShare), fallback: letter
-            )
-        } else {
-            letter
-        }
-    }
-
     /// While it is coming up the status line IS the loader the brand chose, with its words for the moment.
     @ViewBuilder
-    private func status(_ input: BarStatus.Input) -> some View {
+    private func legacyStatus(_ input: BarStatus.Input) -> some View {
         if let moment = BarStatus.waiting(input) {
             GraineLoaderLabel(
                 look: loader,
-                color: Color.graineHex(loader.color ?? look.tokens?.colors.accent ?? dash.accent),
-                track: look.border,
-                textColor: look.sub,
+                color: Color.graineHex(loader.color ?? dash.accent),
+                track: palette.border,
+                textColor: palette.sub,
                 label: loader.text.forMoment(moment),
                 size: 15,
                 logoUrl: dash.logoUrl
             )
         } else {
             Text(BarStatus.settled(input))
-                .font(look.type.map { $0(.caption) } ?? .system(size: 12.5))
-                .foregroundColor(look.sub)
+                .font(.system(size: 12.5))
+                .foregroundColor(palette.sub)
                 .lineLimit(1)
         }
     }
 
     /// Mute is on the bar because it is the control someone reaches for mid-sentence.
-    private var muteButton: some View {
+    private var legacyMuteButton: some View {
         Button(action: { voice.setMuted(!voice.muted) }) {
-            Group {
-                if let t = look.tokens {
-                    Image(systemName: GraineIcon.name(voice.muted ? "mic.slash" : "mic", style: t.icons.style))
-                        .font(.system(size: 15, weight: GraineIcon.weight(stroke: t.icons.stroke)))
-                        .foregroundColor(voice.muted ? .white : look.text)
-                } else {
-                    Text(voice.muted ? "🔇" : "🎙")
-                        .font(.system(size: 16))
-                }
-            }
-            .frame(width: 38, height: 38)
-            .background(voice.muted ? look.danger : look.chip, in: Circle())
+            GraineIconView(name: voice.muted ? .micOff : .mic, style: "outline", stroke: 2, color: voice.muted ? .white : palette.text)
+                .frame(width: 38, height: 38)
+                .background(voice.muted ? palette.danger : palette.chip, in: Circle())
         }
         .buttonStyle(PlainButtonStyle())
         .accessibilityLabel(voice.muted ? "Unmute" : "Mute")
     }
 
-    private var callButton: some View {
+    private var legacyCallButton: some View {
         let failed = voice.connectivity == .failed
         let live = voice.connected || voice.connecting
-        let glyph = failed ? "↻" : (live ? "✕" : "📞")
         let spoken = failed ? "Try again" : (live ? "End call" : "Start a call")
+        let ink: Color = live ? .white : legacyOnAccent
         return Button(action: {
             if failed {
                 voice.retry()
@@ -549,18 +737,15 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             }
         }) {
             Group {
-                if let t = look.tokens {
-                    let symbol = failed ? "arrow.clockwise" : (live ? "xmark" : GraineIcon.name("phone", style: t.icons.style))
-                    Image(systemName: symbol)
-                        .font(.system(size: 15, weight: GraineIcon.weight(stroke: t.icons.stroke)))
+                if failed {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .bold))
                 } else {
-                    Text(glyph)
-                        .font(.system(size: 16, weight: .bold))
+                    GraineIconView(name: live ? .close : .call, style: "outline", stroke: 2, color: ink)
                 }
             }
-            .foregroundColor(live ? .white : look.onAccent)
+            .foregroundColor(ink)
             .frame(width: 38, height: 38)
-            .background(live ? look.danger : look.accent, in: Circle())
+            .background(live ? palette.danger : legacyAccent, in: Circle())
         }
         .buttonStyle(PlainButtonStyle())
         .accessibilityLabel(spoken)
@@ -588,44 +773,6 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 dragStart = nil
                 if next != start { config.onPlacementChange?(next) }
             }
-    }
-}
-
-/// Everything the bar is drawn in, from the design or from today's palette.
-struct GraineBarLook {
-    /// Nil: no design — every value below is today's.
-    let tokens: GraineThemeTokens?
-    let type: GraineType?
-    let animation: Animation?
-    let surface: Color
-    let border: Color
-    let text: Color
-    let sub: Color
-    let chip: Color
-    let accent: Color
-    let onAccent: Color
-    let danger: Color
-    let barRadius: CGFloat
-    let borderWidth: CGFloat
-}
-
-/// The bar's own surface: the design's (glass, outline, floating shadow), or today's.
-struct GraineBarSurface: ViewModifier {
-    let look: GraineBarLook
-
-    func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: look.barRadius, style: .continuous)
-        if let t = look.tokens {
-            content
-                .background(GraineSurfaceFill(shape: shape, color: look.surface, glass: t.glass))
-                .overlay { shape.stroke(look.border, lineWidth: look.borderWidth) }
-                .background(GraineShadowLayer(shape: shape, shadow: t.elevation.floating, outsideOnly: t.glass != nil))
-        } else {
-            content
-                .background(look.surface, in: shape)
-                .overlay { shape.stroke(look.border, lineWidth: 1) }
-                .shadow(color: Color.black.opacity(0.3), radius: 16, x: 0, y: 6)
-        }
     }
 }
 #endif

@@ -52,7 +52,7 @@ public struct GraineLauncher: View {
     public var body: some View {
         if let graine = graine ?? GraineInApp.current {
             GraineLauncherHost(
-                graine: graine, voice: graine.voice, label: label, accentOverride: accent,
+                graine: graine, voice: graine.voice, fonts: graine.fonts, label: label, accentOverride: accent,
                 autoAttach: autoAttach, action: action
             )
         }
@@ -62,6 +62,8 @@ public struct GraineLauncher: View {
 struct GraineLauncherHost: View {
     let graine: GraineInApp
     @ObservedObject var voice: GraineVoice
+    /// Observed so the pill's label is redrawn in the design's typeface when it lands.
+    @ObservedObject var fonts: GraineFontStore
     let label: String?
     let accentOverride: Color?
     let autoAttach: Bool
@@ -74,11 +76,12 @@ struct GraineLauncherHost: View {
     private let size = CGFloat(DesignRules.launcherSize)
 
     init(
-        graine: GraineInApp, voice: GraineVoice, label: String?, accentOverride: Color?,
+        graine: GraineInApp, voice: GraineVoice, fonts: GraineFontStore, label: String?, accentOverride: Color?,
         autoAttach: Bool, action: (() -> Void)?
     ) {
         self.graine = graine
         _voice = ObservedObject(wrappedValue: voice)
+        _fonts = ObservedObject(wrappedValue: fonts)
         self.label = label
         self.accentOverride = accentOverride
         self.autoAttach = autoAttach
@@ -145,7 +148,10 @@ struct GraineLauncherHost: View {
             designedMark(t, ink: ink, size: mark)
             if pill {
                 Text(live ? "End call" : name)
-                    .font(GraineTypeface.font(family: t.font.heading, size: t.font.scale.body, weight: t.font.weights.title, names: graine.config.fonts))
+                    .font(GraineTypeface.font(
+                        family: t.font.heading, size: t.font.scale.body, weight: t.font.weights.title,
+                        names: graine.config.fonts, faces: fonts.faces
+                    ))
                     .foregroundColor(ink)
                     .lineLimit(1)
             }
@@ -166,9 +172,8 @@ struct GraineLauncherHost: View {
     @ViewBuilder
     private func designedMark(_ t: GraineThemeTokens, ink: Color, size mark: CGFloat) -> some View {
         if live {
-            Image(systemName: "xmark")
-                .font(.system(size: mark * 0.8, weight: GraineIcon.weight(stroke: t.icons.stroke)))
-                .foregroundColor(ink)
+            // The SDK's own hang-up, in the design's icon style — the same drawing as the bar's end button.
+            GraineIconView(name: .end, style: t.icons.style, stroke: t.icons.stroke, color: ink, size: mark)
         } else if let glyph = t.icons.launcher {
             GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: ink, size: mark, fallback: logoOrLetter(ink: ink, size: mark, type: t.font))
         } else {
@@ -206,7 +211,10 @@ struct GraineLauncherHost: View {
     private func logoOrLetter(ink: Color, size mark: CGFloat, type: GraineThemeTokens.Typography?) -> some View {
         let letter = Text(String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
             .font(type.map {
-                GraineTypeface.font(family: $0.heading, size: Double(size) * 0.4, weight: $0.weights.title, names: graine.config.fonts)
+                GraineTypeface.font(
+                    family: $0.heading, size: Double(size) * 0.4, weight: $0.weights.title,
+                    names: graine.config.fonts, faces: fonts.faces
+                )
             } ?? .system(size: size * 0.4, weight: .bold))
             .foregroundColor(ink)
         if let url = dash.logoUrl.flatMap({ URL(string: $0) }) {

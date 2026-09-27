@@ -13,7 +13,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.2.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.3.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -95,13 +95,17 @@ RootView()
 ```
 
 `GraineAgentBar` mounts the engine in the key window when it first appears
-(`autoAttach`), names the network ("weak connection", "no connection",
-"reconnecting…"), shows the dashboard's loader while connecting, can be dragged,
-and rises above the keyboard. Anything in `.accessory { … }` rides with it.
+(`autoAttach`), names the network ("Weak connection", "No connection",
+"Reconnecting…"), shows the dashboard's loader while connecting and while the
+agent thinks, can be dragged, and rises above the keyboard. Its microphone
+starts the call and then mutes it; its end button hangs up — or, with no call,
+closes: pass `onClose:` to take the bar away when your app shows it on demand.
+Anything in `.accessory { … }` rides with it.
 
 Without the bar: `graine.voice.attach(to: window)` once, then
 `graine.voice.start()` / `.end()` / `.setMuted(_:)`. `GraineVoice` is an
 `ObservableObject`, so your own SwiftUI can draw from `connected`, `connecting`,
+`phase` (idle, connecting, reconnecting, thinking, speaking, listening),
 `quality`, `online`, `reconnecting`, `connectivity` and `captions`.
 `GraineListener` (held weakly) reports the same events, plus components
 (`onWidget`), friction (`onFriction`) and errors.
@@ -123,12 +127,20 @@ RootView()
     .overlay(alignment: .bottomTrailing) { GraineLauncher().padding(20) }
 ```
 
+`GraineAgentBar` is the voice bar the dashboard's Garage previews, element by
+element: the design's colours, corners, outline, shadow or hard offset, glass,
+icon style (the SDK's own icons, drawn from their paths) and motion — the
+status meter moves at the design's pace, and arrivals rise with its easing.
+The design's typeface is loaded by the SDK itself: it fetches the faces the
+design uses from Graine, keeps them on disk, registers them and redraws, and
+until they arrive (or if they never do) draws the system font at the same
+weight. Your app names no font. A family your app ships itself wins and is
+never downloaded — map it to your font's registered name with
+`GraineConfig(…, fonts: ["Inter": "InterVariable"])` if the two differ.
+
 The launcher places the call on a tap and ends it on the next; pass `action:`
 to open your own UI instead. `"auto"` follows the device's light or dark, and switches with it. An app that
 draws its own UI reads the same tokens from `graine.theme` (or `onTheme`).
-A design font is used only if your app bundles it; map a family to your
-font's registered name with `GraineConfig(…, fonts: ["Inter": "InterVariable"])`.
-Everything else falls back to the system font, silently.
 
 ## Tests
 

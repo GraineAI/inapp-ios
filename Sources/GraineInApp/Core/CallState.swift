@@ -67,16 +67,56 @@ enum CaptionLog {
         guard let last = lines.last else { return false }
         return last.role == .agent && last.live
     }
+
+    /**
+     * Whether the agent owes an answer, after `next` arrives. Thinking is the
+     * gap between the customer's final line and the agent's first — kept as a
+     * flag rather than a timer, because the transcript is the truth about who
+     * spoke last. A customer turn closed with no words (a barge-in) is still
+     * the customer's turn ending. The React Native launcher's rule.
+     */
+    static func awaitsAgent(_ awaiting: Bool, after next: GraineCaption) -> Bool {
+        if next.role == .agent { return false }
+        if !next.live { return true }
+        return awaiting
+    }
 }
 
 /**
- * THE BAR NAMES THE NETWORK, or the agent takes the blame for it.
+ * WHAT THE CALL IS DOING, IN ONE WORD — the React Native launcher's
+ * `GrainePhase`, for a host drawing its own bar:
  *
- * A customer whose agent goes quiet on a train reads "listening" and concludes
- * the agent is broken. "no connection", "weak connection" and "reconnecting…"
- * are the sentences that keep that blame where it belongs. Same order as the
- * Android bar; "needs microphone" holds after a refusal until the next start.
+ *   idle          no call; ready to start
+ *   connecting    the page loading, or a call being placed
+ *   reconnecting  the page failed and is being reloaded, or the call is being re-established
+ *   thinking      the customer finished a sentence; the agent has not answered yet
+ *   speaking      the agent is talking
+ *   listening     the agent is waiting for the customer
+ *
+ * Pair `thinking` with `GraineLoader(moment: "thinking")`: the dashboard's
+ * loader, with the dashboard's words for that moment.
  */
+public enum GrainePhase: String {
+    case idle
+    case connecting
+    case reconnecting
+    case thinking
+    case speaking
+    case listening
+
+    static func of(
+        reconnecting: Bool, connectivity: GraineConnectivity, connecting: Bool, ready: Bool,
+        connected: Bool, agentSpeaking: Bool, awaitingAgent: Bool
+    ) -> GrainePhase {
+        if reconnecting || connectivity == .failed || connectivity == .retrying { return .reconnecting }
+        if connecting || !ready { return .connecting }
+        if !connected { return .idle }
+        if agentSpeaking { return .speaking }
+        if awaitingAgent { return .thinking }
+        return .listening
+    }
+}
+
 /**
  * When the app comes back to the foreground, should the page be told to warm?
  *
@@ -94,6 +134,18 @@ enum Warm {
     }
 }
 
+/**
+ * THE BAR NAMES THE NETWORK, or the agent takes the blame for it.
+ *
+ * A customer whose agent goes quiet on a train reads "listening" and concludes
+ * the agent is broken. "no connection", "weak connection" and "reconnecting…"
+ * are the sentences that keep that blame where it belongs. Same order as the
+ * Android bar; "needs microphone" holds after a refusal until the next start.
+ *
+ * These are the words of the bar drawn WITHOUT a design — an older server's
+ * session — which keeps looking and reading exactly as it did. A bar drawn
+ * from a design says VoiceBarStatus's, the contract's.
+ */
 enum BarStatus {
     struct Input {
         var connectivity: GraineConnectivity

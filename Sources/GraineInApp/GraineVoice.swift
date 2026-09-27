@@ -45,9 +45,24 @@ public final class GraineVoice: NSObject, ObservableObject {
      * — a transcript outliving its call is a privacy question, not a feature.
      */
     @Published public private(set) var captions: [GraineCaption] = []
+    /// The customer has finished a line and the agent has not started its answer. See `phase`.
+    @Published private(set) var awaitingAgent = false
 
     /// Whether the engine is mounted.
     public var isAttached: Bool { webView != nil }
+
+    /**
+     * What the call is doing, in one word — idle, connecting, reconnecting,
+     * thinking, speaking or listening — for an app that draws its own bar.
+     * `thinking` is the gap between the customer finishing and the agent
+     * answering: draw `GraineLoader(moment: "thinking")` there, not a meter.
+     */
+    public var phase: GrainePhase {
+        GrainePhase.of(
+            reconnecting: reconnecting, connectivity: connectivity, connecting: connecting, ready: ready,
+            connected: connected, agentSpeaking: CaptionLog.agentSpeaking(captions), awaitingAgent: awaitingAgent
+        )
+    }
 
     // MARK: - Internals
 
@@ -209,6 +224,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         pendingStart = false
         pendingWidgetFrame = nil
         if !captions.isEmpty { captions = [] }
+        if awaitingAgent { awaitingAgent = false }
         setCall(connected: false, connecting: false)
         scheduleAudioRestore()
     }
@@ -232,6 +248,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         }
         // A new call, not a continuation: the last one's words must not appear above this one's first line.
         if !captions.isEmpty { captions = [] }
+        if awaitingAgent { awaitingAgent = false }
         pendingWidgetFrame = nil
         setCall(connected: connected, connecting: true)
         if !GraineVoice.micGranted() {
@@ -461,7 +478,10 @@ public final class GraineVoice: NSObject, ObservableObject {
             muted = value
 
         case let .caption(role, text, live):
-            captions = CaptionLog.fold(captions, GraineCaption(role: role, text: text, live: live))
+            let line = GraineCaption(role: role, text: text, live: live)
+            let awaiting = CaptionLog.awaitsAgent(awaitingAgent, after: line)
+            if awaiting != awaitingAgent { awaitingAgent = awaiting }
+            captions = CaptionLog.fold(captions, line)
             report { $0.onCaption(role: role, text: text, live: live) }
 
         case .widget(let widget):
@@ -486,6 +506,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             endWatchdogItem?.cancel()
             endWatchdogItem = nil
             reconnecting = false
+            if awaitingAgent { awaitingAgent = false }
             setCall(connected: false, connecting: false)
             startedCall = false
             setQuality(.unknown)
