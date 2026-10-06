@@ -8,8 +8,34 @@ public struct GraineNativeAppearance: Equatable {
     public let heading: String
     /// Absolute, or nil when no logo is set. The dashboard stores an S3 key, not a URL.
     public let logoUrl: String?
+    /// What the logo sits on where it stands in for the launcher glyph. contract/DESIGN.md "The brand's logo".
+    public let logoPlate: GraineLogoPlate
     /// Corner rounding, clamped to what the host draws.
     public let radius: Double
+}
+
+/**
+ * WHAT THE BRAND'S LOGO SITS ON — `appearance.logoPlate`, wherever the logo
+ * stands in for the launcher glyph (the launcher, the voice bar's avatar, the
+ * chat header's mark):
+ *
+ *   accent  the shape's own fill — for a white or light mark made for a
+ *           coloured background. Absent means this: logos were drawn so before.
+ *   white   #FFFFFF with a hairline in `border` — for a coloured or dark logo,
+ *           or an opaque image, which is what most logo files are.
+ *
+ * A logo drawn in the brand's own colour on the brand's own accent is no logo
+ * at all, which is why the plate exists. The dashboard reads it from the
+ * pixels on upload and the brand can change it.
+ */
+public enum GraineLogoPlate: String, CaseIterable, Sendable {
+    case accent
+    case white
+
+    /// Only "white" is white — exactly, as theme.ts reads it. Anything else, of any type, is the accent.
+    static func from(_ raw: Any?) -> GraineLogoPlate {
+        (JSON.unwrap(raw) as? String) == "white" ? .white : .accent
+    }
 }
 
 /// The colours a component is drawn in, as #RRGGBB.
@@ -34,6 +60,8 @@ public struct GraineWidgetPalette: Equatable {
  *   accent  sometimes arrives without its "#"
  *   title   is a HEADING ("Talk to our AI assistant"), not a name
  *   logo    is an S3 KEY, which becomes <origin>/api/embed/logo?k=…
+ *
+ * and `logoPlate` says what that logo is drawn on (GraineLogoPlate).
  *
  * PRECEDENCE IS ONE RULE, IN ONE DIRECTION: the dashboard decides, and the
  * host's own values are the fallback.
@@ -69,6 +97,7 @@ enum Appearance {
             accent: isHex3or6(rawAccent) ? "#" + stripHash(rawAccent) : accent,
             heading: title.isEmpty ? heading : title,
             logoUrl: logoKey.isEmpty ? nil : base + "/api/embed/logo?k=" + GraineProtocol.encode(logoKey),
+            logoPlate: GraineLogoPlate.from(a["logoPlate"]),
             radius: clamp(numeric(a["radius"]) ?? radius.flatMap { $0.isFinite ? $0 : nil } ?? 18, ceiling)
         )
     }

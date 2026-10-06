@@ -28,11 +28,11 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     // MARK: - State you can read, and hear about through GraineListener
 
-    @Published public private(set) var connected = false
-    @Published public private(set) var connecting = false
+    @Published public private(set) var connected = false { didSet { refreshConnectWait() } }
+    @Published public private(set) var connecting = false { didSet { refreshConnectWait() } }
     @Published public private(set) var muted = false
     /// The page said graine:ready: a start now is an INVITE away.
-    @Published public private(set) var ready = false
+    @Published public private(set) var ready = false { didSet { refreshConnectWait() } }
     @Published public private(set) var quality: GraineConnectionQuality = .unknown
     /// The page's own view of the network; nil until it has said.
     @Published public private(set) var online: Bool? = nil
@@ -47,6 +47,28 @@ public final class GraineVoice: NSObject, ObservableObject {
     @Published public private(set) var captions: [GraineCaption] = []
     /// The customer has finished a line and the agent has not started its answer. See `phase`.
     @Published private(set) var awaitingAgent = false
+    /**
+     * WHERE A CALL BEING PLACED IS, as the engine reports it (`graine:progress`):
+     * registering, dialling, retrying (a fresh connection after an unanswered
+     * first try — on mobile data, usually one the phone dropped while idle) or
+     * switching (to the other transport). Nil outside a connect.
+     */
+    @Published public private(set) var connectStage: GraineConnectStage? = nil
+    /**
+     * The customer has waited on this connect for `GraineConfig.Timing.slowConnectMs`
+     * (4 s by default) — their bar open with the page not there yet, or a call
+     * they asked for not yet answered. Say so honestly ("Still connecting…"),
+     * not with a faster spinner. Cleared the moment it lands or they stop waiting.
+     */
+    @Published public private(set) var slowConnect = false
+    /**
+     * The last start could not be connected at all — not on WebRTC, not on the
+     * fallback (`graine:progress` `failed`). Distinct from an error (a setting
+     * someone must change): the network may well be better in a moment, so
+     * `start()` simply tries again. Cleared by a start, an answered call,
+     * `end()` and `detach()`.
+     */
+    @Published public private(set) var callFailed = false { didSet { refreshConnectWait() } }
 
     /// Whether the engine is mounted.
     public var isAttached: Bool { webView != nil }
@@ -85,6 +107,20 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     private let watchdog: LoadWatchdog
     private let ladder: RetryLadder
+    /// How many voice bars are on screen: a connect is only somebody's wait while one is (see ConnectWait).
+    private var viewers = 0
+    private lazy var slowClock = SlowConnectClock(
+        delayMs: graine.config.timing.slowConnectMs,
+        schedule: { ms, fire in
+            let item = DispatchWorkItem(block: fire)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: item)
+            return { item.cancel() }
+        },
+        onChange: { [weak self] slow in
+            guard let self = self, self.slowConnect != slow else { return }
+            self.slowConnect = slow
+        }
+    )
     private var checkLoadItem: DispatchWorkItem?
     private var retryItem: DispatchWorkItem?
     private var endWatchdogItem: DispatchWorkItem?
@@ -193,6 +229,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             },
         ]
         load(idle: true)
+        refreshConnectWait()
     }
 
     /// Mount the engine in the app's key window. Call once a window exists — from a view's onAppear, say.
@@ -225,6 +262,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         pendingWidgetFrame = nil
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }
+        setAttempt(attempt.after(.ended))
         setCall(connected: false, connecting: false)
         scheduleAudioRestore()
     }
@@ -250,6 +288,8 @@ public final class GraineVoice: NSObject, ObservableObject {
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }
         pendingWidgetFrame = nil
+        // A new attempt: the last one's failure and stage are not news.
+        setAttempt(attempt.after(.started))
         setCall(connected: connected, connecting: true)
         if !GraineVoice.micGranted() {
             pendingStart = true
@@ -289,6 +329,9 @@ public final class GraineVoice: NSObject, ObservableObject {
         }
         let wasHeld = pendingStart && !startedCall
         pendingStart = false
+        // The customer is done with this attempt — the bar's hang-up or close. A failure it showed is
+        // not news the next time the bar opens (the React Native bar closing clears it the same way).
+        setAttempt(attempt.after(.ended))
         post(GraineProtocol.out(GraineProtocol.Out.endCall))
         endWatchdogItem?.cancel()
         endWatchdogItem = nil
@@ -464,6 +507,8 @@ public final class GraineVoice: NSObject, ObservableObject {
             if isConnected {
                 endNotified = false
                 reconnecting = false
+                // An answered call is not still retrying, and did not fail.
+                setAttempt(attempt.after(.connected))
                 endWatchdogItem?.cancel()
                 endWatchdogItem = nil
             }
@@ -541,7 +586,48 @@ public final class GraineVoice: NSObject, ObservableObject {
             reconnecting = active
             if active { setCall(connected: connected, connecting: true) }
             report { $0.onReconnecting(active: active) }
+
+        case .progress(let progress):
+            setAttempt(attempt.after(.progress(progress)))
+            // "failed" closes the connect: neither transport could carry the call. The bar stops
+            // saying "connecting" and offers another try; start() makes it.
+            if ConnectAttempt.stopsConnecting(progress) {
+                startedCall = false
+                pendingStart = false
+                setCall(connected: connected, connecting: false)
+                scheduleAudioRestore()
+            }
         }
+    }
+
+    // MARK: - The connect's own state
+
+    private var attempt: ConnectAttempt {
+        ConnectAttempt(stage: connectStage, failed: callFailed)
+    }
+
+    private func setAttempt(_ next: ConnectAttempt) {
+        if connectStage != next.stage { connectStage = next.stage }
+        if callFailed != next.failed { callFailed = next.failed }
+    }
+
+    /// A voice bar came on screen (or left it). Only while one is, is a page still loading somebody's wait.
+    func viewerAppeared() {
+        viewers += 1
+        refreshConnectWait()
+    }
+
+    func viewerDisappeared() {
+        viewers = max(0, viewers - 1)
+        refreshConnectWait()
+    }
+
+    /// Arms or clears "Still connecting…" — a clock on the customer's wait, not on the network.
+    private func refreshConnectWait() {
+        let watched = (viewers > 0 && webView != nil) || connecting
+        slowClock.update(waiting: ConnectWait.waiting(
+            watched: watched, connected: connected, callFailed: callFailed, connecting: connecting, ready: ready
+        ))
     }
 
     // MARK: - State
@@ -576,6 +662,8 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     fileprivate func pageStarted() {
         ready = false
+        // A new page has no connect in flight: whatever stage the old one reached is gone with it.
+        if connectStage != nil { connectStage = nil }
         watchdog.start(now: GraineVoice.uptimeMs())
         scheduleLoadCheck(afterMs: min(Int64(graine.config.timing.stallMs), 1_000))
     }
@@ -663,6 +751,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         ready = false
         startedCall = false
         pendingStart = false
+        if connectStage != nil { connectStage = nil }
         setCall(connected: false, connecting: false)
         if !endNotified {
             endNotified = true

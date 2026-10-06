@@ -62,6 +62,15 @@ import Testing
         }
         #expect(active)
 
+        guard case let .progress(stage)? = parse(#"{"type":"graine:progress","stage":"retrying"}"#) else {
+            Issue.record("progress"); return
+        }
+        #expect(stage == .stage(.retrying))
+        guard case let .progress(failed)? = parse(#"{"type":"graine:progress","stage":"failed"}"#) else {
+            Issue.record("progress failed"); return
+        }
+        #expect(failed == .failed)
+
         guard case let .quality(rtt, jitter, loss)? = parse(#"{"type":"graine:quality","sample":{"rtt":480,"jitter":40,"loss":0.1}}"#) else {
             Issue.record("quality"); return
         }
@@ -96,7 +105,10 @@ import Testing
     }
 
     @Test func anythingThatIsNotOursIsIgnoredRatherThanGuessedAt() {
-        let raws: [String?] = [nil, "", "not json", "{}", #"{"type":"graine:unheard-of"}"#, #"{"type":"graine:app-action"}"#, "[1,2]"]
+        let raws: [String?] = [
+            nil, "", "not json", "{}", #"{"type":"graine:unheard-of"}"#, #"{"type":"graine:app-action"}"#, "[1,2]",
+            #"{"type":"graine:progress","stage":"teleporting"}"#,
+        ]
         for raw in raws {
             #expect(parse(raw) == nil, "raw: \(String(describing: raw))")
         }

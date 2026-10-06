@@ -118,6 +118,145 @@ public enum GrainePhase: String {
 }
 
 /**
+ * WHERE A CALL BEING PLACED IS, as the engine reports it (`graine:progress`).
+ *
+ *   registering  a credential and a line are being set up (a cold start)
+ *   dialling     the call is on its way to the agent
+ *   retrying     the first attempt went unanswered and a fresh connection is
+ *                being made — on mobile data, usually a connection the phone
+ *                dropped while it sat idle
+ *   switching    the call is moving to the other transport
+ *
+ * A bar that says "Reconnecting…" across a retry is one the customer waits
+ * for; one that says "Connecting…" for eight seconds is one they close.
+ */
+public enum GraineConnectStage: String, Sendable {
+    case registering
+    case dialling
+    case retrying
+    case switching
+}
+
+/// One `graine:progress` report: a stage, or `failed` — nothing could carry the call on either transport.
+public enum GraineConnectProgress: Equatable, Sendable {
+    case stage(GraineConnectStage)
+    case failed
+
+    /// Nil for a stage this build does not know: ignored, never guessed at.
+    static func from(_ raw: String?) -> GraineConnectProgress? {
+        guard let raw = raw else { return nil }
+        if raw == "failed" { return .failed }
+        return GraineConnectStage(rawValue: raw).map { .stage($0) }
+    }
+}
+
+/**
+ * THE CONNECT'S OWN STATE — the stage it is at, and whether the last start
+ * could not be connected at all. The React Native launcher's rules:
+ *
+ *   a stage           is stored (a failure already shown stays until cleared)
+ *   failed            ends the connect: no stage, `failed` — stop saying
+ *                     "connecting" and offer another try
+ *   connected         a call is up: neither is news any more
+ *   started / ended   a new attempt, or the customer done with this one
+ *                     (the bar closed, the engine removed): a clean slate
+ *
+ * `failed` is not `error`: an error is a setting someone must change, and a
+ * failed connect is a network that may well be better in a moment, so
+ * `start()` simply tries again.
+ */
+struct ConnectAttempt: Equatable {
+    var stage: GraineConnectStage? = nil
+    var failed = false
+
+    enum Event: Equatable {
+        case progress(GraineConnectProgress)
+        case connected
+        case started
+        case ended
+    }
+
+    func after(_ event: Event) -> ConnectAttempt {
+        switch event {
+        case .progress(.stage(let next)): return ConnectAttempt(stage: next, failed: failed)
+        case .progress(.failed): return ConnectAttempt(stage: nil, failed: true)
+        case .connected, .started, .ended: return ConnectAttempt()
+        }
+    }
+
+    /// Whether a report means the connect is over and the customer must be told it is not connecting.
+    static func stopsConnecting(_ progress: GraineConnectProgress) -> Bool {
+        progress == .failed
+    }
+}
+
+/**
+ * "STILL CONNECTING…" — a clock on the customer's wait, not on the network:
+ * the network is the engine's to report. Armed while the customer is actually
+ * waiting on a connect, cleared the moment it lands or they stop waiting.
+ */
+enum ConnectWait {
+    /**
+     * When a connect stops being "Connecting…" and becomes "Still connecting…".
+     * Past the point a healthy connect finishes (warm 0.2–0.9 s, cold 1.5–2.5 s
+     * on a good network) and well inside the ten seconds after which, without a
+     * word of explanation, people assume it is broken.
+     */
+    static let slowConnectMs = 4_000
+
+    /**
+     * - Parameters:
+     *   - watched: the customer can see it — a voice bar is on screen with the
+     *     engine mounted — or they asked for a call. An idle page loading behind
+     *     no bar is nobody's slow connect.
+     */
+    static func waiting(watched: Bool, connected: Bool, callFailed: Bool, connecting: Bool, ready: Bool) -> Bool {
+        watched && !connected && !callFailed && (connecting || !ready)
+    }
+}
+
+/**
+ * The slow-connect clock itself, with its scheduling handed in so a Mac can
+ * drive it by hand. One clock per wait: asked again while armed or already
+ * slow, it does nothing; a wait that ends cancels it and clears `slow`.
+ */
+final class SlowConnectClock {
+    /// Run `fire` after `afterMs`; the returned closure cancels it.
+    typealias Schedule = (_ afterMs: Int, _ fire: @escaping () -> Void) -> () -> Void
+
+    private let delayMs: Int
+    private let schedule: Schedule
+    private let onChange: (Bool) -> Void
+    private var cancel: (() -> Void)?
+    private(set) var slow = false
+
+    init(delayMs: Int, schedule: @escaping Schedule, onChange: @escaping (Bool) -> Void) {
+        self.delayMs = max(0, delayMs)
+        self.schedule = schedule
+        self.onChange = onChange
+    }
+
+    func update(waiting: Bool) {
+        guard waiting else {
+            cancel?()
+            cancel = nil
+            if slow {
+                slow = false
+                onChange(false)
+            }
+            return
+        }
+        guard cancel == nil, !slow else { return }
+        cancel = schedule(delayMs) { [weak self] in
+            guard let self = self, self.cancel != nil else { return }
+            self.cancel = nil
+            self.slow = true
+            self.onChange(true)
+        }
+    }
+}
+
+/**
  * When the app comes back to the foreground, should the page be told to warm?
  *
  * The page keeps a SIP registration warm so a tap costs only the INVITE

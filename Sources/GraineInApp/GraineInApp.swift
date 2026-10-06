@@ -17,19 +17,23 @@ public struct GraineConfig {
         public var retryDelaysMs: [Int]
         /// How long `end()` waits for the page to confirm before forcing the end.
         public var endWatchdogMs: Int
+        /// A connect the customer has waited on this long becomes `GraineVoice.slowConnect` ("Still connecting…").
+        public var slowConnectMs: Int
 
         public init(
             stallMs: Int = 15_000,
             bootMs: Int = 15_000,
             hardCapMs: Int = 120_000,
             retryDelaysMs: [Int] = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000],
-            endWatchdogMs: Int = 4_000
+            endWatchdogMs: Int = 4_000,
+            slowConnectMs: Int = 4_000
         ) {
             self.stallMs = stallMs
             self.bootMs = bootMs
             self.hardCapMs = hardCapMs
             self.retryDelaysMs = retryDelaysMs
             self.endWatchdogMs = endWatchdogMs
+            self.slowConnectMs = slowConnectMs
         }
     }
 

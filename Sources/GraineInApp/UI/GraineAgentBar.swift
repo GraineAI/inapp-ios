@@ -216,6 +216,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @State private var unitHeight: CGFloat = 0
     /// The customer switched to the chat — only possible where the switch shows (see `canSwitch`).
     @State private var inChat = false
+    /// A logo that would not load: the avatar goes back to the letter on the accent until the logo changes.
+    @State private var failedLogo: String? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -248,6 +250,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             if config.autoAttach && !voice.isAttached { voice.attach() }
+            // While a bar is on screen, a page still loading is the customer's wait (GraineVoice.slowConnect).
+            voice.viewerAppeared()
+        }
+        .onDisappear {
+            voice.viewerDisappeared()
         }
     }
 
@@ -320,7 +327,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
 
     // MARK: - What the bar is drawn from
 
-    /// The dashboard's appearance, translated: accent, heading, logo, radius. The dashboard decides; props override.
+    /// The dashboard's appearance, translated: accent, heading, logo and its plate, radius. The dashboard decides; props override.
     private var dash: GraineNativeAppearance {
         Appearance.resolve(model.appearance, accent: Appearance.defaultAccent, heading: "Assistant", origin: graine.config.baseUrl)
     }
@@ -385,7 +392,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             muted: voice.muted,
             connected: voice.connected,
             phase: voice.phase,
-            quality: voice.quality
+            quality: voice.quality,
+            callFailed: voice.callFailed,
+            connectStage: voice.connectStage,
+            slowConnect: voice.slowConnect,
+            connectingWords: loader.text.connecting ?? "Connecting…"
         )
     }
 
@@ -395,7 +406,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         if showsChat {
             GraineChatWindow(
                 tokens: t, type: type(t), accent: accent(t), onAccent: onAccent(t),
-                heading: displayName, logoUrl: dash.logoUrl,
+                heading: displayName, logoUrl: dash.logoUrl, logoPlate: dash.logoPlate,
                 turns: [], online: false, lifted: keyboard.frame != nil,
                 onSend: { _ in }, onCollapse: { inChat = false }
             )
@@ -414,7 +425,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
      */
     private func designedBar(_ t: GraineThemeTokens, placement: PlacementMath.Bounds, resting: CGFloat) -> some View {
         let status = VoiceBarStatus.line(statusInput)
-        let spoken = status.waiting.flatMap { loader.text.forMoment($0) } ?? status.text
+        let spoken = status.spoken(loader: loader)
         return HStack(spacing: CGFloat(VoiceBar.spacing)) {
             HStack(spacing: CGFloat(VoiceBar.spacing)) {
                 designedAvatar(t)
@@ -430,7 +441,13 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                if voice.connectivity == .failed { voice.retry() }
+                // "tap to retry": a page that never loaded reloads; a call nothing could carry is placed again.
+                if voice.connectivity == .failed {
+                    voice.retry()
+                } else if voice.callFailed && !voice.connecting {
+                    if !voice.isAttached { voice.attach() }
+                    voice.start()
+                }
             }
             .gesture(drag(placement: placement, resting: resting), including: config.draggable ? .all : .subviews)
             .accessibilityElement(children: .ignore)
@@ -448,21 +465,34 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         .modifier(GraineDesignSurface(tokens: t, fill: t.colors.surface, frosted: true, radius: t.shape.radius.xl, shadow: t.elevation.floating))
     }
 
-    /// 38 round in `accent`: the launcher glyph in `onAccent` at 18; with none, the brand's logo filling the circle; else the first letter.
+    /**
+     * 38 round: the launcher glyph in `onAccent` at 18 on `accent`; with none,
+     * the brand's logo — WHOLE, fitted into the largest square the circle holds,
+     * never cropped, on its plate (DESIGN.md "The brand's logo"); else the
+     * first letter on `accent`. The logo was drawn filling the circle, and a
+     * wordmark lost both ends, a square logo its corners.
+     */
     private func designedAvatar(_ t: GraineThemeTokens) -> some View {
         let ink = onAccent(t)
         let letter = Text(initial)
             .font(.system(size: CGFloat(VoiceBar.initial), weight: .bold))
             .foregroundColor(ink)
+        // The logo stands in only where there is no glyph, and only while it has not refused to load.
+        let raw = t.icons.launcher == nil && dash.logoUrl != failedLogo ? dash.logoUrl : nil
+        let logo = raw.flatMap { URL(string: $0) }
+        let plate = DesignRules.logoPlateLook(
+            logo != nil ? dash.logoPlate : .accent, accent: t.colors.accent, border: t.colors.border, borderWidth: t.shape.borderWidth
+        )
+        let box = CGFloat(DesignRules.logoBox(.circle, size: VoiceBar.button))
         return ZStack {
-            Circle().fill(accent(t))
+            Circle().fill(plate.outline == nil ? accent(t) : Color.graineHex(plate.fill))
             if let glyph = t.icons.launcher {
                 GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: ink, size: CGFloat(VoiceBar.icon), fallback: letter)
-            } else if let url = dash.logoUrl.flatMap({ URL(string: $0) }) {
+            } else if let url = logo {
                 AsyncImage(url: url) { phase in
                     switch phase {
-                    case .success(let image): image.resizable().scaledToFill()
-                    case .failure: letter
+                    case .success(let image): image.resizable().scaledToFit().frame(width: box, height: box)
+                    case .failure: letter.onAppear { failedLogo = raw }
                     default: Color.clear
                     }
                 }
@@ -472,19 +502,27 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         }
         .frame(width: CGFloat(VoiceBar.button), height: CGFloat(VoiceBar.button))
         .clipShape(Circle())
+        .overlay {
+            // A white plate on a white bar needs its hairline to be seen at all.
+            if let outline = plate.outline {
+                Circle().strokeBorder(Color.graineHex(outline.color), lineWidth: CGFloat(outline.width))
+            }
+        }
         .accessibilityHidden(true)
     }
 
     /// The status: caption size, the body family at `weights.body`, `textMuted` — after the meter while it listens or speaks; the loader while it waits.
     @ViewBuilder
     private func designedStatus(_ t: GraineThemeTokens, _ status: VoiceBarStatus.Line) -> some View {
-        if let moment = status.waiting {
+        if status.waiting != nil {
             GraineLoaderLabel(
                 look: loader,
                 color: Color.graineHex(loader.color ?? t.colors.accent),
                 track: .graineHex(t.colors.border),
                 textColor: .graineHex(t.colors.textMuted),
-                label: loader.text.forMoment(moment) ?? status.text,
+                // The brand's words for the moment — a retry is "reconnecting" in their words — or "Still connecting…"
+                // while the brand's connecting words are the default (VoiceBarStatus.connecting).
+                label: status.spoken(loader: loader),
                 size: 14,
                 logoUrl: dash.logoUrl
             )
@@ -526,7 +564,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     /**
      * Off a call the microphone STARTS one; on a call it is the mute (then
      * `danger` with the struck-through microphone in white); after a failed
-     * load it retries. Faint and inert while it cannot act.
+     * load it retries; after a call nothing could carry ("Couldn’t connect")
+     * it places a new one. Faint and inert while it cannot act.
      */
     private func micButton(_ t: GraineThemeTokens) -> some View {
         let failed = voice.connectivity == .failed

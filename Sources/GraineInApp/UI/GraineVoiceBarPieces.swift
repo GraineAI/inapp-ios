@@ -150,7 +150,7 @@ private struct GraineChatHeightKey: PreferenceKey {
  * THE CHAT WINDOW, above the bar while the customer is in the chat: the page
  * in `background`, outlined, `radius.xl`, the floating shadow or the hard
  * offset. A 50-point header on `surface` — the launcher mark at 30 (a pill
- * drawn as a circle), the heading in the heading family at `weights.title`,
+ * drawn as a circle; the brand's logo whole on its plate), the heading in the heading family at `weights.title`,
  * "Online" after a `success` dot, and a chevron back to the call. Messages in
  * the design's bubble style, 84% wide at most. A 58-point composer: a
  * 40-point field on `surfaceRaised` and a round send button in `accent`.
@@ -172,6 +172,8 @@ struct GraineChatWindow: View {
     let onAccent: Color
     let heading: String
     let logoUrl: String?
+    /// What the logo sits on in the mark (DESIGN.md "The brand's logo").
+    var logoPlate: GraineLogoPlate = .accent
     let turns: [GraineCaption]
     let online: Bool
     /// The keyboard is up: the messages give way to it.
@@ -180,6 +182,8 @@ struct GraineChatWindow: View {
     let onCollapse: () -> Void
 
     @State private var draft = ""
+    /// A logo that would not load: the mark goes back to the letter on the accent until the logo changes.
+    @State private var failedLogo: String? = nil
     @State private var width: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
 
@@ -266,24 +270,35 @@ struct GraineChatWindow: View {
         .accessibilityLabel("Collapse")
     }
 
-    /// The launcher's own shape and fill at 30 points: its glyph at 14, else the logo, else the first letter.
+    /**
+     * The launcher's own shape at 30 points: its glyph at 14 on the accent,
+     * else the brand's logo — whole, fitted into the largest square the shape
+     * holds, on its plate — else the first letter on the accent.
+     */
     private var mark: some View {
         let t = tokens
         let size = CGFloat(VoiceBar.Chat.mark)
         let glyphSize = CGFloat(VoiceBar.Chat.markGlyph)
-        let outline = GraineLauncherOutline(kind: t.shape.launcher == .pill ? .circle : t.shape.launcher, radius: t.shape.radius)
+        let kind: GraineLauncherShape = t.shape.launcher == .pill ? .circle : t.shape.launcher
+        let outline = GraineLauncherOutline(kind: kind, radius: t.shape.radius)
         let letter = Text(String(heading.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
             .font(.system(size: (size * 0.4).rounded(), weight: .bold))
             .foregroundColor(onAccent)
+        let raw = t.icons.launcher == nil && logoUrl != failedLogo ? logoUrl : nil
+        let logo = raw.flatMap { URL(string: $0) }
+        let plate = DesignRules.logoPlateLook(
+            logo != nil ? logoPlate : .accent, accent: t.colors.accent, border: t.colors.border, borderWidth: t.shape.borderWidth
+        )
+        let box = CGFloat(DesignRules.logoBox(kind, size: VoiceBar.Chat.mark))
         return ZStack {
-            outline.fill(accent)
+            outline.fill(plate.outline == nil ? accent : Color.graineHex(plate.fill))
             if let glyph = t.icons.launcher {
                 GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: onAccent, size: glyphSize, fallback: letter)
-            } else if let url = logoUrl.flatMap({ URL(string: $0) }) {
+            } else if let url = logo {
                 AsyncImage(url: url) { phase in
                     switch phase {
-                    case .success(let image): image.resizable().scaledToFit().frame(width: glyphSize, height: glyphSize)
-                    case .failure: letter
+                    case .success(let image): image.resizable().scaledToFit().frame(width: box, height: box)
+                    case .failure: letter.onAppear { failedLogo = raw }
                     default: Color.clear
                     }
                 }
@@ -294,9 +309,12 @@ struct GraineChatWindow: View {
         .frame(width: size, height: size)
         .clipShape(outline)
         .overlay {
-            // The Garage's mark wears the launcher's outline where the design draws hard offsets.
+            // The Garage's mark wears the launcher's outline where the design draws hard offsets;
+            // otherwise a white plate wears its hairline.
             if t.elevation.hardOffset != nil {
                 outline.stroke(Color.graineHex(t.colors.text), lineWidth: CGFloat(t.shape.borderWidth))
+            } else if let hairline = plate.outline {
+                outline.border(Color.graineHex(hairline.color), width: CGFloat(hairline.width))
             }
         }
         .accessibilityHidden(true)

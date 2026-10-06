@@ -13,7 +13,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.4.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.5.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -97,7 +97,10 @@ RootView()
 `GraineAgentBar` mounts the engine in the key window when it first appears
 (`autoAttach`), names the network ("Weak connection", "No connection",
 "Reconnecting…"), shows the dashboard's loader while connecting and while the
-agent thinks, can be dragged, and rises above the keyboard. Its microphone
+agent thinks, can be dragged, and rises above the keyboard. A connect says
+where it is: a retry is the loader's "reconnecting" moment, a long one says
+"Still connecting…" (never over words the brand chose), and one nothing could
+carry says "Couldn’t connect · tap to retry". Its microphone
 starts the call and then mutes it; its end button hangs up — or, with no call,
 closes: pass `onClose:` to take the bar away when your app shows it on demand.
 Anything in `.accessory { … }` rides with it.
@@ -106,7 +109,11 @@ Without the bar: `graine.voice.attach(to: window)` once, then
 `graine.voice.start()` / `.end()` / `.setMuted(_:)`. `GraineVoice` is an
 `ObservableObject`, so your own SwiftUI can draw from `connected`, `connecting`,
 `phase` (idle, connecting, reconnecting, thinking, speaking, listening),
-`quality`, `online`, `reconnecting`, `connectivity` and `captions`.
+`quality`, `online`, `reconnecting`, `connectivity`, `captions`, and a connect's
+own progress: `connectStage` (registering, dialling, retrying, switching),
+`slowConnect` (waited on past `GraineConfig.Timing.slowConnectMs`, 4 s by
+default) and `callFailed` (neither transport could carry it; `start()` tries
+again).
 `GraineListener` (held weakly) reports the same events, plus components
 (`onWidget`), friction (`onFriction`) and errors.
 
@@ -140,6 +147,11 @@ until they arrive (or if they never do) draws the system font at the same
 weight. Your app names no font. A family your app ships itself wins and is
 never downloaded — map it to your font's registered name with
 `GraineConfig(…, fonts: ["Inter": "InterVariable"])` if the two differ.
+
+The brand's logo, wherever it stands in for the launcher glyph (the launcher,
+the bar's avatar), is drawn whole — fitted into the largest square its shape
+holds, never cropped — on the plate the dashboard chose for it
+(`GraineNativeAppearance.logoPlate`): the accent, or white with a hairline.
 
 The launcher places the call on a tap and ends it on the next; pass `action:`
 to open your own UI instead. `"auto"` follows the device's light or dark, and switches with it. An app that

@@ -191,6 +191,14 @@ enum VoiceBarStatus {
         var connected = false
         var phase: GrainePhase = .idle
         var quality: GraineConnectionQuality = .unknown
+        /// Neither transport could carry the last start (`graine:progress` `failed`).
+        var callFailed = false
+        /// Where the connect is, as the engine reports it.
+        var connectStage: GraineConnectStage? = nil
+        /// The customer has waited on this connect past `GraineConfig.Timing.slowConnectMs`.
+        var slowConnect = false
+        /// The brand's words for the connecting moment (Appearance → Loading), resolved: the default when they chose none.
+        var connectingWords = "Connecting…"
     }
 
     struct Line: Equatable {
@@ -200,6 +208,36 @@ enum VoiceBarStatus {
         let waiting: String?
         /// The agent is listening or speaking: the meter goes before the words.
         let meter: Bool
+        /// Words the loader says in place of the moment's own ("Still connecting…"). Nil: the moment's.
+        var label: String? = nil
+
+        /// What the line says out loud: the label, else the brand's words for the moment it waits on, else the text.
+        func spoken(loader: GraineLoaderLook) -> String {
+            label ?? waiting.flatMap { loader.text.forMoment($0) } ?? text
+        }
+    }
+
+    /**
+     * WHAT A CONNECT SAYS WHILE IT RUNS. Measured, the commonest slow connect
+     * on mobile data is a connection the phone dropped while idle being
+     * replaced: a few seconds the customer will wait if the bar says what is
+     * happening, and will not if it says "Connecting…" for all of them.
+     *
+     * The words stay the BRAND's. The loader draws each moment in the wording
+     * set under Appearance → Loading — often not English — so a retry or a
+     * switch to the other transport is the "reconnecting" moment, in their
+     * words, and a slow connect only says "Still connecting…" while the brand
+     * has left "Connecting…" as it was. A wording someone chose is never
+     * overwritten. The React Native bar's `connectingLook`.
+     */
+    static func connecting(_ s: Input) -> Line {
+        if s.connectStage == .retrying || s.connectStage == .switching {
+            return Line(text: "Reconnecting…", waiting: "reconnecting", meter: false)
+        }
+        if s.slowConnect && s.connectingWords == Loaders.defaultText.connecting {
+            return Line(text: "Still connecting…", waiting: "connecting", meter: false, label: "Still connecting…")
+        }
+        return Line(text: s.connectingWords, waiting: "connecting", meter: false)
     }
 
     static func line(_ s: Input) -> Line {
@@ -212,7 +250,9 @@ enum VoiceBarStatus {
         if s.reconnecting || s.connectivity == .retrying { return Line(text: "Reconnecting…", waiting: "reconnecting", meter: false) }
         if s.micDenied { return say("Needs microphone") }
         if s.connectivity == .failed { return say("Couldn’t load · tap to retry") }
-        if !s.ready || s.connecting { return Line(text: "Connecting…", waiting: "connecting", meter: false) }
+        // Neither transport could carry the call. The microphone tries again.
+        if s.callFailed { return say("Couldn’t connect · tap to retry") }
+        if !s.ready || s.connecting { return connecting(s) }
         if s.muted { return say("Muted") }
         // The gap between the customer finishing and the agent answering: a loader, not a meter over silence.
         if s.connected && s.phase == .thinking { return Line(text: "Thinking…", waiting: "thinking", meter: false) }

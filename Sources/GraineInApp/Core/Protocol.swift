@@ -54,6 +54,8 @@ public enum GraineProtocol {
         public static let quality = "graine:quality"
         public static let network = "graine:network"
         public static let reconnecting = "graine:reconnecting"
+        /// Where a connect is: registering · dialling · retrying · switching · failed (contract/DESIGN.md "Connecting").
+        public static let progress = "graine:progress"
     }
 
     /**
@@ -196,6 +198,9 @@ public enum GraineProtocol {
             return .network(online: JSON.flag(o["online"]))
         case In.reconnecting:
             return .reconnecting(active: JSON.flag(o["active"]))
+        case In.progress:
+            // A stage this build does not know is ignored, not stored: the engine may name more later.
+            return GraineConnectProgress.from(o["stage"] as? String).map { .progress($0) }
         default:
             return nil
         }
@@ -274,6 +279,7 @@ public enum PageMessage {
     case quality(rttMs: Double?, jitterMs: Double?, loss: Double?)
     case network(online: Bool)
     case reconnecting(active: Bool)
+    case progress(GraineConnectProgress)
 }
 
 /**

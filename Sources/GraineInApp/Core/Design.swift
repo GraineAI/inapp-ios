@@ -347,7 +347,7 @@ enum DesignRules {
 
     /// The launcher's height (and a round launcher's width), in points.
     static let launcherSize = 56.0
-    /// The glyph or logo, as a share of the launcher's height.
+    /// The glyph (and a letter), as a share of the launcher's height. A logo is fitted by `logoBox` instead.
     static let launcherGlyphShare = 0.46
     /// A squircle's continuous corners, as a share of its size.
     static let squircleShare = 0.30
@@ -359,6 +359,51 @@ enum DesignRules {
         case .squircle: return size * squircleShare
         case .roundedSquare: return min(radius.lg, size / 2)
         case .square: return min(radius.sm, size / 2)
+        }
+    }
+
+    // MARK: - The brand's logo
+
+    /**
+     * THE BRAND'S LOGO, WHOLE (contract/DESIGN.md "The brand's logo"). It was
+     * drawn to fill the circle, and a wordmark lost both ends, a square logo
+     * its corners. It is fitted instead — proportions kept, centred, never
+     * cropped — into the largest square its shape holds: 70% of the size for a
+     * circle, a squircle and a pill's height (the largest square a circle
+     * holds is 70.7% of it), 80% for a rounded or square shape. Rounded down,
+     * never up: a box rounded up pokes its corners past the circle.
+     */
+    static func logoBox(_ shape: GraineLauncherShape, size: Double) -> Double {
+        let share = shape == .roundedSquare || shape == .square ? 0.8 : 0.7
+        return max(1, (size * share).rounded(.down))
+    }
+
+    /// The white plate's fill.
+    static let logoPlateWhite = "#FFFFFF"
+    /// A pill's label on the white plate: what reads on white.
+    static let logoPlateLabel = "#101318"
+
+    /// The fill and outline under a logo. A nil outline is none.
+    struct LogoPlateLook: Equatable {
+        struct Outline: Equatable {
+            let width: Double
+            let color: String
+        }
+
+        let fill: String
+        let outline: Outline?
+    }
+
+    /**
+     * The plate under the logo: the accent with no outline, or white with a
+     * `max(1, borderWidth)` outline in `border` — a white plate on a white bar
+     * needs its hairline to be seen at all. A hard offset keeps its own
+     * `colors.text` outline instead; the views decide that.
+     */
+    static func logoPlateLook(_ plate: GraineLogoPlate, accent: String, border: String, borderWidth: Double = 1) -> LogoPlateLook {
+        switch plate {
+        case .white: return LogoPlateLook(fill: logoPlateWhite, outline: .init(width: max(1, borderWidth), color: border))
+        case .accent: return LogoPlateLook(fill: accent, outline: nil)
         }
     }
 

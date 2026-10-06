@@ -21,6 +21,10 @@ import SwiftUI
  * shadow, or the solid offset and an outline in the text colour. Without a
  * design: a round accent button with the logo or the first letter, as the
  * React Native SDK's.
+ *
+ * The brand's logo is drawn WHOLE — fitted into the largest square the shape
+ * holds, never cropped — on its plate: the accent, or white with a hairline
+ * (a pill's label then in near-black). DESIGN.md "The brand's logo".
  */
 public struct GraineLauncher: View {
     private let graine: GraineInApp?
@@ -70,6 +74,8 @@ struct GraineLauncherHost: View {
     let action: (() -> Void)?
 
     @StateObject private var model: GraineAppearanceModel
+    /// A logo that would not load: the launcher goes back to the letter on the accent until the logo changes.
+    @State private var failedLogo: String? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -103,6 +109,12 @@ struct GraineLauncherHost: View {
     }
 
     private var name: String { label ?? dash.heading }
+
+    /// The logo the button shows, if it shows one: not during a call (it is the end button then), and not one that would not load.
+    private func shownLogo(glyph: Bool) -> String? {
+        guard !live, !glyph, let raw = dash.logoUrl, raw != failedLogo, URL(string: raw) != nil else { return nil }
+        return raw
+    }
 
     var body: some View {
         let t = tokens
@@ -139,20 +151,29 @@ struct GraineLauncherHost: View {
         let c = t.colors
         let pill = t.shape.launcher == .pill
         let shape = GraineLauncherOutline(kind: t.shape.launcher, radius: t.shape.radius)
-        let fill: Color = live ? .graineHex(c.danger) : (accentOverride ?? .graineHex(c.accent))
+        // The brand's logo sits on its plate; a glyph, a letter or the hang-up always on the accent (or danger).
+        let logo = shownLogo(glyph: t.icons.launcher != nil)
+        let plate = DesignRules.logoPlateLook(
+            logo != nil ? dash.logoPlate : .accent, accent: c.accent, border: c.border, borderWidth: t.shape.borderWidth
+        )
+        let onPlate = plate.outline != nil
+        let fill: Color = live ? .graineHex(c.danger) : (onPlate ? .graineHex(plate.fill) : (accentOverride ?? .graineHex(c.accent)))
         let ink: Color = live ? .white : (accentOverride == nil ? .graineHex(c.onAccent, fallback: .white) : .white)
         let mark = size * CGFloat(DesignRules.launcherGlyphShare)
+        // A pill's logo sits in its height, as a circle's does.
+        let box = CGFloat(DesignRules.logoBox(pill ? .circle : t.shape.launcher, size: Double(size)))
         let hard = t.elevation.hardOffset
         let textColor = Color.graineHex(c.text)
         return HStack(spacing: 10) {
-            designedMark(t, ink: ink, size: mark)
+            designedMark(t, ink: ink, size: mark, logoBox: box)
             if pill {
                 Text(live ? "End call" : name)
                     .font(GraineTypeface.font(
                         family: t.font.heading, size: t.font.scale.body, weight: t.font.weights.title,
                         names: graine.config.fonts, faces: fonts.faces
                     ))
-                    .foregroundColor(ink)
+                    // On the white plate the label is what reads on white, not what reads on the accent.
+                    .foregroundColor(onPlate ? .graineHex(DesignRules.logoPlateLabel) : ink)
                     .lineLimit(1)
             }
         }
@@ -163,21 +184,26 @@ struct GraineLauncherHost: View {
         .fixedSize(horizontal: pill, vertical: false)
         .background(shape.fill(fill))
         .overlay {
-            if hard != nil { shape.stroke(textColor, lineWidth: CGFloat(t.shape.borderWidth)) }
+            // A hard offset keeps its own outline in the text colour; otherwise a white plate wears its hairline.
+            if hard != nil {
+                shape.stroke(textColor, lineWidth: CGFloat(t.shape.borderWidth))
+            } else if let hairline = plate.outline, !live {
+                shape.border(.graineHex(hairline.color), width: CGFloat(hairline.width))
+            }
         }
         .background(GraineShadowLayer(shape: shape, shadow: t.elevation.floating, hardOffset: hard, hardColor: textColor))
         .contentShape(shape)
     }
 
     @ViewBuilder
-    private func designedMark(_ t: GraineThemeTokens, ink: Color, size mark: CGFloat) -> some View {
+    private func designedMark(_ t: GraineThemeTokens, ink: Color, size mark: CGFloat, logoBox box: CGFloat) -> some View {
         if live {
             // The SDK's own hang-up, in the design's icon style — the same drawing as the bar's end button.
             GraineIconView(name: .end, style: t.icons.style, stroke: t.icons.stroke, color: ink, size: mark)
         } else if let glyph = t.icons.launcher {
-            GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: ink, size: mark, fallback: logoOrLetter(ink: ink, size: mark, type: t.font))
+            GraineGlyphView(glyph: glyph, stroke: t.icons.stroke, color: ink, size: mark, fallback: logoOrLetter(ink: ink, logoBox: box, type: t.font))
         } else {
-            logoOrLetter(ink: ink, size: mark, type: t.font)
+            logoOrLetter(ink: ink, logoBox: box, type: t.font)
         }
     }
 
@@ -187,7 +213,9 @@ struct GraineLauncherHost: View {
         let accentHex = dash.accent
         let danger = Appearance.prefersDark(model.appearance, deviceIsDark: colorScheme == .dark)
             ? GraineBarPalette.dark.danger : GraineBarPalette.light.danger
-        let fill: Color = live ? danger : (accentOverride ?? .graineHex(accentHex))
+        // The React Native classic launcher's plate: white with a light hairline, or the accent.
+        let onPlate = shownLogo(glyph: false) != nil && dash.logoPlate == .white
+        let fill: Color = live ? danger : (onPlate ? .graineHex(DesignRules.logoPlateWhite) : (accentOverride ?? .graineHex(accentHex)))
         let ink: Color = live || accentOverride != nil ? .white : .graineHex(Appearance.onAccent(accentHex), fallback: .white)
         return ZStack {
             Circle().fill(fill)
@@ -196,20 +224,25 @@ struct GraineLauncherHost: View {
                     .font(.system(size: size * 0.34, weight: .bold))
                     .foregroundColor(ink)
             } else {
-                logoOrLetter(ink: ink, size: size * 0.6, type: nil)
+                logoOrLetter(ink: ink, logoBox: CGFloat(DesignRules.logoBox(.circle, size: Double(size))), type: nil)
             }
         }
         .frame(width: size, height: size)
+        .overlay {
+            if onPlate { Circle().strokeBorder(Color.graineHex(GraineLauncherHost.classicHairline), lineWidth: 1) }
+        }
         .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
         .contentShape(Circle())
     }
 
+    /// The classic launcher's hairline around the white plate, as the React Native SDK draws it.
+    static let classicHairline = "#E5E7EB"
+
     // MARK: - Logo, else a letter
 
-    /// The brand's logo; while it loads, nothing; if it cannot load (or there is none), the name's first letter.
-    @ViewBuilder
-    private func logoOrLetter(ink: Color, size mark: CGFloat, type: GraineThemeTokens.Typography?) -> some View {
-        let letter = Text(String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
+    /// The name's first letter, in the design's heading face when there is one.
+    private func letter(ink: Color, type: GraineThemeTokens.Typography?) -> some View {
+        Text(String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)).uppercased())
             .font(type.map {
                 GraineTypeface.font(
                     family: $0.heading, size: Double(size) * 0.4, weight: $0.weights.title,
@@ -217,23 +250,39 @@ struct GraineLauncherHost: View {
                 )
             } ?? .system(size: size * 0.4, weight: .bold))
             .foregroundColor(ink)
-        if let url = dash.logoUrl.flatMap({ URL(string: $0) }) {
+    }
+
+    /**
+     * The brand's logo, WHOLE: fitted into `box` — the largest square the
+     * shape holds — proportions kept, never cropped (it was clipped to a
+     * rounded square, which took a square logo's corners). While it loads,
+     * nothing; if it cannot load, or there is none, the name's first letter.
+     */
+    @ViewBuilder
+    private func logoOrLetter(ink: Color, logoBox box: CGFloat, type: GraineThemeTokens.Typography?) -> some View {
+        if let raw = shownLogo(glyph: false), let url = URL(string: raw) {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case .success(let image):
                     image.resizable().scaledToFit()
-                        .frame(width: mark, height: mark)
-                        .clipShape(RoundedRectangle(cornerRadius: mark * 0.22, style: .continuous))
+                        .frame(width: box, height: box)
                 case .failure:
-                    letter
+                    letter(ink: ink, type: type).onAppear { failedLogo = raw }
                 default:
-                    Color.clear.frame(width: mark, height: mark)
+                    Color.clear.frame(width: box, height: box)
                 }
             }
             .accessibilityHidden(true)
         } else {
-            letter
+            letter(ink: ink, type: type)
         }
+    }
+}
+
+extension GraineLauncherOutline {
+    /// An outline drawn inside the edge, as a CSS border is: twice the width, clipped to the shape.
+    func border(_ color: Color, width: CGFloat) -> some View {
+        stroke(color, lineWidth: width * 2).clipShape(self)
     }
 }
 

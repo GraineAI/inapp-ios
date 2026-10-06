@@ -201,9 +201,15 @@ import Testing
                 maxRadius: f["maxRadius"] == nil ? nil : try number(f["maxRadius"]),
                 origin: f["origin"] as? String
             )
-            let mine: [String: Any] = ["accent": a.accent, "heading": a.heading, "logoUrl": a.logoUrl ?? NSNull(), "radius": a.radius]
+            let mine: [String: Any] = [
+                "accent": a.accent, "heading": a.heading, "logoUrl": a.logoUrl ?? NSNull(),
+                "logoPlate": a.logoPlate.rawValue, "radius": a.radius,
+            ]
             #expect(Canon(c["output"]) == Canon(mine), "case: \(Canon(c))")
         }
+        // The plate is in the parity file, white, the accent and junk alike — not only defaulted.
+        let plates = try cases("appearance").compactMap { ($0["output"] as? [String: Any])?["logoPlate"] as? String }
+        #expect(plates.contains("white") && plates.contains("accent"), "rn-parity.json carries no white plate")
         for c in try cases("palette") {
             let p = Appearance.palette(c["appearance"] as? [String: Any], deviceDark: c["scheme"] as? String == "dark", accent: c["accent"] as? String)
             let mine: [String: Any] = [

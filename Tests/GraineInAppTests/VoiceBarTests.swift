@@ -236,6 +236,7 @@ import Testing
         #expect(line { $0.connecting = true } == Line(text: "Connecting…", waiting: "connecting", meter: false))
         #expect(line { $0.ready = false } == Line(text: "Connecting…", waiting: "connecting", meter: false))
         #expect(line { $0.ready = false; $0.connectivity = .failed } == words("Couldn’t load · tap to retry"))
+        #expect(line { $0.callFailed = true } == words("Couldn’t connect · tap to retry"))
         #expect(line { $0.micDenied = true } == words("Needs microphone"))
         #expect(line { $0.reconnecting = true } == Line(text: "Reconnecting…", waiting: "reconnecting", meter: false))
         #expect(line { $0.connectivity = .retrying } == Line(text: "Reconnecting…", waiting: "reconnecting", meter: false))
@@ -258,6 +259,7 @@ import Testing
             ("Reconnecting…", { $0.reconnecting = true }),
             ("Needs microphone", { $0.micDenied = true }),
             ("Couldn’t load · tap to retry", { $0.connectivity = .failed }),
+            ("Couldn’t connect · tap to retry", { $0.callFailed = true }),
             ("Connecting…", { $0.connecting = true }),
             ("Muted", { $0.muted = true }),
             ("Thinking…", { $0.connected = true; $0.phase = .thinking }),
