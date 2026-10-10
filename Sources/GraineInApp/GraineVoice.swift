@@ -284,6 +284,11 @@ public final class GraineVoice: NSObject, ObservableObject {
             report { $0.onError("GraineVoice.attach(to:) must be called before start().") }
             return
         }
+        // The two engines never hold a call at once: a native call (GraineCalls) owns the audio until it ends.
+        guard !graine.nativeCallLive else {
+            report { $0.onError("A call is in progress on GraineCalls; end it before starting one here.") }
+            return
+        }
         // A new call, not a continuation: the last one's words must not appear above this one's first line.
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }

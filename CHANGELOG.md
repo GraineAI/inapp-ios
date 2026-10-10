@@ -1,3 +1,19 @@
+## 0.6.0
+
+- **Calls like WhatsApp**, through CallKit and VoIP pushes: `GraineInApp.shared.calls` (`GraineCalls`). The customer calls your agent with `startCall(reason:variables:)`, which returns the call's id, or your agent rings the customer through a VoIP push — `enableVoIPPushes(onToken:)`, or `reportIncomingCall(payload:completion:)` for an app with its own `PKPushRegistry`. Calls use the system's call screen, answer from the lock screen, work over Bluetooth and keep going with the screen off. One call at a time.
+- **Every VoIP push rings**, as iOS requires. A malformed push, or one that arrives during a live call, is shown and ended at once, and your app hears it as `missed`. The push your server sends: `type: "agent_call"`, `call_id` (required), `reason`, `caller_name` and `variables` (a JSON object, as a string).
+- **The call's audio runs in your app**, with the platform's echo cancellation: the earpiece by default, Bluetooth headsets, `setSpeaker(_:)` and `setMuted(_:)`. Audio starts when CallKit hands it over, and the agent's greeting waits for it. Interruptions and route changes are handled.
+- **The same agent and context as the assistant bar**: who the customer is (`identify`, `setVariables`), the current screen, and your registered actions. Each call also sets `who_called` (`"customer"` for `startCall`, `"agent"` for a ring) and `call_reason`; the push's `variables` win over the rest.
+- **Outcomes for your server**: `GraineCallsListener` reports every call's outcome with its id — `answered`, `declined`, `missed` (no answer within `ringTimeout`, 30 s by default), `ended(.local | .remote | .failed)` and `failed(reason)` — plus incoming calls and state changes.
+- **Your call screen, or the SDK's**: `GraineCalls` is an `ObservableObject` (`state`, `callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `caption`, `connectedAt`); `GraineCallView` is a SwiftUI call screen with mute, speaker and end, and answer and decline while it rings.
+- `GraineCallsConfig`: `displayName`, `ringtoneSound`, `iconTemplateImageData`, `includesCallsInRecents` (off by default) and `ringTimeout`. Your app adds `UIBackgroundModes` `audio` and `voip`, Push Notifications, and `NSMicrophoneUsageDescription`.
+- `GraineCallsHost`, for the React Native and Flutter call packages: they drive these same calls through it, and it keeps their options so that a VoIP push that wakes your app rings before any JavaScript or Dart has run. A native app uses `GraineInApp.shared.calls` and never needs it.
+- Starting a call ends a conversation in the assistant bar, and the bar cannot start one while a call is live. The assistant bar is otherwise unchanged.
+- `GraineSessionConfig.wsHost`, filled in by the server.
+- A privacy manifest (`PrivacyInfo.xcprivacy`): the required-reason APIs the SDK calls — system uptime and `UserDefaults` — and no tracking.
+
+Guide: [In-app calling](https://www.graine.ai/docs/in-app/calling).
+
 ## 0.5.0
 
 - A connect that says where it is. The engine now reports a connect's stage (`graine:progress`: registering, dialling, retrying, switching, failed — `contract/DESIGN.md`, "Connecting"). The voice bar draws a retry, or a move to the other transport, as the loader's "reconnecting" moment in the brand's own words; after 4 s of waiting on a connect it says "Still connecting…" — but only while the brand's connecting words are the default "Connecting…": a wording the brand chose, often not English, is never replaced. When nothing could carry the call it says "Couldn’t connect · tap to retry", and the microphone (or a tap on the status) places a new call. A stage this build does not know is ignored.
@@ -30,7 +46,7 @@
 
 ## 0.1.1
 
-- Back in the foreground, an idle engine is told to warm (`graine:warm`). The engine keeps a SIP registration warm so a tap costs only the call itself, but a phone drops that idle connection while the app is in the background, and the engine page is not reliably told by its own web view. The SDK now says so when the app returns — only when the page is ready, never during a call.
+- Back in the foreground, an idle engine is told to get ready again (`graine:warm`). The engine keeps its line ready so a tap costs only the call itself, but a phone drops that idle connection while the app is in the background. The SDK now tells the engine when the app returns — only when the page is ready, never during a call.
 - Connecting is faster in the hosted engine itself — a warm tap connects in about 0.2 s — with no change to this package.
 
 ## 0.1.0

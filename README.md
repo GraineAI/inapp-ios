@@ -4,7 +4,9 @@ The Graine in-app agent for native iOS (Swift, iOS 15+, no dependencies). The
 agent sees the screen you describe, acts through actions you register, draws
 components, and talks by voice. The call runs in a page Graine hosts, inside a
 1×1 invisible `WKWebView` this SDK owns, so every audio fix (TURN relay, media
-watchdog, WebSocket fallback) reaches your app without a release.
+watchdog, WebSocket fallback) reaches your app without a release. Phone-style
+calls on CallKit and VoIP pushes run natively instead — see
+[Calls](#calls-callkit--voip-push).
 
 ## Install
 
@@ -13,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.5.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.6.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -27,6 +29,12 @@ Add to `Info.plist`, because your app is the one asking for the microphone:
 
 In the dashboard, add `app://` to the agent's **Allowed domains** (Embed &
 Widgets). Without it, every session is refused with a 403.
+
+**App Store privacy.** The SDK ships a privacy manifest that declares the
+required-reason APIs it calls — system uptime, for timing, and `UserDefaults`,
+for its call settings — and no tracking; Xcode adds it to your app's privacy
+report. What your app collects through the agent (the customer's voice, and
+what you report to it) is yours to declare in your App Store privacy details.
 
 ## Set up once, at launch
 
@@ -123,6 +131,87 @@ call (45s by default, from the dashboard, overridable with
 `stalled_on_step`. Call `noteInteraction()` when the customer does something
 that is not a field edit.
 
+## Calls (CallKit + VoIP push)
+
+A WhatsApp-style call with your agent — the customer calling it, or your agent
+ringing the customer — on the system's own call screen: the lock screen,
+Bluetooth, the call going on with the screen off. `GraineInApp.shared.calls`
+runs the call's audio in your app's own process (the platform's echo canceller,
+no web view), over the same conversation as the in-app agent, so the agent
+still sees the screen you describe and runs your actions.
+
+**In Xcode**: Signing & Capabilities → **Push Notifications**, and **Background
+Modes** → *Audio, AirPlay, and Picture in Picture* and *Voice over IP*. That
+is, in `Info.plist`:
+
+```xml
+<key>UIBackgroundModes</key>
+<array><string>audio</string><string>voip</string></array>
+<key>NSMicrophoneUsageDescription</key>
+<string>Used to talk to the assistant.</string>
+```
+
+**At launch, every launch** (iOS wakes a terminated app for a VoIP push and
+delivers it once this has run):
+
+```swift
+let calls = GraineInApp.configure(GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_live_…")).calls
+calls.configure(GraineCallsConfig(
+    displayName: "Acme Assistant",      // what the call shows; a push's caller_name wins
+    ringtoneSound: nil,                 // a sound file in your bundle, or the system ringtone
+    includesCallsInRecents: false,
+    ringTimeout: 30                     // seconds before an unanswered ring is missed
+))
+calls.enableVoIPPushes { token in       // hex; nil when invalidated
+    myServer.saveVoipToken(token)
+}
+calls.addListener(self)
+```
+
+**The customer calls the agent**: `calls.startCall(reason: "card_blocked", variables: ["order": "A-1043"])`
+returns the call's id (nil while another call is live). The agent hears
+`who_called = "customer"` and `call_reason`.
+
+**The agent rings the customer**: your server sends a VoIP push (APNs headers
+`apns-push-type: voip`, `apns-topic: <your bundle id>.voip`) with string keys:
+
+```json
+{ "type": "agent_call", "call_id": "c_123", "reason": "payment_due",
+  "caller_name": "Acme", "variables": "{\"name\":\"Asha\"}" }
+```
+
+`type` and `call_id` are required. It rings through CallKit; answering opens
+the conversation with `who_called = "agent"`, `call_reason` and the
+variables. Every push is reported to CallKit before its completion runs, as
+iOS requires — a malformed one, or one that arrives while a call is live, is
+reported and ended at once. An app with its own `PKPushRegistry` passes the
+payload to `calls.reportIncomingCall(payload:completion:)` instead.
+
+**Tell your server what happened** (`GraineCallsListener`, held weakly, every
+method optional):
+
+```swift
+func onCallOutcome(_ outcome: GraineCallOutcome, callId: String) {
+    // .answered · .declined · .missed (ring timeout, or busy) ·
+    // .ended(.local | .remote | .failed) · .failed(reason) — it never connected
+}
+func onIncomingCall(_ call: GraineIncomingCall) {}
+func onCallState(_ state: GraineCallState, callId: String?) {}
+```
+
+In the call: `calls.end()`, `setMuted(_:)`, `setSpeaker(_:)` (earpiece by
+default) and `answer()`. `GraineCalls` is an `ObservableObject` — `state`,
+`callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `caption`,
+`connectedAt` — and `GraineCallView()` is a ready call screen for while your
+app is open. One call at a time: starting one ends any call `voice` holds, and
+`voice.start()` refuses while one is live. `endOnBackground` is `voice`'s
+setting; a native call keeps going in the background, as a phone call does.
+
+**Frameworks**: the React Native (`@graineai/inapp-react-native-calls`) and
+Flutter (`graine_inapp`) packages carry these same calls and drive them
+through `GraineCallsHost`. In those apps, use the package's own API; the
+host is not called directly.
+
 ## The brand's design
 
 The look is chosen in the dashboard (Web components → Design) and arrives with
@@ -160,8 +249,8 @@ draws its own UI reads the same tokens from `graine.theme` (or `onTheme`).
 ## Tests
 
 Pure logic lives in `Sources/GraineInApp/Core` (Foundation only) and is tested
-on a Mac against `contract/fixtures.json`, `contract/rn-parity.json` and
-`contract/design.json` —
+on a Mac against `contract/fixtures.json`, `contract/rn-parity.json`,
+`contract/design.json` and `contract/native-calls.json` —
 answers generated by the React Native SDK itself, which every Graine SDK must
 reproduce. With Xcode, `swift test`.
 With only the Command Line Tools, SwiftPM does not put swift-testing on the
@@ -173,3 +262,13 @@ DEVELOPER_DIR=/Library/Developer/CommandLineTools swift test \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib
 ```
+
+A whole call can also be run against your agent from a Mac, end to end, with a
+spoken WAV standing in for the microphone. Opt-in, and the key only from the
+environment:
+
+```sh
+GRAINE_LIVE_E2E=1 GRAINE_E2E_KEY=<publishable key> swift test --filter NativeCallLiveTests
+```
+
+(`GRAINE_E2E_WAV` names a 16 kHz mono PCM16 WAV; without it the test makes one with `say`.)

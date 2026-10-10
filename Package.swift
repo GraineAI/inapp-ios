@@ -27,7 +27,10 @@ let package = Package(
     targets: [
         .target(
             name: "GraineInApp",
-            path: "Sources/GraineInApp"
+            path: "Sources/GraineInApp",
+            // The privacy manifest: the required-reason APIs the SDK calls
+            // (systemUptime for timing, UserDefaults for the calls' settings).
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .testTarget(
             name: "GraineInAppTests",

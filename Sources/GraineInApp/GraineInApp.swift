@@ -275,7 +275,18 @@ public final class GraineInApp {
     #if os(iOS)
     /// The voice call. Attach it to your window before starting one. Main thread only.
     public private(set) lazy var voice: GraineVoice = GraineVoice(graine: self)
+
+    /**
+     * Calls like WhatsApp, on CallKit and VoIP pushes: the customer calling
+     * your agent (`startCall`), or your agent ringing the customer (a push).
+     * The audio runs in your app's own process, so the call keeps going with
+     * the screen off. Main thread only.
+     */
+    public private(set) lazy var calls: GraineCalls = GraineCalls(graine: self)
     #endif
+
+    /// A native call (`calls`) is live: the web view engine must not start one beside it. Main thread.
+    var nativeCallLive = false
 
     /// The design's typefaces, fetched and registered by the SDK; every surface draws from it.
     let fonts: GraineFontStore
@@ -631,8 +642,18 @@ public final class GraineInApp {
      * Always answers — a handler that throws is `error`, a slow one is `error`
      * with a timeout message, an unknown one is `refused`. The agent is blocked
      * waiting, so silence is the one answer never given.
+     *
+     * A native call answers on the socket itself, so it runs the same handlers
+     * inside the runtime's six seconds (`deadlineMs`), with its own words for
+     * a late handler (`timeoutMessage`).
      */
-    func executeAction(name: String, arguments: [String: Any], answer: @escaping (GraineActionResult) -> Void) {
+    func executeAction(
+        name: String,
+        arguments: [String: Any],
+        deadlineMs: Int = GraineProtocol.actionDeadlineMs,
+        timeoutMessage: String? = nil,
+        answer: @escaping (GraineActionResult) -> Void
+    ) {
         onMain {
             self.notifyListeners { $0.onActionRequested(name: name) }
             self.stateLock.lock()
@@ -653,10 +674,10 @@ public final class GraineInApp {
                 return
             }
             let deadline = DispatchWorkItem {
-                finish(.error("The app did not answer within \(GraineProtocol.actionDeadlineMs / 1000) seconds."))
+                finish(.error(timeoutMessage ?? "The app did not answer within \(GraineProtocol.actionDeadlineMs / 1000) seconds."))
             }
             call.deadline = deadline
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(GraineProtocol.actionDeadlineMs), execute: deadline)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(deadlineMs), execute: deadline)
             DispatchQueue.main.async {
                 do {
                     try action.run(arguments) { result in

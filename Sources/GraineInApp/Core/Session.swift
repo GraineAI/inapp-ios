@@ -11,6 +11,8 @@ public struct GraineSessionConfig {
     public let variables: [String: Any]
     /// The engine page's deployment id — its cache key.
     public let pageVersion: String?
+    /// Where the conversation socket lives, for a native call that could not mint a ticket. Nil: `wss://ws.graine.ai`.
+    public let wsHost: String?
     /// The in-app actions the dashboard declares for this agent.
     public let declaredActions: Set<String>
     /// The dashboard's friction rules for this agent, as served. Applied under `GraineConfig.friction`.
@@ -30,7 +32,8 @@ public struct GraineSessionConfig {
         pageVersion: String? = nil,
         declaredActions: Set<String> = [],
         friction: [String: Any]? = nil,
-        design: GraineDesign? = nil
+        design: GraineDesign? = nil,
+        wsHost: String? = nil
     ) {
         self.agentId = agentId
         self.webcallAgentId = webcallAgentId
@@ -40,6 +43,7 @@ public struct GraineSessionConfig {
         self.declaredActions = declaredActions
         self.friction = friction
         self.design = design
+        self.wsHost = wsHost
     }
 
     /// The dashboard's Call audio setting.
@@ -69,7 +73,8 @@ public struct GraineSessionConfig {
             pageVersion: JSON.nonEmpty(data["pageVersion"]),
             declaredActions: declared,
             friction: data["friction"] as? [String: Any],
-            design: GraineDesign.parse(data["design"])
+            design: GraineDesign.parse(data["design"]),
+            wsHost: JSON.nonEmpty(data["wsHost"])
         )
     }
 
