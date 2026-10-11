@@ -1,7 +1,12 @@
+## 0.6.1
+
+- **Answering a call checks the microphone**, as placing one does. CallKit's answer is never held up: once it is fulfilled, a granted microphone connects the call, a refused one ends it `failed` ("The microphone permission was not granted.") after `answered`, and one never asked for is asked for while the call stays connecting — refused, or no answer within 60 seconds, ends it the same way.
+- `GraineCallsHost` takes a `debug` option, so React Native and Flutter apps can turn on the SDK's debug log for calls.
+
 ## 0.6.0
 
 - **Calls like WhatsApp**, through CallKit and VoIP pushes: `GraineInApp.shared.calls` (`GraineCalls`). The customer calls your agent with `startCall(reason:variables:)`, which returns the call's id, or your agent rings the customer through a VoIP push — `enableVoIPPushes(onToken:)`, or `reportIncomingCall(payload:completion:)` for an app with its own `PKPushRegistry`. Calls use the system's call screen, answer from the lock screen, work over Bluetooth and keep going with the screen off. One call at a time.
-- **Every VoIP push rings**, as iOS requires. A malformed push, or one that arrives during a live call, is shown and ended at once, and your app hears it as `missed`. The push your server sends: `type: "agent_call"`, `call_id` (required), `reason`, `caller_name` and `variables` (a JSON object, as a string).
+- **Every VoIP push rings**, as iOS requires. A push that arrives during a live call is shown and ended at once, and your app hears it as `missed`; one that is not an agent call is ended at once too, and heard as `failed` if it carries a `call_id`. The push your server sends: `type: "agent_call"`, `call_id` (required), `reason`, `caller_name` and `variables` (a JSON object, as a string).
 - **The call's audio runs in your app**, with the platform's echo cancellation: the earpiece by default, Bluetooth headsets, `setSpeaker(_:)` and `setMuted(_:)`. Audio starts when CallKit hands it over, and the agent's greeting waits for it. Interruptions and route changes are handled.
 - **The same agent and context as the assistant bar**: who the customer is (`identify`, `setVariables`), the current screen, and your registered actions. Each call also sets `who_called` (`"customer"` for `startCall`, `"agent"` for a ring) and `call_reason`; the push's `variables` win over the rest.
 - **Outcomes for your server**: `GraineCallsListener` reports every call's outcome with its id — `answered`, `declined`, `missed` (no answer within `ringTimeout`, 30 s by default), `ended(.local | .remote | .failed)` and `failed(reason)` — plus incoming calls and state changes.

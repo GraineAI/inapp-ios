@@ -3,9 +3,10 @@ import Testing
 @testable import GraineInApp
 
 /*
- * The player's rules, the speaking clock, the call's state machine and the
- * push: pure, so every rule that keeps a call taking turns — and every outcome
- * a client's server is told — is proven without a phone.
+ * The player's rules, the speaking clock, the call's state machine, the
+ * microphone an answered call needs, and the push: pure, so every rule that
+ * keeps a call taking turns — and every outcome a client's server is told — is
+ * proven without a phone.
  */
 
 @Suite struct PlayoutPolicyTests {
@@ -242,6 +243,152 @@ import Testing
         #expect(GraineCallState.active.isLive)
         #expect(!GraineCallState.idle.isLive)
         #expect(!GraineCallState.ended(.local).isLive)
+    }
+
+    @Test func anAnsweredCallWithoutTheMicrophoneIsAnsweredThenFailed() {
+        // What the app's server hears, in order: the same two outcomes Android reports.
+        var m = CallMachine()
+        _ = m.handle(.incoming(id: "c1"))
+        #expect(m.handle(.answer).outcomes == [.answered])
+        #expect(m.handle(.failed(CallMicGate.notGranted)) == .init(
+            accepted: true, state: .ended(.failed), callId: "c1",
+            outcomes: [.failed("The microphone permission was not granted.")]
+        ))
+    }
+}
+
+/*
+ * An answered call and the microphone. CallKit's answer is never held for a
+ * permission prompt, so whether the conversation opens is decided after it:
+ * granted, refused (now or before), or a prompt nobody answered in a minute.
+ */
+@Suite struct CallMicGateTests {
+    /// The system's permission as the test sets it; every prompt kept, and answered by hand.
+    private final class FakeMic: MicPermissionSource {
+        var permission: MicPermission
+        private(set) var prompts: [(Bool) -> Void] = []
+
+        init(_ permission: MicPermission) { self.permission = permission }
+
+        func request(_ done: @escaping (Bool) -> Void) { prompts.append(done) }
+
+        /// The customer answers the newest prompt.
+        func answer(_ granted: Bool) { prompts.last?(granted) }
+    }
+
+    /// The minute, run by hand: nothing here sleeps.
+    private final class HandClock {
+        private(set) var armed: [(seconds: TimeInterval, fire: () -> Void, cancelled: Bool)] = []
+
+        func schedule(_ seconds: TimeInterval, _ fire: @escaping () -> Void) -> () -> Void {
+            armed.append((seconds, fire, false))
+            let index = armed.count - 1
+            return { [weak self] in self?.armed[index].cancelled = true }
+        }
+
+        /// The wait runs out: every timer still armed fires.
+        func runOut() {
+            for (i, timer) in armed.enumerated() where !timer.cancelled {
+                armed[i].cancelled = true
+                timer.fire()
+            }
+        }
+
+        var live: Int { armed.filter { !$0.cancelled }.count }
+    }
+
+    private func gate(_ mic: FakeMic, _ clock: HandClock) -> CallMicGate {
+        CallMicGate(source: mic, schedule: clock.schedule)
+    }
+
+    @Test func aGrantedMicrophoneConnectsAtOnceWithoutAsking() {
+        let mic = FakeMic(.granted)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        #expect(verdicts == [.connect])
+        #expect(mic.prompts.isEmpty)
+        #expect(clock.armed.isEmpty, "nothing to wait for")
+        #expect(!g.asking)
+    }
+
+    @Test func aDeniedMicrophoneEndsTheCallAtOnceWithoutAsking() {
+        let mic = FakeMic(.denied)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        #expect(verdicts == [.refused])
+        #expect(mic.prompts.isEmpty, "the system does not ask twice; only Settings gives it back")
+        #expect(clock.armed.isEmpty)
+    }
+
+    @Test func neverAskedItAsksAndConnectsOnceGranted() {
+        let mic = FakeMic(.undetermined)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        #expect(verdicts.isEmpty, "the call stays connecting while the prompt is up")
+        #expect(g.asking)
+        #expect(mic.prompts.count == 1)
+        #expect(clock.armed.map { $0.seconds } == [60])
+        mic.answer(true)
+        #expect(verdicts == [.connect])
+        #expect(clock.live == 0, "the minute stops once the customer answers")
+        #expect(!g.asking)
+        clock.runOut()
+        mic.answer(false)
+        #expect(verdicts == [.connect], "decided once")
+    }
+
+    @Test func neverAskedARefusalEndsTheCall() {
+        let mic = FakeMic(.undetermined)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        mic.answer(false)
+        #expect(verdicts == [.refused])
+        #expect(clock.live == 0)
+    }
+
+    @Test func aPromptNobodyAnswersWithinAMinuteEndsTheCall() {
+        let mic = FakeMic(.undetermined)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        clock.runOut()
+        #expect(verdicts == [.unanswered])
+        #expect(!g.asking)
+        mic.answer(true)
+        #expect(verdicts == [.unanswered], "a grant after the call has ended opens nothing")
+    }
+
+    @Test func aCallThatIsOverBeforeTheCustomerAnswersDecidesNothing() {
+        let mic = FakeMic(.undetermined)
+        let clock = HandClock()
+        let g = gate(mic, clock)
+        var verdicts: [CallMicGate.Verdict] = []
+        g.afterAnswer { verdicts.append($0) }
+        g.cancel()
+        #expect(clock.live == 0)
+        mic.answer(true)
+        clock.runOut()
+        #expect(verdicts.isEmpty)
+        // The next call is decided by its own prompt: the last one's late answer is not its answer.
+        g.afterAnswer { verdicts.append($0) }
+        mic.prompts.first?(false)
+        #expect(verdicts.isEmpty)
+        mic.answer(true)
+        #expect(verdicts == [.connect])
+    }
+
+    @Test func aPlacedAndAnAnsweredCallFailWithTheSameWords() {
+        #expect(CallMicGate.notGranted == "The microphone permission was not granted.")
+        #expect(CallMicGate.answerWaitSeconds == 60)
     }
 }
 

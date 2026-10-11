@@ -45,6 +45,7 @@ enum CallsHostCallScreen: String {
  *   ringTimeoutMs    number; 30000 by default, and for anything not above 0
  *   appVersion       string or null
  *   callScreen       "sdk" (the default) or "app"
+ *   debug            bool; false by default: the SDK's debug log (GraineConfig.debug)
  *   android          { smallIcon: string or null }
  *   ios              { iconTemplate: string or null, includesCallsInRecents: bool }
  *
@@ -66,6 +67,8 @@ struct CallsHostOptions: Equatable {
     var ringTimeoutMs = CallsHostOptions.defaultRingTimeoutMs
     var appVersion: String?
     var callScreen = CallsHostCallScreen.sdk
+    /// Read when the SDK instance is made, like the key and the base URL.
+    var debug = false
     var androidSmallIcon: String?
     var iosIconTemplate: String?
     var iosIncludesCallsInRecents = false
@@ -104,6 +107,7 @@ struct CallsHostOptions: Equatable {
             }
             options.callScreen = screen
         }
+        options.debug = try bool(map, "debug", named: "debug") ?? false
         if let android = try object(map, "android") {
             options.androidSmallIcon = try string(android, "smallIcon", named: "android.smallIcon").flatMap(nonBlank)
         }
@@ -123,6 +127,7 @@ struct CallsHostOptions: Equatable {
             "baseUrl": baseUrl,
             "ringTimeoutMs": ringTimeoutMs,
             "callScreen": callScreen.rawValue,
+            "debug": debug,
         ]
         if let sound = ringtoneSound { out["ringtoneSound"] = sound }
         if let version = appVersion { out["appVersion"] = version }
@@ -675,8 +680,8 @@ enum CallsHostCallScreenRule {
 
 /// What the host acts on: the SDK instance, its calls and the app around them. GraineCallsHost is the iOS one; the tests drive a fake.
 protocol CallsHostPlatform: AnyObject {
-    /// Make the SDK instance (one per process) and say which key and base URL it really runs with: the app may have made it first.
-    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String)
+    /// Make the SDK instance (one per process) and say which key, base URL and debug setting it really runs with: the app may have made it first.
+    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String, debug: Bool)
     func configureCalls(_ options: CallsHostOptions)
     func enableVoIPPushes(onToken: @escaping (String?) -> Void)
     func startCall(reason: String?, variables: [String: Any]) -> String?
@@ -704,9 +709,10 @@ protocol CallsHostPlatform: AnyObject {
  * WHAT EACH OF THE HOST'S METHODS DOES. Main thread only: GraineCallsHost hops
  * there first.
  *
- * The first `configure` makes the SDK instance from the key, base URL and app
- * version; later ones update the calls' configuration, and a different key or
- * base URL is kept for the next launch (the instance is one per process).
+ * The first `configure` makes the SDK instance from the key, base URL, app
+ * version and debug setting; later ones update the calls' configuration, and a
+ * different key, base URL or debug setting is kept for the next launch (the
+ * instance is one per process).
  * `restore()` applies the kept options at launch, without keeping them again.
  * Identity, variables, the screen and actions sent before there is an
  * instance are held and applied when it is made. The snapshot's `reason` (the
@@ -727,7 +733,7 @@ final class CallsHostCore {
     private var gate = CallsHostStateGate()
 
     private(set) var options: CallsHostOptions?
-    private var instance: (publishableKey: String, baseUrl: String)?
+    private var instance: (publishableKey: String, baseUrl: String, debug: Bool)?
     private(set) var reason: String?
     private(set) var error: String?
     private var voipWanted = false
@@ -782,11 +788,14 @@ final class CallsHostCore {
     private func apply(_ next: CallsHostOptions) {
         if instance == nil {
             let made = platform.makeInstance(next)
-            instance = (made.publishableKey, GraineProtocol.trimTrailingSlashes(made.baseUrl))
+            instance = (made.publishableKey, GraineProtocol.trimTrailingSlashes(made.baseUrl), made.debug)
             releaseHeld()
         }
         if let running = instance, running.publishableKey != next.publishableKey || running.baseUrl != next.baseUrl {
             log("The calls run with the publishableKey and baseUrl this launch started with; the new ones are kept and take effect at the next launch.")
+        }
+        if let running = instance, running.debug != next.debug {
+            log("The calls run with the debug setting this launch started with; the new one is kept and takes effect at the next launch.")
         }
         options = next
         platform.configureCalls(next)

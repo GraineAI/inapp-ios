@@ -73,7 +73,9 @@ public extension GraineCallsListener {
  *     calls.startCall(reason: "card_blocked") // the customer calls the agent
  *
  * One call at a time; a push while a call is live is reported and missed.
- * Starting a call ends any call the web view engine (`voice`) holds.
+ * Starting a call ends any call the web view engine (`voice`) holds. Placing
+ * or answering a call asks for the microphone if the app does not hold it; a
+ * call that does not get it ends `failed`.
  * `ObservableObject`: draw your own screen from `state`, `muted`, `speakerOn`,
  * `agentSpeaking` and `caption`, or present `GraineCallView`. Main thread.
  */
@@ -120,12 +122,20 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var routeObserver: NSObjectProtocol?
     private var audioActive = false
     private var savedAudio: SavedCallAudio?
+    private let micPermission: MicPermissionSource
+    /// Whether an answered call may have the microphone (Core/CallMachine.swift).
+    private lazy var answerMic = CallMicGate(source: micPermission, schedule: { seconds, fire in
+        let item = DispatchWorkItem(block: fire)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+        return { item.cancel() }
+    })
 
     /// How long "ended" shows before the calls are idle again.
     static let settleSeconds = 1.0
 
-    init(graine: GraineInApp) {
+    init(graine: GraineInApp, micPermission: MicPermissionSource = SystemMicPermission()) {
         self.graine = graine
+        self.micPermission = micPermission
         super.init()
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
@@ -223,13 +233,13 @@ public final class GraineCalls: NSObject, ObservableObject {
                 self.requestStart(uuid)
             } else {
                 self.graine.notifyListeners { $0.onMicDenied(reason: "NotAllowedError") }
-                self.transition(.failed("The microphone permission was not granted."))
+                self.transition(.failed(CallMicGate.notGranted))
             }
         }
-        if GraineVoice.micGranted() {
+        if micPermission.permission == .granted {
             proceed(true)
         } else {
-            GraineVoice.requestMic(proceed)
+            micPermission.request(proceed)
         }
         return id
     }
@@ -442,6 +452,24 @@ public final class GraineCalls: NSObject, ObservableObject {
         engine?.setMuted(value)
     }
 
+    /**
+     * The answered call, once the microphone is decided: the conversation
+     * opens, or the call ends `failed` — after `answered`, as on Android. The
+     * answer itself was fulfilled long before; CallKit never waits on this.
+     */
+    private func answered(_ verdict: CallMicGate.Verdict, call: GraineIncomingCall, uuid: UUID) {
+        guard callUUID == uuid, machine.state == .connecting else { return }
+        switch verdict {
+        case .connect:
+            beginConversation(whoCalled: "agent", reason: call.reason, own: GraineCalls.maskedVariables(call.variables))
+        case .refused, .unanswered:
+            // A refusal is the app's to explain (Settings); a prompt nobody answered may still be answered later.
+            if verdict == .refused { graine.notifyListeners { $0.onMicDenied(reason: "NotAllowedError") } }
+            provider?.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+            transition(.failed(CallMicGate.notGranted))
+        }
+    }
+
     // MARK: - The machine
 
     @discardableResult
@@ -464,6 +492,7 @@ public final class GraineCalls: NSObject, ObservableObject {
     private func releaseCall() {
         ringItem?.cancel()
         ringItem = nil
+        answerMic.cancel()
         engine?.hangUp()
         engine = nil
         unwatchContext?()
@@ -662,8 +691,10 @@ extension GraineCalls: CXProviderDelegate {
         endWebViewCall()
         transition(.answer)
         configureAudioSession()
-        beginConversation(whoCalled: "agent", reason: call.reason, own: GraineCalls.maskedVariables(call.variables))
+        // Fulfilled at once, whatever the microphone turns out to be: CallKit fails a call whose answer waits.
         action.fulfill()
+        let uuid = action.callUUID
+        answerMic.afterAnswer { [weak self] verdict in self?.answered(verdict, call: call, uuid: uuid) }
     }
 
     public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
@@ -740,6 +771,31 @@ private struct SavedCallAudio {
     let category: AVAudioSession.Category
     let mode: AVAudioSession.Mode
     let options: AVAudioSession.CategoryOptions
+}
+
+/// The system's microphone permission: AVAudioApplication from iOS 17, AVAudioSession before.
+final class SystemMicPermission: MicPermissionSource {
+    var permission: MicPermission {
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted: return .granted
+            case .denied: return .denied
+            case .undetermined: return .undetermined
+            // Asked, the system answers at once with whatever it holds.
+            @unknown default: return .undetermined
+            }
+        }
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return .granted
+        case .denied: return .denied
+        case .undetermined: return .undetermined
+        @unknown default: return .undetermined
+        }
+    }
+
+    func request(_ done: @escaping (Bool) -> Void) {
+        GraineVoice.requestMic(done)
+    }
 }
 
 private final class WeakCallsListener {

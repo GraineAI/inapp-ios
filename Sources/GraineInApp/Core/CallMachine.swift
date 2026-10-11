@@ -10,6 +10,7 @@ import Foundation
  * `declined`, `missed` (no answer within the ring timeout, or a push that
  * arrived while a call was live), `ended(local | remote | failed)` and
  * `failed(error)` (it never connected). Every one carries the call id.
+ * Whether an answered call may have the microphone is CallMicGate's, below.
  */
 
 /// Who rang whom.
@@ -200,6 +201,113 @@ struct CallMachine {
 
     private func refused() -> Transition {
         Transition(accepted: false, state: state, callId: call?.id, outcomes: [])
+    }
+}
+
+// MARK: - The microphone, once a call is answered
+
+/// The microphone permission, as the app holds it.
+enum MicPermission: Equatable {
+    case granted
+    case denied
+    /// Never asked: the system asks the customer once.
+    case undetermined
+}
+
+/// Where the microphone permission comes from: the system on a phone, a stand-in on a Mac.
+protocol MicPermissionSource: AnyObject {
+    var permission: MicPermission { get }
+    /// Ask the customer. `done` gets the answer on the main thread; an answer already given comes back at once.
+    func request(_ done: @escaping (Bool) -> Void)
+}
+
+/**
+ * AN ANSWERED CALL NEEDS THE MICROPHONE, AND CALLKIT WILL NOT WAIT FOR IT.
+ *
+ * CallKit fails a call whose answer action is not fulfilled promptly, so the
+ * answer never waits on a permission prompt: the call is answered (and
+ * reported `answered`) first, and the microphone is decided after, as Android
+ * decides it. Without this, a call answered without the permission connected
+ * and the agent never heard the customer.
+ *
+ *   granted        connect
+ *   denied         refused: the call ends `failed`
+ *   undetermined   ask, the call still connecting; granted connects, and a
+ *                  refusal — or no answer within a minute — ends it the same way
+ *
+ * The minute is for the lock screen: a prompt raised there waits for the app
+ * to be opened, and a call does not wait forever for that. Main thread, like
+ * GraineCalls; the clock is handed in so a Mac can drive it by hand.
+ */
+final class CallMicGate {
+    enum Verdict: Equatable {
+        /// The microphone is the app's: open the conversation.
+        case connect
+        /// Refused, now or before.
+        case refused
+        /// Still unanswered when the wait ran out.
+        case unanswered
+    }
+
+    /// Run `fire` after `seconds`; the returned closure cancels it.
+    typealias Schedule = (_ seconds: TimeInterval, _ fire: @escaping () -> Void) -> () -> Void
+
+    /// Why a call without the microphone failed — placed or answered, the same words.
+    static let notGranted = "The microphone permission was not granted."
+    /// How long an answered call waits for the customer to answer the prompt.
+    static let answerWaitSeconds: TimeInterval = 60
+
+    private let source: MicPermissionSource
+    private let schedule: Schedule
+    private let waitSeconds: TimeInterval
+    private var pending: ((Verdict) -> Void)?
+    private var cancelWait: (() -> Void)?
+    /// Which check an answer or the clock belongs to: a late one for a call that is over decides nothing.
+    private var generation = 0
+
+    init(source: MicPermissionSource, schedule: @escaping Schedule, waitSeconds: TimeInterval = CallMicGate.answerWaitSeconds) {
+        self.source = source
+        self.schedule = schedule
+        self.waitSeconds = max(0, waitSeconds)
+    }
+
+    /// Whether the customer is being asked right now.
+    var asking: Bool { pending != nil }
+
+    /**
+     * Decide for the call just answered. `decide` runs once: at once when the
+     * permission is already settled, otherwise on the customer's answer or
+     * when the wait runs out — unless `cancel()` comes first.
+     */
+    func afterAnswer(_ decide: @escaping (Verdict) -> Void) {
+        cancel()
+        switch source.permission {
+        case .granted:
+            decide(.connect)
+        case .denied:
+            decide(.refused)
+        case .undetermined:
+            let mine = generation
+            pending = decide
+            cancelWait = schedule(waitSeconds) { [weak self] in self?.settle(mine, .unanswered) }
+            source.request { [weak self] granted in self?.settle(mine, granted ? .connect : .refused) }
+        }
+    }
+
+    /// The call is over: nothing waiting is decided.
+    func cancel() {
+        generation += 1
+        pending = nil
+        cancelWait?()
+        cancelWait = nil
+    }
+
+    private func settle(_ check: Int, _ verdict: Verdict) {
+        guard check == generation, let decide = pending else { return }
+        pending = nil
+        cancelWait?()
+        cancelWait = nil
+        decide(verdict)
     }
 }
 

@@ -48,8 +48,8 @@ private func withDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
 /// iOS, as the host sees it: every call recorded, the main loop's turns and timers run by hand.
 private final class FakeCallsHostPlatform: CallsHostPlatform {
     var fields = CallsHostSnapshot()
-    /// What makeInstance reports; the options' own key and base URL when nil.
-    var runningWith: (publishableKey: String, baseUrl: String)?
+    /// What makeInstance reports; the options' own key, base URL and debug setting when nil.
+    var runningWith: (publishableKey: String, baseUrl: String, debug: Bool)?
     var nextCallId: String? = "call-1"
     var appActive = true
 
@@ -88,9 +88,9 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
         for timer in now { timer.block() }
     }
 
-    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String) {
+    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String, debug: Bool) {
         made.append(options)
-        return runningWith ?? (options.publishableKey, options.baseUrl)
+        return runningWith ?? (options.publishableKey, options.baseUrl, options.debug)
     }
 
     func configureCalls(_ options: CallsHostOptions) {
@@ -208,6 +208,7 @@ private final class HostRig {
         #expect(options.ringTimeout == 30)
         #expect(options.appVersion == nil)
         #expect(options.callScreen == .sdk)
+        #expect(!options.debug)
         #expect(options.androidSmallIcon == nil)
         #expect(options.iosIconTemplate == nil)
         #expect(!options.iosIncludesCallsInRecents)
@@ -220,6 +221,7 @@ private final class HostRig {
             "ringTimeoutMs": 45_000,
             "appVersion": "2.4.0",
             "callScreen": "app",
+            "debug": true,
             "android": ["smallIcon": "ic_call"],
             "ios": ["iconTemplate": "CallIcon", "includesCallsInRecents": true] as [String: Any],
         ]))
@@ -229,6 +231,7 @@ private final class HostRig {
         #expect(options.ringTimeout == 45)
         #expect(options.appVersion == "2.4.0")
         #expect(options.callScreen == .app)
+        #expect(options.debug)
         #expect(options.androidSmallIcon == "ic_call")
         #expect(options.iosIconTemplate == "CallIcon")
         #expect(options.iosIncludesCallsInRecents)
@@ -259,6 +262,8 @@ private final class HostRig {
             (with(["callScreen": 1]), "callScreen must be a string"),
             (with(["callScreen": "web"]), "callScreen must be \"sdk\" or \"app\""),
             (with(["callScreen": "SDK"]), "callScreen must be \"sdk\" or \"app\""),
+            (with(["debug": "yes"]), "debug must be a boolean"),
+            (with(["debug": 1]), "debug must be a boolean"),
             (with(["android": "ic_call"]), "android must be an object"),
             (with(["android": ["smallIcon": 7]]), "android.smallIcon must be a string"),
             (with(["ios": [true]]), "ios must be an object"),
@@ -277,10 +282,12 @@ private final class HostRig {
             "publishableKey": NSString(string: "pk_test_1"),
             "displayName": NSString(string: "Acme"),
             "ringTimeoutMs": NSNumber(value: 12_000),
+            "debug": NSNumber(value: true),
             "ios": NSDictionary(dictionary: ["includesCallsInRecents": NSNumber(value: true)]),
         ]
         let options = try CallsHostOptions.parse(raw)
         #expect(options.ringTimeoutMs == 12_000)
+        #expect(options.debug)
         #expect(options.iosIncludesCallsInRecents)
         #expect(try CallsHostOptions.parse(with(["ringTimeoutMs": NSNumber(value: 1_500.2)])).ringTimeoutMs == 1_501)
         let falseFlag: [String: Any] = ["includesCallsInRecents": NSNumber(value: false)]
@@ -312,6 +319,7 @@ private final class HostRig {
             "android": NSNull(),
             "callScreen": NSNull(),
             "ringTimeoutMs": NSNull(),
+            "debug": NSNull(),
         ]))
         #expect(options == (try CallsHostOptions.parse(minimal)))
     }
@@ -339,6 +347,7 @@ private final class HostRig {
             "ringTimeoutMs": 45_000,
             "appVersion": "2.4.0",
             "callScreen": "app",
+            "debug": true,
             "android": ["smallIcon": "ic_call"],
             "ios": ["iconTemplate": "CallIcon", "includesCallsInRecents": true] as [String: Any],
         ]))
@@ -932,13 +941,42 @@ private final class HostRig {
 
     @Test func anInstanceTheAppMadeWithAnotherKeyIsSaidToo() throws {
         let rig = HostRig()
-        rig.platform.runningWith = ("pk_test_native", "https://www.graine.ai/")
+        rig.platform.runningWith = ("pk_test_native", "https://www.graine.ai/", false)
         try rig.configure()
         #expect(rig.logs.count == 1)
         let same = HostRig()
-        same.platform.runningWith = ("pk_test_rig", "https://www.graine.ai/")
+        same.platform.runningWith = ("pk_test_rig", "https://www.graine.ai/", false)
         try same.configure()
         #expect(same.logs.isEmpty, "a trailing slash is the same base URL")
+    }
+
+    @Test func debugIsReadWhenTheInstanceIsMadeAndAChangeWaitsForTheNextLaunch() throws {
+        let rig = HostRig()
+        try rig.configure(["debug": true])
+        #expect(rig.platform.made.first?.debug == true, "the SDK instance is made with the debug log on")
+        #expect(rig.logs.isEmpty)
+        try rig.configure(["debug": true, "displayName": "Acme Assistant"])
+        #expect(rig.logs.isEmpty, "the same setting again is nothing to say")
+        try rig.configure(["debug": false])
+        #expect(rig.platform.made.count == 1, "one instance per process")
+        #expect(rig.logs.count == 1)
+        #expect(rig.store.load().options?["debug"] as? Bool == false, "kept for the next launch")
+        // The next launch: its cold start makes the instance from what was kept.
+        let next = HostRig()
+        next.store.saveOptions(try #require(rig.store.load().options))
+        #expect(next.core.restore())
+        #expect(next.platform.made.first?.debug == false)
+    }
+
+    @Test func anInstanceTheAppMadeWithAnotherDebugSettingIsSaidToo() throws {
+        let rig = HostRig()
+        rig.platform.runningWith = ("pk_test_rig", "https://www.graine.ai", true)
+        try rig.configure()
+        #expect(rig.logs.count == 1)
+        let same = HostRig()
+        same.platform.runningWith = ("pk_test_rig", "https://www.graine.ai", true)
+        try same.configure(["debug": true])
+        #expect(same.logs.isEmpty)
     }
 
     @Test func restoreAppliesTheKeptOptionsWithoutKeepingThemAgain() throws {

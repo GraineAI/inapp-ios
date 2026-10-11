@@ -184,11 +184,12 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
 
     // MARK: The instance and its calls
 
-    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String) {
+    func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String, debug: Bool) {
         let graine = GraineInApp.configure(GraineConfig(
             baseUrl: options.baseUrl,
             publishableKey: options.publishableKey,
-            appVersion: options.appVersion
+            appVersion: options.appVersion,
+            debug: options.debug
         ))
         self.graine = graine
         let calls = graine.calls
@@ -201,7 +202,7 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
         ) { [weak self] _ in
             self?.core?.appBecameActive()
         }
-        return (graine.config.publishableKey, graine.config.baseUrl)
+        return (graine.config.publishableKey, graine.config.baseUrl, graine.config.debug)
     }
 
     func configureCalls(_ options: CallsHostOptions) {
