@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.6.1")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.6.2")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios

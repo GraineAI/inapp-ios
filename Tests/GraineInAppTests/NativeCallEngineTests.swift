@@ -103,6 +103,22 @@ import Testing
         let noReason = CallEngine.variables(sdk: [:], whoCalled: "customer", reason: nil, own: [:])
         #expect(noReason.map { $0.0 } == ["who_called"])
     }
+
+    @Test func theTicketKeepsTheCallsVariablesEvenBehindALongIdentify() throws {
+        let call = [("who_called", "agent"), ("call_reason", "payment_due")]
+        let traits = (0..<20).map { ("trait\($0)", "v\($0)") }
+        let t = try #require(CallWire.ticketVariables(call: call, rest: call + traits))
+        #expect(t.count == 12)
+        #expect(t.first { $0.0 == "who_called" }?.1 == "agent")
+        #expect(t.first { $0.0 == "call_reason" }?.1 == "payment_due")
+        // Over a kilobyte, the SDK's give way; the call's stay. (All at once, this was nothing at all.)
+        let big = (0..<12).map { ("key\($0)", String(repeating: "x", count: 150)) }
+        #expect(CallWire.ticketMetadata((call + big).map { ($0.0, $0.1 as Any?) }) == nil)
+        let t2 = try #require(CallWire.ticketVariables(call: [("who_called", "agent")], rest: big))
+        #expect(t2.first?.0 == "who_called")
+        #expect((2...11).contains(t2.count))
+        #expect(CallWire.ticketVariables(call: [], rest: []) == nil)
+    }
 }
 
 @Suite struct NativeCallAudioTests {

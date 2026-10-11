@@ -1,3 +1,8 @@
+## 0.6.2
+
+- **A call keeps its own variables, however many the app has.** The ticket carries at most twelve variables and a kilobyte, and everything was dropped when the app's own made it longer — `who_called` and `call_reason` with them. The call's own now go first and the app's are added while they fit, as on Android.
+- A call the customer places gets an id of the same shape on every platform: `call_` and a lowercase UUID.
+
 ## 0.6.1
 
 - **Answering a call checks the microphone**, as placing one does. CallKit's answer is never held up: once it is fulfilled, a granted microphone connects the call, a refused one ends it `failed` ("The microphone permission was not granted.") after `answered`, and one never asked for is asked for while the call stays connecting — refused, or no answer within 60 seconds, ends it the same way.

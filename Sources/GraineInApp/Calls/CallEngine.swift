@@ -104,6 +104,8 @@ final class CallEngine {
         var session: (@escaping (GraineSessionConfig?) -> Void) -> Void
         /// Runs one app action and answers — the SDK's action runner. May call back on any thread.
         var runAction: (_ name: String, _ arguments: [String: Any], _ answer: @escaping (GraineActionResult) -> Void) -> Void
+        /// The call's own variables (`who_called`, `call_reason`, the push's or startCall's), which the ticket keeps before any of the SDK's.
+        var callVariables: [(String, String)] = []
     }
 
     /// How a call's conversation ended.
@@ -294,7 +296,7 @@ final class CallEngine {
         let ticketUrl = URL(string: GraineProtocol.trimTrailingSlashes(setup.baseUrl) + "/api/embed/ticket")
         let body = CallWire.ticketRequest(
             publishableKey: setup.publishableKey,
-            metadata: CallWire.ticketMetadata(setup.variables.map { ($0.0, $0.1 as Any?) })
+            metadata: CallWire.ticketVariables(call: setup.callVariables, rest: setup.variables)
         )
         guard let url = ticketUrl else {
             connect(session: session, ticket: nil)

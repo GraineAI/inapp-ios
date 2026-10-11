@@ -213,7 +213,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             GraineLog.warning("A call is already live; startCall was refused.")
             return nil
         }
-        let id = UUID().uuidString.lowercased()
+        // The same shape on every platform ("call_" and a lowercase UUID), so a server sees one kind of id.
+        let id = "call_" + UUID().uuidString.lowercased()
         let uuid = UUID()
         endWebViewCall()
         settleItem?.cancel()
@@ -387,7 +388,8 @@ public final class GraineCalls: NSObject, ObservableObject {
                 guard let graine = graine else { return done(nil) }
                 graine.loadSession(done)
             },
-            runAction: CallEngine.actionRunner(graine)
+            runAction: CallEngine.actionRunner(graine),
+            callVariables: CallEngine.variables(sdk: [:], whoCalled: whoCalled, reason: reason, own: own)
         )
         let engine = CallEngine(
             setup: setup,

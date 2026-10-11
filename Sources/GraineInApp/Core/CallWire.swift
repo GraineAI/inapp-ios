@@ -182,6 +182,33 @@ enum CallWire {
         return bytes > ticketTotalBytes ? nil : pairs
     }
 
+    /**
+     * The ticket's variables, as many as it holds. `ticketMetadata` keeps the
+     * first twelve and nothing at all over a kilobyte, so the whole list, handed
+     * over at once, could lose exactly the keys a call exists to carry
+     * (`who_called`, `call_reason`) behind one long app variable. The call's own
+     * go first and always win; the rest are added one at a time while the
+     * ticket still accepts them — the rule Android's `ticketVariables` follows.
+     */
+    static func ticketVariables(call: [(String, String)], rest: [(String, String)]) -> [(String, String)]? {
+        func fit(_ list: [(String, String)]) -> [(String, String)]? {
+            ticketMetadata(list.map { ($0.0, $0.1 as Any?) })
+        }
+        var best = fit(call)
+        if best == nil && !call.isEmpty { return nil }
+        var candidate = call
+        let taken = Set(call.map { $0.0 })
+        for pair in rest where !taken.contains(pair.0) {
+            candidate.append(pair)
+            if let next = fit(candidate), next.count > (best?.count ?? 0) {
+                best = next
+            } else {
+                candidate.removeLast()
+            }
+        }
+        return best
+    }
+
     /// A prompt variable's text: strings as they are, numbers and booleans as JavaScript writes them; nil for null, objects, arrays.
     static func scalarText(_ value: Any?) -> String? {
         guard let v = JSON.unwrap(value), !(v is NSNull) else { return nil }
