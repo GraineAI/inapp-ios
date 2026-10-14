@@ -190,8 +190,7 @@ private final class ChatRig {
 
         let socket = try #require(rig.network.socket)
         #expect(socket.protocols == ["graine.embed.v1", "tkt-1"])
-        let token = try #require(CallWire.contextToken([("name", "Asha")], callType: "text_chat"))
-        #expect(socket.url.absoluteString == "wss://ws.graine.ai/v1/embed?context_token=" + GraineProtocol.encode(token))
+        #expect(socket.url.absoluteString == "wss://ws.graine.ai/v1/embed", "the gateway reads the ticket's variables; a query would only reach the access logs")
         #expect(!socket.url.absoluteString.contains("P-1"), "the identifier never rides a URL")
 
         socket.open()
@@ -208,6 +207,8 @@ private final class ChatRig {
         let socket = try #require(rig.network.socket)
         #expect(socket.protocols.isEmpty)
         #expect(socket.url.absoluteString.hasPrefix("wss://ws.graine.ai/chat/v1/web-1?text_chat=1&context_token="))
+        let token = try #require(CallWire.contextToken([("name", "Asha")], callType: "text_chat"))
+        #expect(socket.url.absoluteString == "wss://ws.graine.ai/chat/v1/web-1?text_chat=1&context_token=" + GraineProtocol.encode(token))
     }
 
     @Test func aReplyStreamsIntoOneBubbleAndSettlesOnItsEndMarker() throws {

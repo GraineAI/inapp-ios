@@ -159,17 +159,25 @@ struct ChatPieces: Equatable {
     let upcoming: Bool
     /// The card's title: the brand's words, else "Upcoming call" / "Upcoming calls".
     let upcomingTitle: String
+    /**
+     * "Book a call" (BOOKING-SHEET.md §4): the agent can be booked from the app
+     * (`bookingAvailable`) and the design keeps the booked-calls card — in the
+     * card under its calls, or as a compact row in its place when there are none.
+     */
+    var book: Bool = false
 
     /// For `turns` and `upcomingCount` booked calls, under the design's chat tokens (nil, an older server: everything on).
-    static func of(_ turns: [GraineChatTurn], chat: GraineChatTokens?, upcomingCount: Int = 0) -> ChatPieces {
+    static func of(_ turns: [GraineChatTurn], chat: GraineChatTokens?, upcomingCount: Int = 0, bookable: Bool = false) -> ChatPieces {
         let shown = (chat?.showHistory ?? true) ? turns : turns.filter { !$0.restored }
         let words = (chat?.upcomingTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cardKept = chat?.showUpcomingCalls ?? true
         return ChatPieces(
             turns: shown,
             starters: ChatRows.offersStarters(shown),
             newConversation: (chat?.newConversation ?? true) && ChatRows.offersNewConversation(shown),
-            upcoming: (chat?.showUpcomingCalls ?? true) && upcomingCount > 0,
-            upcomingTitle: words.isEmpty ? UpcomingCalls.title(count: upcomingCount) : words
+            upcoming: cardKept && upcomingCount > 0,
+            upcomingTitle: words.isEmpty ? UpcomingCalls.title(count: upcomingCount) : words,
+            book: cardKept && bookable
         )
     }
 }

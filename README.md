@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.7.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.8.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -359,6 +359,46 @@ setting; a native call keeps going in the background, as a phone call does.
 Flutter (`graine_inapp`) packages carry these same calls and drive them
 through `GraineCallsHost`. In those apps, use the package's own API; the
 host is not called directly.
+
+## Booking a call from your app
+
+When your workspace has Graine ring its customers and the agent lets them book
+(Calls & scheduling, in the dashboard), the SDK draws the booking screen itself
+— "Call me at…" with no screen of your own:
+
+```swift
+if graine.bookingAvailable {                    // rung here, booking on, the customer identified
+    if let call = await graine.presentBooking(reason: "Card replacement") {
+        print("Booked:", call.id, call.at as Any)   // nil: closed without booking
+    }
+}
+```
+
+The sheet is drawn in the agent's design, light or dark: the day (chips from
+today to the furthest day the agent allows), the time on the system's time
+wheel (every 5 minutes, and only times the agent's rules allow), the phone's
+time zone, "What's it about? (optional)" — 120 characters, kept with the call
+for the agent, never in the push; `reason` fills it — and **Book call**. A
+refusal stays in the sheet as one line: "Pick a time at least 5 minutes from
+now", "Pick a time within 14 days", "That time is outside the hours we can call
+— pick another", "You already have 3 calls booked — cancel one first", "Sign
+in to book a call", "Couldn't book just now — try again". Once it is booked,
+the sheet says when the agent will call, and Done closes it. A sheet on an
+iPhone, a centred panel on an iPad.
+
+- **SwiftUI**: `.graineBookingSheet(isPresented: $booking) { call in … }`, or
+  `GraineBookingView { call in … }` wherever you present it yourself.
+- **UIKit**: `present(GraineBookingViewController { call in … }, animated: true)`.
+- **Objective-C**: `[graine presentBookingWithReason:nil completion:^(GraineObjCScheduledCall *call) { … }];`
+
+`bookingAvailable` is each agent's own: true only when Graine rings this iPhone
+(the workspace's In-app calling, for iOS), the agent lets customers book, and
+the customer is identified with the trait the agent's Identity setting names
+(otherwise a booking is refused with `identityRequired`). The SDK's chat window
+follows the same rule: **Book a call** under the booked calls in its Upcoming
+calls card, or on its own in the card's place when none are booked — and none
+when the design hides the booked-calls card. To list or cancel calls in your
+own screens, `scheduledCalls()` and `cancelScheduledCall(id:)`.
 
 ## The brand's design
 

@@ -282,6 +282,8 @@ public final class GraineChat: ObservableObject {
     private func watch() {
         unwatch = [
             graine.onContext { [weak self] frame in self?.connection.sendContext(frame) },
+            // Who is signed in decides whether the window offers "Book a call": redraw it.
+            graine.onIdentity { [weak self] in self?.objectWillChange.send() },
             graine.onForegroundChange { [weak self] foreground in
                 guard let self = self, self.graine.config.endOnBackground else { return }
                 if foreground { self.connection.release(GraineChat.holdBackground) } else { self.connection.hold(GraineChat.holdBackground) }

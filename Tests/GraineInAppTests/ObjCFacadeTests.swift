@@ -19,7 +19,7 @@ import Testing
     @Test func everySelectorIsAnsweredByItsName() throws {
         let selectors: [String: (instance: [String], klass: [String])] = [
             "GraineObjC": ([
-                "name", "installId", "memoryChoice", "session", "sessionJSON", "chat", "calls", "voice",
+                "name", "installId", "memoryChoice", "session", "sessionJSON", "chat", "calls", "voice", "bookingAvailable",
                 "identify:", "identify:memory:", "identifyJSON:", "identifyJSON:memory:", "setMemory:",
                 "forgetMemoryWithCompletion:", "memoriesWithCompletion:", "memoriesJSONWithCompletion:",
                 "setVariables:", "setVariablesJSON:", "setScreen:", "setScreenJSON:", "updateField:", "updateFieldJSON:",

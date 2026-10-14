@@ -1342,6 +1342,24 @@ public final class GraineInApp {
     }
 
     /**
+     * Whether this agent can be booked from the app now — what the SDK's own
+     * "Book a call" follows, and what an app's own button should: Graine rings
+     * this iPhone (`calls.hosted`, and `calls.platforms` empty or naming iOS),
+     * the agent lets customers book, and the customer is identified with the
+     * trait the agent's Identity setting names (otherwise a booking is refused
+     * with `identityRequired`). Each agent answers for itself. Read it again
+     * after `identify` and once the session has loaded.
+     */
+    public var bookingAvailable: Bool {
+        Booking.available(calls: sessionOrCached?.calls, identified: identity.snapshot().value != nil)
+    }
+
+    /// Why the booking sheet cannot book now, as its line; nil when it can.
+    var bookingBlocked: String? {
+        Booking.blocked(calls: sessionOrCached?.calls, identified: identity.snapshot().value != nil)
+    }
+
+    /**
      * Ask the agent to call this customer at `date` — Graine rings this device
      * then, as a call on the system's call screen. `reason` (120 characters) is
      * what the agent is told the call is for; it never appears in the push.

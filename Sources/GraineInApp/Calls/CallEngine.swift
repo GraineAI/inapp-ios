@@ -153,6 +153,14 @@ final class CallEngine {
         case ended
     }
 
+    /**
+     * Everything before the socket — the session, the ticket and the open —
+     * within this, or the call has failed. One deadline, armed in `start()`:
+     * each step's own timeout (15 s for the session, 10 s for the ticket, 15 s
+     * for the open) could otherwise add up to most of a minute on "Connecting".
+     */
+    static let connectDeadlineSeconds = 20.0
+
     private let setup: Setup
     private let audio: CallAudioIO
     private let network: CallNetwork
@@ -162,6 +170,7 @@ final class CallEngine {
     // Everything below is touched on the scheduler's context only.
     private var phase: Phase = .idle
     private var socket: CallSocket?
+    private var connectTimer: CallTimer?
     private var openTimer: CallTimer?
     private var pingTimer: CallTimer?
     private var speakingTimer: CallTimer?
@@ -245,6 +254,52 @@ final class CallEngine {
         }
     }
 
+    /**
+     * WHERE A CALL'S SESSION COMES FROM (`Setup.session`). The session in
+     * memory, else the one kept on the device, starts the call at once — and
+     * the network refreshes it behind the call. Only with neither does the
+     * call wait for the network (0.3–1.2 s on a good day; up to its 15 s
+     * timeout on a bad one), the kept session still answering if that fails.
+     *
+     * A kept session starts a call only when it says where the agent's socket
+     * lives (`wsHost`): without it, the direct socket would guess Graine's
+     * default host, wrong for an install that runs its own.
+     */
+    static func sessionLoader(_ graine: GraineInApp) -> (@escaping (GraineSessionConfig?) -> Void) -> Void {
+        sessionLoader(
+            live: { [weak graine] in graine?.session },
+            kept: { [weak graine] in graine?.sessionOrCached },
+            refresh: { [weak graine] in graine?.loadSession { _ in } },
+            // A push can wake the app before the network is up: the last session still finds the agent.
+            load: { [weak graine] done in
+                guard let graine = graine else { return done(nil) }
+                graine.loadSessionOrCached(done)
+            }
+        )
+    }
+
+    /// `sessionLoader(_:)`'s rule, with its sources handed in.
+    static func sessionLoader(
+        live: @escaping () -> GraineSessionConfig?,
+        kept: @escaping () -> GraineSessionConfig?,
+        refresh: @escaping () -> Void,
+        load: @escaping (@escaping (GraineSessionConfig?) -> Void) -> Void
+    ) -> (@escaping (GraineSessionConfig?) -> Void) -> Void {
+        return { done in
+            if let session = live() {
+                done(session)
+                return
+            }
+            if let session = kept(), let host = session.wsHost, !host.isEmpty {
+                done(session)
+                // Behind the call: this launch's session, for the next call and every screen.
+                refresh()
+                return
+            }
+            load(done)
+        }
+    }
+
     // MARK: - Driving it
 
     /// Mint a ticket and open the socket. The audio starts separately (`startAudio`), when the system hands it over.
@@ -252,23 +307,45 @@ final class CallEngine {
         scheduler.run { [self] in
             guard phase == .idle else { return }
             phase = .preparing
+            connectTimer = scheduler.after(Self.connectDeadlineSeconds) { [weak self] in
+                guard let self = self, self.phase == .preparing else { return }
+                self.finish(.couldNotOpen("The call could not connect within \(Int(Self.connectDeadlineSeconds)) seconds."), closeSocket: true)
+            }
             setup.session { [weak self] session in
                 self?.scheduler.run { self?.sessionArrived(session) }
             }
         }
     }
 
-    /// Start the microphone and the speaker: under CallKit, in `provider(_:didActivate:)`.
-    func startAudio() {
+    /**
+     * Start the microphone and the speaker: under CallKit, in
+     * `provider(_:didActivate:)`. Without `done`, audio that cannot start ends
+     * the call. With it, `done` hears whether the audio runs (on the engine's
+     * context) and the call is the caller's to end — the audio watch's direct
+     * start, when CallKit never activated the session.
+     */
+    func startAudio(_ done: ((Bool) -> Void)? = nil) {
         scheduler.run { [self] in
-            guard phase == .preparing || phase == .open, !capturing else { return }
+            guard phase == .preparing || phase == .open else {
+                done?(false)
+                return
+            }
+            if capturing {
+                done?(true)
+                return
+            }
             do {
                 try audio.startCapture { [weak self] frame in
                     self?.scheduler.run { self?.captured(frame) }
                 }
                 capturing = true
+                done?(true)
             } catch {
-                finish(phase == .open ? .dropped(Self.describe(error)) : .couldNotOpen(Self.describe(error)), closeSocket: true)
+                if let done = done {
+                    done(false)
+                } else {
+                    finish(phase == .open ? .dropped(Self.describe(error)) : .couldNotOpen(Self.describe(error)), closeSocket: true)
+                }
             }
         }
     }
@@ -346,11 +423,14 @@ final class CallEngine {
             // In the subprotocol, never the query: a query lands in every access log on the way.
             protocols = [CallWire.subprotocol, ticket.ticket]
             transport = .gateway
+            // No variables on this URL: the gateway builds the call's context from the ticket's signed
+            // claims and reads nothing else, so a token here would only reach the access logs.
         } else {
             address = CallWire.directUrl(wsHost: session.wsHost, agentId: session.webcallAgentId.isEmpty ? session.agentId : session.webcallAgentId)
             transport = .direct
+            // The direct socket reads the variables off its URL.
+            address = CallWire.withContextToken(address, token: CallWire.contextToken(setup.variables.map { ($0.0, $0.1 as Any?) }))
         }
-        address = CallWire.withContextToken(address, token: CallWire.contextToken(setup.variables.map { ($0.0, $0.1 as Any?) }))
         guard let url = URL(string: address) else {
             finish(.couldNotOpen("The conversation address is not a URL."), closeSocket: false)
             return
@@ -370,6 +450,8 @@ final class CallEngine {
     private func socketOpened(_ transport: Transport) {
         guard phase == .preparing else { return }
         phase = .open
+        connectTimer?.cancel()
+        connectTimer = nil
         openTimer?.cancel()
         openTimer = nil
         send(CallWire.initFrame(variables: setup.variables))
@@ -552,9 +634,11 @@ final class CallEngine {
         guard phase != .ended else { return }
         let wasOpen = phase == .open
         phase = .ended
+        connectTimer?.cancel()
         openTimer?.cancel()
         pingTimer?.cancel()
         speakingTimer?.cancel()
+        connectTimer = nil
         openTimer = nil
         pingTimer = nil
         speakingTimer = nil

@@ -83,9 +83,12 @@ struct GraineChatScreen: View {
                 fills: true, collapseLabel: "Close",
                 upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
                 callName: graine.sessionOrCached?.calls?.callName,
+                bookable: graine.bookingAvailable,
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },
+                // The sheet books with scheduleCall, which refreshes the card.
+                onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
                 // A refusal leaves the conversation as it was; nothing to say over it.
                 onNewConversation: { Task { try? await chat.newConversation() } },
                 onCollapse: { onClose?() }

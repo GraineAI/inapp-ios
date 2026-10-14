@@ -169,6 +169,14 @@ public final class GraineCalls: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
         return { item.cancel() }
     })
+    /// Whether the open conversation got its audio from CallKit (Calls/CallAudioWatch.swift).
+    private lazy var audioWatch = CallAudioWatch(schedule: { seconds, fire in
+        let item = DispatchWorkItem(block: fire)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+        return { item.cancel() }
+    }, act: { [weak self] step in
+        self?.audioStep(step)
+    })
 
     /// How long "ended" shows before the calls are idle again.
     static let settleSeconds = 1.0
@@ -556,11 +564,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             baseUrl: graine.config.baseUrl,
             variables: CallEngine.variables(sdk: graine.currentVariables(), whoCalled: whoCalled, reason: reason, own: own),
             contextFrame: { [weak graine] in graine?.currentContextFrame() },
-            session: { [weak graine] done in
-                guard let graine = graine else { return done(nil) }
-                // A push can wake the app before the network is up: the last session still finds the agent.
-                graine.loadSessionOrCached(done)
-            },
+            // The session in memory or kept on the device starts the call at once; the network refreshes it behind.
+            session: CallEngine.sessionLoader(graine),
             runAction: CallEngine.actionRunner(graine),
             callVariables: CallEngine.variables(sdk: [:], whoCalled: whoCalled, reason: reason, own: own),
             // Who the customer is, the install, the memory choice, the time zone — and this call's id, so Graine
@@ -590,8 +595,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             guard machine.state == .connecting else { return }
             if graine.config.debug { GraineLog.trace("call open via \(transport.rawValue)") }
             if direction == .outgoing { provider?.reportOutgoingCall(with: uuid, connectedAt: Date()) }
-            connectedAt = Date()
-            transition(.connected)
+            // Connected once its audio runs too: at once when CallKit has activated it, else the watch waits.
+            audioWatch.opened(audioRunning: audioActive)
         case .speaking(let value):
             if agentSpeaking != value { agentSpeaking = value }
         case .caption(let line):
@@ -609,7 +614,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             case .dropped(let detail):
                 GraineLog.warning("The call dropped: \(detail)")
                 provider?.reportCall(with: uuid, endedAt: Date(), reason: .failed)
-                transition(.dropped)
+                // Open but still waiting for its audio, the call never connected: say why.
+                transition(machine.state == .connecting ? .failed(detail) : .dropped)
             case .couldNotOpen(let detail):
                 GraineLog.warning("The call could not connect: \(detail)")
                 provider?.reportCall(with: uuid, endedAt: Date(), reason: .failed)
@@ -624,6 +630,29 @@ public final class GraineCalls: NSObject, ObservableObject {
         engine?.hangUp()
         provider?.reportCall(with: uuid, endedAt: Date(), reason: .failed)
         transition(machine.state == .active ? .dropped : .failed(message))
+    }
+
+    /// What the audio watch decided for the open conversation (Calls/CallAudioWatch.swift).
+    private func audioStep(_ step: CallAudioWatch.Step) {
+        guard let uuid = callUUID, machine.state == .connecting else { return }
+        switch step {
+        case .connect:
+            connectedAt = Date()
+            transition(.connected)
+        case .retry:
+            GraineLog.warning("CallKit has not activated the call's audio \(Int(CallAudioWatch.graceSeconds)) s after the conversation opened; starting it directly.")
+            engine?.startAudio { [weak self] started in
+                DispatchQueue.main.async {
+                    guard let self = self, self.callUUID == uuid else { return }
+                    if started { self.audioWatch.audioStarted() } else { self.audioWatch.retryFailed() }
+                }
+            }
+        case .fail:
+            GraineLog.warning(CallAudioWatch.failure)
+            engine?.hangUp()
+            provider?.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+            transition(.failed(CallAudioWatch.failure))
+        }
     }
 
     private func applyMuted(_ value: Bool) {
@@ -693,6 +722,7 @@ public final class GraineCalls: NSObject, ObservableObject {
         ringItem?.cancel()
         ringItem = nil
         answerMic.cancel()
+        audioWatch.cancel()
         engine?.hangUp()
         engine = nil
         unwatchContext?()
@@ -1085,13 +1115,18 @@ extension GraineCalls: CXProviderDelegate {
     }
 
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        // Traced: a call whose audio CallKit never activates is otherwise silent with nothing in the log.
+        if graine.config.debug { GraineLog.trace("CallKit activated the call's audio (state \(machine.state))") }
         audioActive = true
         engine?.startAudio()
+        // An open conversation that was waiting for its audio is connected now.
+        audioWatch.audioStarted()
         // The speaker the customer asked for before the audio was theirs; the route reports back.
         if speakerOn { applySpeaker() } else { refreshSpeaker() }
     }
 
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        if graine.config.debug { GraineLog.trace("CallKit deactivated the call's audio (state \(machine.state))") }
         audioActive = false
         engine?.stopAudio()
         if !machine.state.isLive { restoreAudioSession() }

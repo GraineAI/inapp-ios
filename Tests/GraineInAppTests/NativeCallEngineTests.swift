@@ -9,7 +9,7 @@ import Testing
  */
 
 @Suite struct NativeCallOpeningTests {
-    @Test func theGatewayCarriesTheTicketInTheSubprotocolAndTheVariablesTwice() throws {
+    @Test func theGatewayCarriesTheTicketInTheSubprotocolAndTheVariablesOnTheTicketOnly() throws {
         let rig = EngineRig()
         rig.contextFrame = ["context": ["screen": "cart"], "availableActions": ["open_screen"], "seq": 3]
         rig.engine.start()
@@ -22,11 +22,11 @@ import Testing
         #expect(body["mode"] as? String == "voice")
         #expect(body["metadata"] as? [String: String] == ["who_called": "agent", "call_reason": "payment_due"])
 
-        // The socket: the ticket's URL, the token on it, the ticket in the subprotocol — never the query.
+        // The socket: the ticket's URL as given, the ticket in the subprotocol — never the query — and no
+        // variables on it: the gateway reads only the ticket's signed claims.
         let socket = try #require(rig.network.socket)
         #expect(socket.protocols == ["graine.embed.v1", "tkt-1"])
-        let token = try #require(CallWire.contextToken([("who_called", "agent"), ("call_reason", "payment_due")]))
-        #expect(socket.url.absoluteString == "wss://ws.graine.ai/v1/embed?context_token=" + GraineProtocol.encode(token))
+        #expect(socket.url.absoluteString == "wss://ws.graine.ai/v1/embed")
         #expect(!socket.url.absoluteString.contains("tkt-1"))
 
         // Open: init, then the screen, then nothing until the first ping.

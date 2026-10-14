@@ -163,7 +163,9 @@ private struct GraineChatHeightKey: PreferenceKey {
  *   chrome a title bar replaces it.
  * - **Thread** on `chat.background`, with `chat.pattern` "dots" standing still
  *   behind it: the upcoming-calls card first (Cancel on each row; none with
- *   `chat.showUpcomingCalls` off, under `chat.upcomingTitle` when set), then one
+ *   `chat.showUpcomingCalls` off, under `chat.upcomingTitle` when set; "Book a
+ *   call" under its calls — or alone in its place — where the agent can be
+ *   booked from the app), then one
  *   bubble per message in the design's bubble style, times under them with
  *   `chat.showTimestamps`, a conversation that continues with a day line where
  *   the day changes and an earlier call as one "Voice call · time" row (never
@@ -207,9 +209,13 @@ struct GraineChatWindow: View {
     var cancelling: Set<String> = []
     var cancelFailed: Set<String> = []
     var callName: String? = nil
+    /// The agent can be booked from the app (`bookingAvailable`): "Book a call" in the card, or in its place.
+    var bookable: Bool = false
     let onSend: (String) -> Void
     var onRetry: () -> Void = {}
     var onCancelCall: (String) -> Void = { _ in }
+    /// "Book a call": open the booking sheet.
+    var onBook: () -> Void = {}
     /// "New conversation" — offered in the header only while earlier messages (restored turns) are on screen.
     var onNewConversation: (() -> Void)? = nil
     let onCollapse: () -> Void
@@ -223,7 +229,7 @@ struct GraineChatWindow: View {
 
     private var online: Bool { status == .online }
     /// What the window draws of the pieces the design can leave out: earlier messages, New conversation, booked calls.
-    private var pieces: ChatPieces { ChatPieces.of(turns, chat: chat, upcomingCount: UpcomingCalls.shown(upcoming).count) }
+    private var pieces: ChatPieces { ChatPieces.of(turns, chat: chat, upcomingCount: UpcomingCalls.shown(upcoming).count, bookable: bookable) }
     private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var chat: GraineChatTokens? { tokens.chat }
     private var title: String { chat.map { $0.title.isEmpty ? heading : $0.title } ?? heading }
@@ -439,7 +445,10 @@ struct GraineChatWindow: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: CGFloat(t.spacing.gap)) {
                     if drawn.upcoming {
-                        upcomingCard(UpcomingCalls.shown(upcoming), title: drawn.upcomingTitle)
+                        upcomingCard(UpcomingCalls.shown(upcoming), title: drawn.upcomingTitle, book: drawn.book)
+                    } else if drawn.book {
+                        // No calls booked: "Book a call" alone, where the card would be.
+                        bookButton(standalone: true)
                     }
                     if drawn.turns.isEmpty {
                         emptyChat
@@ -659,9 +668,10 @@ struct GraineChatWindow: View {
      * The customer's booked calls, as a component card: "Upcoming call(s)",
      * then a row per call — the call disc, the time in the customer's own zone
      * and words, the call name, and Cancel ("Cancelling…" until it is done;
-     * "Couldn’t cancel · tap to retry" when it is not).
+     * "Couldn’t cancel · tap to retry" when it is not) — and, where the agent
+     * can be booked from the app, "Book a call" under them.
      */
-    private func upcomingCard(_ calls: [GraineScheduledCall], title cardTitle: String) -> some View {
+    private func upcomingCard(_ calls: [GraineScheduledCall], title cardTitle: String, book: Bool) -> some View {
         let t = tokens
         let c = t.colors
         let radius = t.shape.radius.lg
@@ -674,6 +684,7 @@ struct GraineChatWindow: View {
                     .foregroundColor(.graineHex(c.textMuted))
             }
             ForEach(calls, id: \.id) { call in upcomingRow(call) }
+            if book { bookButton(standalone: false) }
         }
         .padding(CGFloat(t.spacing.cardPadding))
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -727,6 +738,36 @@ struct GraineChatWindow: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /**
+     * "Book a call" (BOOKING-SHEET.md §4) — opens the booking sheet. In the
+     * card, under its calls: outlined like Cancel, the full width. With no
+     * calls booked, a compact row in the card's place: the same, 40 high on
+     * `surfaceRaised`.
+     */
+    private func bookButton(standalone: Bool) -> some View {
+        let t = tokens
+        let c = t.colors
+        let shape = RoundedRectangle(cornerRadius: CGFloat(min(t.shape.radius.md, 16)), style: .continuous)
+        return Button(action: onBook) {
+            HStack(spacing: 8) {
+                GraineIconView(name: .call, style: t.icons.style, stroke: t.icons.stroke, color: accent, size: 16)
+                Text(Booking.chatRow)
+                    .font(type.body(t.font.scale.body - 1, t.font.weights.strong))
+                    .foregroundColor(.graineHex(c.text))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: standalone ? 40 : 36)
+            .background(shape.fill(standalone ? Color.graineHex(c.surfaceRaised) : Color.clear))
+            .overlay(shape.strokeBorder(Color.graineHex(c.border), lineWidth: CGFloat(max(1, t.shape.borderWidth))))
+            .contentShape(shape)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Booking.chatRow)
+        .accessibilityAddTraits(.isButton)
     }
 
     // MARK: Starters

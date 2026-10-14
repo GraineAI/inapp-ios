@@ -336,9 +336,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             collapseLabel: canSwitch ? "Collapse" : "Close",
             upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
             callName: graine.sessionOrCached?.calls?.callName,
+            bookable: graine.bookingAvailable,
             onSend: { chat.send($0) },
             onRetry: { chat.retry() },
             onCancelCall: { chat.cancelUpcomingCall(id: $0) },
+            onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
             // A sheet, a panel and a screen offer New conversation like the compact window.
             onNewConversation: { Task { try? await chat.newConversation() } },
             onCollapse: closeChat
@@ -517,9 +519,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 collapseLabel: canSwitch ? "Collapse" : "Close",
                 upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
                 callName: graine.sessionOrCached?.calls?.callName,
+                bookable: graine.bookingAvailable,
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },
+                onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
                 onNewConversation: { Task { try? await chat.newConversation() } },
                 // Back to the call where there is one; a chat-only agent's chevron closes the bar.
                 onCollapse: closeChat

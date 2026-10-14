@@ -36,6 +36,19 @@ extension GraineObjC {
         host(GraineAgentBar(graine: graine, name: name, bottomInset: 8, draggable: false, surface: .voice, onClose: onClose))
     }
 
+    /**
+     * The booking sheet, over whatever is on screen: a sheet on an iPhone, a
+     * centred panel on an iPad. `reason` fills "What's it about?". The block
+     * hears the booked call once the sheet closes — nil when nothing was
+     * booked — on the main thread. Check `bookingAvailable` before offering it.
+     */
+    @objc(presentBookingWithReason:completion:)
+    public func presentBooking(reason: String?, completion: @escaping (GraineObjCScheduledCall?) -> Void) {
+        onMain { [graine] in
+            graine.presentBooking(reason: reason) { call in completion(call.map { GraineObjCScheduledCall($0) }) }
+        }
+    }
+
     private func host<V: View>(_ view: V) -> UIViewController {
         let controller = UIHostingController(rootView: view)
         controller.view.backgroundColor = .clear

@@ -774,6 +774,13 @@ public final class GraineObjC: NSObject {
         }
     }
 
+    /**
+     * Whether this agent can be booked from the app now: Graine rings this
+     * iPhone, the agent lets customers book, and the customer is identified.
+     * `presentBookingWithReason:completion:` shows the SDK's booking sheet.
+     */
+    @objc public var bookingAvailable: Bool { graine.bookingAvailable }
+
     // MARK: The session, and what the SDK reports
 
     /// The agent's configuration, once it has loaded.

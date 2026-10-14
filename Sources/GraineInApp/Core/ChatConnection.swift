@@ -264,13 +264,16 @@ final class ChatConnection {
             // In the subprotocol, never the query: a query lands in every access log on the way.
             protocols = [CallWire.subprotocol, ticket.ticket]
             via = .gateway
+            // No variables on this URL: the gateway builds the conversation's context from the ticket's
+            // signed claims and reads nothing else, so a token here would only reach the access logs.
         } else {
             let agent = session.webcallAgentId.isEmpty ? session.agentId : session.webcallAgentId
             address = CallWire.directUrl(wsHost: session.wsHost, agentId: agent, textChat: true)
             via = .direct
+            // The direct socket reads the variables off its URL.
+            let token = CallWire.contextToken(variables.map { ($0.0, $0.1 as Any?) }, callType: ChatWire.callType)
+            address = CallWire.withContextToken(address, token: token)
         }
-        let token = CallWire.contextToken(variables.map { ($0.0, $0.1 as Any?) }, callType: ChatWire.callType)
-        address = CallWire.withContextToken(address, token: token)
         guard let url = URL(string: address) else {
             failedToOpen("The conversation address is not a URL.")
             return
