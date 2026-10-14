@@ -37,6 +37,8 @@ public enum GraineProtocol {
         public static let appActionResult = "graine:app-action-result"
         public static let appEvent = "graine:app-event"
         public static let widgetResult = "graine:widget-result"
+        /// Who the customer is for memory (contract §1.2): the page puts it on its next session and ticket.
+        public static let identity = "graine:identity"
     }
 
     /// Messages the page sends out.
@@ -140,6 +142,10 @@ public enum GraineProtocol {
         case Out.appContext:
             let context = message["context"] as? [String: Any]
             return "screen=" + JSON.string(context?["screen"])
+        case Out.identity:
+            // The customer's identifier never reaches a log: only whether there is one.
+            let value = JSON.unwrap(message["value"])
+            return "identity=" + (value == nil || value is NSNull ? "none" : "set") + " memory=" + JSON.string(message["memory"])
         default:
             return String((JSON.string(from: message) ?? "").prefix(300))
         }
@@ -283,7 +289,7 @@ public enum PageMessage {
 }
 
 /**
- * The connection, in one word — the way LiveKit reports it.
+ * The connection, in one word: excellent, good, poor or lost (unknown before any sample).
  *
  * Same thresholds as the React Native SDK, Android and the website (the
  * classic VoIP edges: 150ms / 30ms / 2% leaves "excellent", 400ms / 80ms / 8%

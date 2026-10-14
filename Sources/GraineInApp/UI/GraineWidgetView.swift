@@ -18,8 +18,8 @@ import SwiftUI
  * and, for anything else, the agent's fallback sentence — guessing at an
  * unknown shape produces something worse than words. The dashboard's preset
  * (gallery, cards, list, spotlight, compact) picks the row shape; `select:
- * "many"` lets the customer tick several and answer once ("Let's compare the
- * Creta and the Seltos."). While the agent says a component is coming, it
+ * "many"` lets the customer tick several and answer once ("Compare: Creta and
+ * Seltos"). While the agent says a component is coming, it
  * draws the loader with the dashboard's words for that moment. A design with
  * window chrome opens every card as a desktop window, its title moved into the
  * title bar; the loader and the answered row stay as they are.
@@ -33,6 +33,7 @@ import SwiftUI
 public struct GraineWidgetView: View {
     private let graine: GraineInApp?
     private let accent: Color?
+    private let inBar: Bool
 
     /// - Parameters:
     ///   - graine: defaults to the instance `GraineInApp.configure` made.
@@ -40,11 +41,42 @@ public struct GraineWidgetView: View {
     public init(graine: GraineInApp? = nil, accent: Color? = nil) {
         self.graine = graine
         self.accent = accent
+        self.inBar = false
+    }
+
+    /// The bar's own: it steps aside while the app mounts one of its own, so a component is never drawn twice.
+    init(graine: GraineInApp, inBar: Bool) {
+        self.graine = graine
+        self.accent = nil
+        self.inBar = inBar
     }
 
     public var body: some View {
         if let graine = graine ?? GraineInApp.current {
-            GraineWidgetHost(graine: graine, accentOverride: accent)
+            if inBar {
+                GraineBarWidgetSlot(graine: graine, hosts: graine.componentHosts)
+            } else {
+                GraineWidgetHost(graine: graine, accentOverride: accent)
+                    .onAppear { graine.componentHosts.appViews += 1 }
+                    .onDisappear { graine.componentHosts.appViews = max(0, graine.componentHosts.appViews - 1) }
+            }
+        }
+    }
+}
+
+/// How many component views the app itself has on screen: while one is, the bar draws none.
+final class GraineComponentHosts: ObservableObject {
+    @Published var appViews = 0
+}
+
+/// The bar's component slot: empty while the app draws components itself.
+private struct GraineBarWidgetSlot: View {
+    let graine: GraineInApp
+    @ObservedObject var hosts: GraineComponentHosts
+
+    var body: some View {
+        if hosts.appViews == 0 {
+            GraineWidgetHost(graine: graine, accentOverride: nil)
         }
     }
 }
@@ -64,6 +96,8 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
     @Published private(set) var awaitingReply = false
     /// Ids ticked so far, when the component lets them choose several.
     @Published private(set) var ticked: [String] = []
+    /// The component arrived in the chat, not on a call: nothing is listening, so nothing says so.
+    @Published private(set) var typed = false
     @Published private(set) var appearance: [String: Any] = [:]
     /// The brand's design; nil draws from `appearance`, exactly as before designs.
     @Published private(set) var design: GraineDesign?
@@ -90,12 +124,20 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
         wasLive = graine.voice.connected
         // SEEDED FROM WHAT THE AGENT ALREADY DREW: a view mounted after the component
         // arrived must not open to nothing while the agent waits for an answer.
-        if let frame = graine.voice.pendingWidgetFrame,
+        if let frame = graine.componentFrame,
            let retained = GraineWidget(frame: frame, baseUrl: graine.config.baseUrl) {
             show(retained)
         }
         graine.addListener(self)
+        // The chat closing is a conversation ending, as a call's end is.
+        // Changes only (the publisher repeats the current status on subscribing, and that is no ending).
+        chatWatch = graine.chat.$status.removeDuplicates().dropFirst().sink { [weak self, weak graine] status in
+            guard let self = self, let graine = graine, status == .idle, !graine.chat.isOpen else { return }
+            if self.widget != nil || self.answered != nil || self.pendingKind != nil { self.reset() }
+        }
     }
+
+    private var chatWatch: AnyCancellable?
 
     // MARK: GraineListener
 
@@ -182,15 +224,16 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
             graine.executeAction(name: actionName, arguments: call.args) { [weak graine] result in
                 guard result.status != .ok else { return }
                 let why = result.message.isEmpty ? result.status.rawValue : result.message
-                graine?.voice.reportEvent(
+                graine?.reportEvent(
                     "in_app_action_failed",
-                    detail: "\"\(actionName)\" did not run: \(why). Do not describe a screen the customer cannot see."
+                    detail: "\"\(actionName)\" did not run: \(why). Do not describe a screen the customer cannot see.",
+                    data: [:]
                 )
             }
             if let say = current.onSelect.say { sentence = WidgetRules.fillTemplate(say, item: item) }
         }
-        graine.voice.answerWidget(widgetId: current.id, data: data, summary: sentence)
-        graine.voice.clearPendingWidget()
+        // To the conversation it belongs to: the chat's socket, or the call's page.
+        graine.answerComponent(widgetId: current.id, data: data, summary: sentence)
         widget = nil
         content = nil
         ticked = []
@@ -218,13 +261,14 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
                 "title": JSON.string(current.data["title"]),
                 "answered": false,
             ]
-            graine.voice.reportEvent(
+            graine.reportEvent(
                 "component_dismissed",
                 detail: "The customer closed the component without choosing. Do not refer to options they cannot see; offer to show it again if they want it.",
                 data: ["quiet": true, "data": detail]
             )
         }
-        graine?.voice.clearPendingWidget()
+        // Kept, so `reopenComponent()` can put it back exactly as it was.
+        graine?.componentDismissed()
         widget = nil
         content = nil
         answered = nil
@@ -243,6 +287,8 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
         showTimer = nil
         pendingShownAt = nil
         pendingKind = nil
+        // Decided as it arrives: the conversation it belongs to is the one live now.
+        typed = graine?.chat.carriesConversation ?? false
         widget = next
         content = WidgetContent(next)
         ticked = []
@@ -604,7 +650,7 @@ struct GraineWidgetCard: View {
                     .background(theme.border.opacity(0.4), in: Circle())
             }
             .buttonStyle(PlainButtonStyle())
-            .accessibilityLabel("Close and keep talking")
+            .accessibilityLabel(WidgetRules.closeLabel(typed: model.typed))
         }
     }
 
@@ -792,14 +838,17 @@ struct GraineWidgetCard: View {
             .buttonStyle(PlainButtonStyle())
         case .screen:
             // The agent is still on the call. Saying so is the difference between a screen it opened and one that replaced it.
-            VStack(alignment: .leading, spacing: 2) {
-                Text("STILL LISTENING")
-                    .font(theme.font(.captionStrong, .system(size: 10.5, weight: .heavy)))
-                    .foregroundColor(theme.muted)
-                Text(content.prompt.isEmpty ? "Tap one, or just say it." : content.prompt)
-                    .font(theme.font(.body, .system(size: 13.5)))
-                    .foregroundColor(theme.text)
-                    .lineLimit(1)
+            // In the chat there is no call to be on: no footer (WidgetRules.screenFooter).
+            if let words = WidgetRules.screenFooter(prompt: content.prompt, typed: model.typed) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(words.label)
+                        .font(theme.font(.captionStrong, .system(size: 10.5, weight: .heavy)))
+                        .foregroundColor(theme.muted)
+                    Text(words.line)
+                        .font(theme.font(.body, .system(size: 13.5)))
+                        .foregroundColor(theme.text)
+                        .lineLimit(1)
+                }
             }
         case .card:
             HStack {

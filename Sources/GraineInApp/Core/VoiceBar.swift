@@ -266,16 +266,15 @@ enum VoiceBarStatus {
 /**
  * The call and the chat are two products in one agent, and which of them a
  * customer is offered is the brand's decision (Embed & Widgets → What visitors
- * get: `appearance.mode`, absent meaning both) — protocol.ts `resolveSurface`.
- * The switch between them shows only when the dashboard offers both AND this
- * SDK can carry the chat: a switch into a chat that cannot send a word would
- * be worse than no switch at all.
+ * get: `appearance.mode`, absent meaning both) — protocol.ts `resolveSurface`,
+ * SurfacePolicy. The switch between them shows only when the dashboard offers
+ * both AND the SDK can carry the chat: a switch into a chat that cannot send a
+ * word would be worse than no switch at all.
  */
 enum AgentSurfaces {
     static func canSwitch(appearance: [String: Any]?, carriesChat: Bool) -> Bool {
         guard carriesChat else { return false }
-        let mode = JSON.jsStringOrEmpty(appearance?["mode"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return mode != "voice" && mode != "chat"
+        return SurfacePolicy.resolve(appearance: appearance, prefer: nil).canSwitch
     }
 }
 

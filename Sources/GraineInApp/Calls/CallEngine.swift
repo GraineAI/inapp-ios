@@ -49,7 +49,15 @@ struct CallSocketEvents {
 protocol CallNetwork: AnyObject {
     /// POST JSON. Completes with the HTTP status (0 for a network error) and the body.
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void)
+    /// The same POST, with the answer's headers (names lower-cased) — for `Retry-After`. None by default.
+    func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void)
     func openSocket(_ url: URL, protocols: [String], events: CallSocketEvents) -> CallSocket
+}
+
+extension CallNetwork {
+    func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
+        post(url, body: body) { status, data in completion(status, data, [:]) }
+    }
 }
 
 /// A timer that can be cancelled.
@@ -106,6 +114,8 @@ final class CallEngine {
         var runAction: (_ name: String, _ arguments: [String: Any], _ answer: @escaping (GraineActionResult) -> Void) -> Void
         /// The call's own variables (`who_called`, `call_reason`, the push's or startCall's), which the ticket keeps before any of the SDK's.
         var callVariables: [(String, String)] = []
+        /// Who the customer is for memory, the install, their memory choice, the time zone and the call's id — on the ticket only.
+        var identity: IdentityWire.Fields? = nil
     }
 
     /// How a call's conversation ended.
@@ -177,6 +187,14 @@ final class CallEngine {
         self.scheduler = scheduler
         self.onEvent = onEvent
     }
+
+    /**
+     * Who the agent hears called, for an answered ring (contract §3.4):
+     * "scheduled" for a call Graine rang at a booked time (the push says
+     * `hosted: "1"`), "agent" for a ring from the app's own server. A call the
+     * customer places is "customer". The push's own `who_called` never wins.
+     */
+    static func whoCalled(hosted: Bool) -> String { hosted ? "scheduled" : "agent" }
 
     /**
      * Every variable the agent should have, in the order the ticket keeps
@@ -296,7 +314,8 @@ final class CallEngine {
         let ticketUrl = URL(string: GraineProtocol.trimTrailingSlashes(setup.baseUrl) + "/api/embed/ticket")
         let body = CallWire.ticketRequest(
             publishableKey: setup.publishableKey,
-            metadata: CallWire.ticketVariables(call: setup.callVariables, rest: setup.variables)
+            metadata: CallWire.ticketVariables(call: setup.callVariables, rest: setup.variables),
+            identity: setup.identity
         )
         guard let url = ticketUrl else {
             connect(session: session, ticket: nil)

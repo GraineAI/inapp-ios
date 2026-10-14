@@ -72,6 +72,8 @@ public extension GraineAgentBar where Accessory == EmptyView {
      *   - initialOffset: a position the app persisted, in points above the anchor.
      *   - onPlacementChange: the customer let go somewhere new. Persist it here.
      *   - autoAttach: mount the engine in the key window when the bar appears, if nothing has yet.
+     *   - surface: which conversation opens — the call or the chat — among those the dashboard offers
+     *     (What visitors get). It can never add one the dashboard withheld. Nil: the dashboard's choice.
      *   - onClose: the customer hung up, or closed the bar with no call to end — after the goodbye has had a
      *     moment to leave the speaker. Take the bar away here if your app shows it on demand.
      */
@@ -84,6 +86,7 @@ public extension GraineAgentBar where Accessory == EmptyView {
         initialOffset: CGFloat = 0,
         onPlacementChange: ((CGFloat) -> Void)? = nil,
         autoAttach: Bool = true,
+        surface: GraineSurface? = nil,
         onClose: (() -> Void)? = nil
     ) {
         self.init(
@@ -96,6 +99,7 @@ public extension GraineAgentBar where Accessory == EmptyView {
                 initialOffset: initialOffset,
                 onPlacementChange: onPlacementChange,
                 autoAttach: autoAttach,
+                surface: surface,
                 onClose: onClose
             ),
             accessory: EmptyView()
@@ -112,6 +116,7 @@ struct GraineAgentBarConfig {
     let initialOffset: CGFloat
     let onPlacementChange: ((CGFloat) -> Void)?
     let autoAttach: Bool
+    var surface: GraineSurface? = nil
     var onClose: (() -> Void)? = nil
 }
 
@@ -204,6 +209,8 @@ private struct GraineBarHeightKey: PreferenceKey {
 struct GraineAgentBarContainer<Accessory: View>: View {
     let graine: GraineInApp
     @ObservedObject var voice: GraineVoice
+    /// The typed conversation, when the customer is in the chat.
+    @ObservedObject var chat: GraineChat
     /// Observed so a typeface that lands mid-call redraws the bar in place.
     @ObservedObject var fonts: GraineFontStore
     let config: GraineAgentBarConfig
@@ -214,8 +221,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @State private var offset: CGFloat
     @State private var dragStart: CGFloat? = nil
     @State private var unitHeight: CGFloat = 0
-    /// The customer switched to the chat — only possible where the switch shows (see `canSwitch`).
-    @State private var inChat = false
+    /// The surface the customer last switched to; nil until they do (the app's, else the dashboard's, opens).
+    @State private var chosen: GraineSurface? = nil
     /// A logo that would not load: the avatar goes back to the letter on the accent until the logo changes.
     @State private var failedLogo: String? = nil
     @Environment(\.colorScheme) private var colorScheme
@@ -225,16 +232,16 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     private let topMargin: CGFloat = 48
 
     /**
-     * Whether this package can carry the agent's chat. It cannot: the engine
-     * it hosts carries calls, and there is no text channel to send a message
-     * on. So the switch to the chat never shows here, whatever the dashboard
-     * offers — see AgentSurfaces.
+     * Whether this package can carry the agent's chat. It can: the chat has its
+     * own connection (GraineChat), so the bar offers whatever the dashboard
+     * offers — the call, the chat, or both with the switch between them.
      */
-    static var carriesChat: Bool { false }
+    static var carriesChat: Bool { true }
 
     init(graine: GraineInApp, voice: GraineVoice, fonts: GraineFontStore, config: GraineAgentBarConfig, accessory: Accessory) {
         self.graine = graine
         _voice = ObservedObject(wrappedValue: voice)
+        _chat = ObservedObject(wrappedValue: graine.chat)
         _fonts = ObservedObject(wrappedValue: fonts)
         self.config = config
         self.accessory = accessory
@@ -243,18 +250,103 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            positioned(in: geo)
+        ZStack {
+            GeometryReader { geo in
+                positioned(in: geo)
+            }
+            // The bar measures the keyboard itself; SwiftUI must not also move it.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            // A bigger chat window — a sheet, an iPad's panel, the screen — over the app (GraineChatSizes.swift).
+            if let t = tokens, let shown = presentation, shown != .window {
+                GraineBigChat(presentation: shown, tokens: t, keyboard: keyboardOverWindow, onClose: closeChat) {
+                    bigChatWindow(t, shown)
+                }
+                .transition(shown == .panel ? .graineRise : .move(edge: .bottom))
+            }
         }
-        // The bar measures the keyboard itself; SwiftUI must not also move it.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .animation(tokens?.motion.animation(reduceMotion: reduceMotion), value: presentation)
         .onAppear {
             if config.autoAttach && !voice.isAttached { voice.attach() }
             // While a bar is on screen, a page still loading is the customer's wait (GraineVoice.slowConnect).
             voice.viewerAppeared()
+            graine.tapCapture.attach(to: GraineVoice.keyWindow())
+            if showsChat { chat.connectOpen() }
         }
         .onDisappear {
             voice.viewerDisappeared()
+            // The bar is gone: so is an open's own size.
+            if showsChat { chat.close() }
+        }
+        // The chat's connection follows the surface: open while the customer is in it, down when they leave.
+        // Moving to the call and back keeps the size an open asked for.
+        .onChange(of: showsChat) { inChat in
+            if inChat { chat.connectOpen() } else { chat.closeConnection() }
+        }
+        // The app opened the chat (`chat.open(size:)`): the bar moves to it, where the agent offers one.
+        .onReceive(chat.$appOpens.dropFirst()) { _ in
+            if policy.allowed.contains(.chat) { chosen = .chat }
+        }
+    }
+
+    // MARK: - How big the chat is (DESIGN.md "Chat window" → Size)
+
+    /// The key window's size: a phone's or a tablet's, whatever area the app gave the bar.
+    private var screenSize: CGSize {
+        GraineVoice.keyWindow()?.bounds.size ?? UIScreen.main.bounds.size
+    }
+
+    /// Where the chat goes while the customer is in it: above the bar, a sheet, a panel or the screen; nil on the call.
+    private var presentation: ChatWindowLayout.Presentation? {
+        guard tokens != nil else { return nil }
+        let size = screenSize
+        return ChatWindowLayout.barPresentation(
+            inChat: showsChat, open: chat.openedSize, config: graine.config.chatSize, token: tokens?.chat?.size,
+            width: Double(size.width), height: Double(size.height)
+        )
+    }
+
+    /// A bigger window is showing the chat: it carries the agent's components itself.
+    private var bigChatShown: Bool {
+        if let shown = presentation { return shown != .window }
+        return false
+    }
+
+    /// The keyboard's height over the window's bottom edge.
+    private var keyboardOverWindow: CGFloat {
+        guard let kb = keyboard.frame else { return 0 }
+        return max(0, screenSize.height - kb.minY)
+    }
+
+    /// What the chevron does, and closing a sheet, a panel or a screen: back to the call, or the bar closes.
+    private func closeChat() {
+        switch ChatWindowLayout.close(canSwitch: canSwitch) {
+        case .backToCall: chosen = .voice
+        case .closeBar: endOrClose()
+        }
+    }
+
+    /// The chat in a bigger window: filling it (an iPad's panel keeps its frame), the chevron leading a full screen,
+    /// the agent's components above its composer.
+    private func bigChatWindow(_ t: GraineThemeTokens, _ shown: ChatWindowLayout.Presentation) -> some View {
+        GraineChatWindow(
+            tokens: t, type: type(t), accent: accent(t), onAccent: onAccent(t),
+            heading: displayName, logoUrl: dash.logoUrl, logoPlate: dash.logoPlate,
+            turns: chat.turns, status: chat.status, typing: chat.typing, lifted: keyboard.frame != nil,
+            fills: true, keepsFrame: shown == .panel, leadingChevron: shown == .screen,
+            collapseLabel: canSwitch ? "Collapse" : "Close",
+            upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
+            callName: graine.sessionOrCached?.calls?.callName,
+            onSend: { chat.send($0) },
+            onRetry: { chat.retry() },
+            onCancelCall: { chat.cancelUpcomingCall(id: $0) },
+            // A sheet, a panel and a screen offer New conversation like the compact window.
+            onNewConversation: { Task { try? await chat.newConversation() } },
+            onCollapse: closeChat
+        )
+        .overlay(alignment: .bottom) {
+            GraineWidgetView(graine: graine, inBar: true)
+                .padding(.horizontal, 12)
+                .padding(.bottom, CGFloat(VoiceBar.Chat.composer) + 8)
         }
     }
 
@@ -302,6 +394,11 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         Group {
             if let t = tokens {
                 VStack(spacing: CGFloat(VoiceBar.stackGap)) {
+                    // A component the agent drew sits above everything: it is a thing to act on.
+                    // A bigger chat window carries it itself.
+                    if !bigChatShown {
+                        GraineWidgetView(graine: graine, inBar: true)
+                    }
                     accessory
                     above(t)
                     designedBar(t, placement: placement, resting: resting)
@@ -311,6 +408,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 .animation(t.motion.animation(reduceMotion: reduceMotion), value: showsChat)
             } else {
                 VStack(spacing: 8) {
+                    GraineWidgetView(graine: graine, inBar: true)
                     accessory
                     legacyCaption
                     legacyBar(placement: placement, resting: resting)
@@ -358,11 +456,17 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         return last
     }
 
-    private var canSwitch: Bool {
-        AgentSurfaces.canSwitch(appearance: model.appearance, carriesChat: Self.carriesChat)
+    /// What the dashboard offers and which opens — the customer's last switch, else the app's, else the dashboard's.
+    private var policy: SurfacePolicy {
+        SurfacePolicy.resolve(appearance: model.appearance, prefer: chosen ?? config.surface)
     }
 
-    private var showsChat: Bool { inChat && canSwitch }
+    private var canSwitch: Bool {
+        Self.carriesChat && policy.canSwitch
+    }
+
+    /// In the chat — only with a design to draw it in (an older server's bar is the call, as it always was).
+    private var showsChat: Bool { Self.carriesChat && tokens != nil && policy.start == .chat }
 
     // MARK: - The designed bar (DESIGN.md "Voice bar")
 
@@ -382,7 +486,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         VoiceBarStatus.Input(
             error: model.fault != nil,
             inChat: showsChat,
-            chatOnline: false,
+            chatOnline: chat.online,
             online: voice.online,
             reconnecting: voice.reconnecting,
             connectivity: voice.connectivity,
@@ -404,13 +508,24 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @ViewBuilder
     private func above(_ t: GraineThemeTokens) -> some View {
         if showsChat {
+            // The compact window; a bigger one is drawn over the app instead (`bigChatWindow`).
+            if presentation == .window {
             GraineChatWindow(
                 tokens: t, type: type(t), accent: accent(t), onAccent: onAccent(t),
                 heading: displayName, logoUrl: dash.logoUrl, logoPlate: dash.logoPlate,
-                turns: [], online: false, lifted: keyboard.frame != nil,
-                onSend: { _ in }, onCollapse: { inChat = false }
+                turns: chat.turns, status: chat.status, typing: chat.typing, lifted: keyboard.frame != nil,
+                collapseLabel: canSwitch ? "Collapse" : "Close",
+                upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
+                callName: graine.sessionOrCached?.calls?.callName,
+                onSend: { chat.send($0) },
+                onRetry: { chat.retry() },
+                onCancelCall: { chat.cancelUpcomingCall(id: $0) },
+                onNewConversation: { Task { try? await chat.newConversation() } },
+                // Back to the call where there is one; a chat-only agent's chevron closes the bar.
+                onCollapse: closeChat
             )
             .transition(.graineRise)
+            }
         } else if let line = captionLine {
             GraineCaptionCard(tokens: t, type: type(t), accent: accent(t), line: line)
                 .transition(.graineRise)
@@ -552,7 +667,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
 
     /// To the other surface: `accentSoft`, the chat icon on a call and the call icon in the chat, in `text`.
     private func switchButton(_ t: GraineThemeTokens) -> some View {
-        Button(action: { inChat.toggle() }) {
+        Button(action: { chosen = showsChat ? .voice : .chat }) {
             roundButton(fill: .graineHex(t.colors.accentSoft), GraineIconView(
                 name: showsChat ? .call : .chat, style: t.icons.style, stroke: t.icons.stroke, color: .graineHex(t.colors.text)
             ))
@@ -594,7 +709,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
 
     /// Loud only while there is a call to end (`danger`, the hang-up in white); otherwise it closes (`accentSoft`, a cross in `textMuted`).
     private func endButton(_ t: GraineThemeTokens) -> some View {
-        let onCall = voice.connected
+        let onCall = voice.connected && !showsChat
         return Button(action: endOrClose) {
             roundButton(fill: onCall ? .graineHex(t.colors.danger) : .graineHex(t.colors.accentSoft), GraineIconView(
                 name: onCall ? .end : .close, style: t.icons.style, stroke: t.icons.stroke,
@@ -605,8 +720,9 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         .accessibilityLabel(onCall ? "End call" : "Close")
     }
 
-    /// Hang up (or cancel a call still being placed), then let the app take the bar away once the goodbye has left the speaker.
+    /// Hang up (or cancel a call still being placed) — or leave the chat — then let the app take the bar away once the goodbye has left the speaker.
     private func endOrClose() {
+        if showsChat { chat.close() }
         voice.end()
         guard let close = config.onClose else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { close() }

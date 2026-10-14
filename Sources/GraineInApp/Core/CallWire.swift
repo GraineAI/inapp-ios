@@ -97,23 +97,38 @@ enum CallWire {
         return WireJSON.object(fields).text
     }
 
-    /// The ticket request: a voice ticket, the variables on it when they fit.
-    static func ticketRequest(publishableKey: String, metadata: [(String, String)]?) -> Data {
+    /**
+     * The ticket request: a voice ticket (or, for the chat, a text one — each
+     * opens a different kind of conversation), the variables on it when they
+     * fit, and the identity fields (contract §1.3) — the customer's raw
+     * identifier only here, never in the variables.
+     */
+    static func ticketRequest(
+        publishableKey: String,
+        metadata: [(String, String)]?,
+        mode: String = "voice",
+        identity: IdentityWire.Fields? = nil
+    ) -> Data {
         var fields: [(String, WireJSON)] = [
             ("publishableKey", .string(publishableKey)),
-            ("mode", .string("voice")),
+            ("mode", .string(mode)),
         ]
         if let metadata = metadata { fields.append(("metadata", .object(metadata.map { ($0.0, .string($0.1)) }))) }
+        if let identity = identity { fields += IdentityWire.pairs(identity) }
         return Data(WireJSON.object(fields).text.utf8)
     }
 
     // MARK: - URLs
 
-    /// The direct socket, used when no ticket could be minted: `{wsHost}/chat/v1/{agentId}?webcall=1`.
-    static func directUrl(wsHost: String?, agentId: String) -> String {
+    /**
+     * The direct socket, used when no ticket could be minted:
+     * `{wsHost}/chat/v1/{agentId}?webcall=1` — or `?text_chat=1` for the chat,
+     * which the runtime runs turn-based with no synthesizer.
+     */
+    static func directUrl(wsHost: String?, agentId: String, textChat: Bool = false) -> String {
         var host = wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? defaultWsHost
         if host.hasSuffix("/") { host.removeLast() }
-        return host + "/chat/v1/" + GraineProtocol.encode(agentId) + "?webcall=1"
+        return host + "/chat/v1/" + GraineProtocol.encode(agentId) + (textChat ? "?text_chat=1" : "?webcall=1")
     }
 
     /// `context_token` on whichever URL was chosen.

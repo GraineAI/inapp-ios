@@ -129,8 +129,8 @@ public final class GraineVoice: NSObject, ObservableObject {
     private var savedAudio: SavedAudioSession?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
-    /// The last component the agent drew that nobody has answered — for a widget view that mounts later.
-    private(set) var pendingWidgetFrame: [String: Any]?
+    /// The last component the agent drew that nobody has answered — for a widget view that mounts later. The instance keeps it, for either conversation.
+    var pendingWidgetFrame: [String: Any]? { graine.componentFrame }
 
     init(graine: GraineInApp) {
         self.graine = graine
@@ -224,12 +224,18 @@ public final class GraineVoice: NSObject, ObservableObject {
                 guard let self = self, self.connected else { return }
                 self.postContext(frame)
             },
+            graine.onIdentity { [weak self] in
+                // The page reads it when it mints its next session: a sign-in after the page loaded reaches the next call.
+                guard let self = self, self.ready else { return }
+                self.postIdentity()
+            },
             graine.onForegroundChange { [weak self] foreground in
                 self?.foregroundChanged(foreground)
             },
         ]
         load(idle: true)
         refreshConnectWait()
+        graine.tapCapture.attach(to: (view as? UIWindow) ?? view.window ?? GraineVoice.keyWindow())
     }
 
     /// Mount the engine in the app's key window. Call once a window exists — from a view's onAppear, say.
@@ -259,7 +265,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         ready = false
         startedCall = false
         pendingStart = false
-        pendingWidgetFrame = nil
+        if !graine.chat.carriesConversation { graine.forgetComponents() }
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }
         setAttempt(attempt.after(.ended))
@@ -289,10 +295,12 @@ public final class GraineVoice: NSObject, ObservableObject {
             report { $0.onError("A call is in progress on GraineCalls; end it before starting one here.") }
             return
         }
+        // One conversation at a time, across every agent: a call takes over from any chat and any other agent's call.
+        graine.takeConversation(for: .voice)
         // A new call, not a continuation: the last one's words must not appear above this one's first line.
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }
-        pendingWidgetFrame = nil
+        graine.forgetComponents()
         // A new attempt: the last one's failure and stage are not news.
         setAttempt(attempt.after(.started))
         setCall(connected: connected, connecting: true)
@@ -361,7 +369,7 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     /**
      * The customer answered a component the agent drew. `summary` is the
-     * sentence the agent hears ("Let's compare Creta and Seltos.") — without it
+     * sentence the agent hears ("Compare: Creta and Seltos") — without it
      * the tap lands and the conversation does not move.
      */
     public func answerWidget(widgetId: String, data: [String: Any], summary: String) {
@@ -369,9 +377,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             DispatchQueue.main.async { self.answerWidget(widgetId: widgetId, data: data, summary: summary) }
             return
         }
-        if let pending = pendingWidgetFrame, (JSON.nonEmpty(pending["widget_id"]) ?? JSON.string(pending["id"])) == widgetId {
-            pendingWidgetFrame = nil
-        }
+        if let pending = graine.componentFrame, GraineInApp.componentId(pending) == widgetId { graine.forgetComponents() }
         post(GraineProtocol.out(GraineProtocol.Out.widgetResult, ["widgetId": widgetId, "data": data, "summary": summary]))
     }
 
@@ -407,9 +413,9 @@ public final class GraineVoice: NSObject, ObservableObject {
         reloadEngine()
     }
 
-    /// Forget the retained component — it was answered or dismissed.
+    /// Forget the retained component — it was answered.
     func clearPendingWidget() {
-        pendingWidgetFrame = nil
+        graine.forgetComponents()
     }
 
     // MARK: - Loading
@@ -470,6 +476,17 @@ public final class GraineVoice: NSObject, ObservableObject {
         engine.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// Who the customer is for memory: `{type: "graine:identity", value, installId, memory, timezone}`, used on the page's next session.
+    private func postIdentity() {
+        let f = graine.identityFields(callId: nil)
+        post(GraineProtocol.out(GraineProtocol.Out.identity, [
+            "value": f.value,
+            "installId": f.installId,
+            "memory": f.memory,
+            "timezone": f.timezone,
+        ]))
+    }
+
     private func postContext(_ frame: [String: Any]) {
         var message = frame
         message["type"] = GraineProtocol.Out.appContext
@@ -499,6 +516,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             // Who the customer is, before anything else: the greeting is composed from these
             // and nothing later can repair it.
             post(GraineProtocol.out(GraineProtocol.Out.variables, ["variables": graine.currentVariables()]))
+            postIdentity()
             if let frame = graine.currentContextFrame() { postContext(frame) }
             if pendingStart && GraineVoice.micGranted() {
                 pendingStart = false
@@ -535,8 +553,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             report { $0.onCaption(role: role, text: text, live: live) }
 
         case .widget(let widget):
-            pendingWidgetFrame = widget
-            report { $0.onWidget(widget) }
+            graine.componentArrived(widget)
 
         case .widgetPending(let hint):
             report { $0.onWidgetPending(hint) }

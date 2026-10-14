@@ -110,8 +110,8 @@ import Testing
     @Test func namesSeveralChoicesInTheSameSentence() throws {
         for c in try cases("manySummary") {
             let titles = try #require(c["titles"] as? [String])
-            let verb = try #require(c["verb"] as? String)
-            #expect(WidgetRules.manySummary(titles, verb: verb) == c["output"] as? String, "case: \(Canon(c))")
+            let label = try #require(c["label"] as? String)
+            #expect(WidgetRules.manySummary(titles, label: label) == c["output"] as? String, "case: \(Canon(c))")
         }
     }
 

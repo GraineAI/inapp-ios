@@ -6,7 +6,9 @@ import Foundation
  *   1. the agent's defaults from the dashboard (Embed & Widgets → Variables)
  *   2. what the app knows at build time (GraineConfig.variables)
  *   3. what the app learns while it runs (setVariables)
- *   4. who is signed in (identify) — last, so a person beats a default
+ *   4. who is signed in (identify) — last, so a person beats a default; less
+ *      the trait that names them (`identity.field`), which only ever travels
+ *      raw on the identity channel, never in a prompt
  *
  * Every value is a string, because it is substituted into a sentence: numbers
  * and booleans are flattened (a whole number without ".0"), nested objects and
@@ -22,6 +24,13 @@ final class VariableStore {
     private var dashboard: [String: String] = [:]
     private var runtime: [String: String] = [:]
     private var identity: [String: String] = [:]
+    /**
+     * The trait that names the customer (the session's `identity.field`): it
+     * goes, raw, only on the identity channel, so it is left out of the
+     * variables and the context's `user` — Graine never puts the identifier in
+     * a prompt. `user_id` until the session says otherwise.
+     */
+    private var identityField = GraineIdentitySettings.standard.field
 
     init(buildTime: [String: Any?] = [:]) {
         self.buildTime = VariableStore.flatten(buildTime)
@@ -58,9 +67,18 @@ final class VariableStore {
         lock.lock(); identity = next; lock.unlock()
     }
 
+    func setIdentityField(_ field: String) {
+        lock.lock(); identityField = field; lock.unlock()
+    }
+
     func identitySnapshot() -> [String: String] {
         lock.lock(); defer { lock.unlock() }
-        return identity
+        return visibleIdentity
+    }
+
+    /// Who is signed in, less the identifier itself.
+    private var visibleIdentity: [String: String] {
+        identity.filter { $0.key.lowercased() != identityField }
     }
 
     /// Every variable the agent will receive, later sources winning.
@@ -69,7 +87,30 @@ final class VariableStore {
         var out = dashboard
         for (k, v) in buildTime { out[k] = v }
         for (k, v) in runtime { out[k] = v }
-        for (k, v) in identity { out[k] = v }
+        for (k, v) in visibleIdentity { out[k] = v }
+        return out
+    }
+
+    /**
+     * The same variables in the order a ticket keeps them — it keeps twelve:
+     * who the customer is first, then what the app learned while running, then
+     * what it knew at build time, then the dashboard's defaults (each sorted),
+     * every value the merged, winning one. The React Native client sends the
+     * identity last, and loses it behind a dozen defaults.
+     */
+    func orderedForTicket() -> [(String, String)] {
+        lock.lock(); defer { lock.unlock() }
+        let shown = visibleIdentity
+        var merged = dashboard
+        for (k, v) in buildTime { merged[k] = v }
+        for (k, v) in runtime { merged[k] = v }
+        for (k, v) in shown { merged[k] = v }
+        var seen = Set<String>()
+        var out: [(String, String)] = []
+        for key in shown.keys.sorted() + runtime.keys.sorted() + buildTime.keys.sorted() + dashboard.keys.sorted() {
+            guard seen.insert(key).inserted, let value = merged[key] else { continue }
+            out.append((key, value))
+        }
         return out
     }
 

@@ -18,6 +18,13 @@ import UIKit
  *     try GraineCallsHost.shared.configure(["publishableKey": "pk_…", "displayName": "Acme"])
  *     let sink = GraineCallsHost.shared.addSink { event, payload in … }
  *
+ * Several agents in one app: `configure` names the others under `agents`
+ * (`{"sales": {"publishableKey": "pk_…"}}`), `startCall` takes `{agent:
+ * "sales"}`, and a ring Graine sends rings with the agent it is for. The
+ * snapshot, `incoming`, `outcome` and `action` say which: `agent` is the
+ * call's agent by name ("default" for the default one). The wrapper's actions
+ * and variables reach every agent.
+ *
  * Events: `state` (the snapshot, at most once per turn of the main loop),
  * `outcome`, `incoming`, `voipToken` and `action`. Main thread: a call from
  * another thread hops there first (`configure`, `restore`, `snapshot`,
@@ -79,7 +86,7 @@ public final class GraineCallsHost: NSObject {
 
     // MARK: - The call
 
-    /// The customer calls the agent: `{reason?, variables?}`. The call's id, or nil when not configured or a call is live.
+    /// The customer calls the agent: `{reason?, variables?, agent?}`. The call's id, or nil when not configured, a call is live, or no agent has that name.
     public func startCall(_ options: [String: Any]?) -> String? {
         onMainSync { core.startCall(options) }
     }
@@ -110,6 +117,21 @@ public final class GraineCallsHost: NSObject {
     /// Who is signed in (`GraineInApp.identify`); nil on sign-out.
     public func setIdentity(_ traits: [String: Any]?) {
         onMain { self.core.setIdentity(traits) }
+    }
+
+    /// The current customer's memory choice (`GraineInApp.setMemory`): false — their conversations are neither remembered nor recalled.
+    public func setMemory(_ enabled: Bool) {
+        onMain { self.core.setMemory(enabled) }
+    }
+
+    /**
+     * This install's id: a UUID kept in the Keychain (this device only,
+     * through reinstalls) — the one the native calls send. A JavaScript or
+     * Dart SDK sends the same one on its own requests, so a device is one
+     * install whichever layer speaks. Nil before `configure` or `restore`.
+     */
+    public func installId() -> String? {
+        onMainSync { core.installId() }
     }
 
     /// The runtime variables become exactly this map: a key the last map set and this one leaves out is removed.
@@ -178,6 +200,34 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
     private static let presentRetrySeconds = 0.3
     private static let presentRetries = 10
 
+    /// The wrapper's actions, each registered on every agent: a call with any of them may ask for one.
+    private struct HeldAction {
+        let token: Int
+        let handler: GraineInApp.DeferredActionHandler
+        var offs: [() -> Void]
+    }
+    private var heldActions: [String: HeldAction] = [:]
+    private var nextActionToken = 0
+    /// The wrapper's runtime variables as they stand, for an agent configured after they were set.
+    private var runtime: [String: Any] = [:]
+    /// The agents that have the wrapper's actions and variables.
+    private var fed: Set<ObjectIdentifier> = []
+
+    /// The default agent and every other one configured beside it.
+    private var everyAgent: [GraineInApp] { graine?.peers ?? [] }
+
+    /// An agent configured since the actions and variables were handed over gets them now.
+    private func feedNewAgents() {
+        for agent in everyAgent where !fed.contains(ObjectIdentifier(agent)) {
+            fed.insert(ObjectIdentifier(agent))
+            for name in heldActions.keys.sorted() {
+                guard let handler = heldActions[name]?.handler else { continue }
+                heldActions[name]?.offs.append(agent.registerAction(name, deferred: handler))
+            }
+            if !runtime.isEmpty { agent.setVariables(runtime.mapValues { Optional($0) }) }
+        }
+    }
+
     deinit {
         if let token = activeObserver { NotificationCenter.default.removeObserver(token) }
     }
@@ -206,6 +256,15 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
     }
 
     func configureCalls(_ options: CallsHostOptions) {
+        // The other agents first (configuring one twice changes nothing), so a ring for one finds it.
+        for name in options.agents.keys.sorted() {
+            guard let agent = options.agents[name] else { continue }
+            GraineInApp.configure(GraineConfig(
+                baseUrl: agent.baseUrl, publishableKey: agent.publishableKey, appVersion: options.appVersion, debug: options.debug
+            ), name: name)
+        }
+        // They answer the wrapper's actions and read its variables too.
+        feedNewAgents()
         calls?.configure(GraineCallsConfig(
             displayName: options.displayName,
             ringtoneSound: options.ringtoneSound,
@@ -219,8 +278,8 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
         calls?.enableVoIPPushes(onToken: onToken)
     }
 
-    func startCall(reason: String?, variables: [String: Any]) -> String? {
-        calls?.startCall(reason: reason, variables: variables)
+    func startCall(reason: String?, variables: [String: Any], agent: String?) -> String? {
+        calls?.startCall(reason: reason, variables: variables, agent: agent)
     }
 
     func answer() {
@@ -243,17 +302,41 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
         graine?.identify(traits?.mapValues { Optional($0) })
     }
 
+    func setMemory(_ enabled: Bool) {
+        graine?.setMemory(enabled)
+    }
+
+    var installId: String? {
+        graine?.installId
+    }
+
+    /// On every agent: the wrapper keeps the agent on the call's variables here, whichever agent that is.
     func setVariables(_ values: [String: Any?]) {
-        graine?.setVariables(values)
+        feedNewAgents()
+        for (key, value) in values {
+            if let value = value { runtime[key] = value } else { runtime.removeValue(forKey: key) }
+        }
+        for agent in everyAgent { agent.setVariables(values) }
     }
 
     func setScreen(_ screen: GraineScreen?) {
         graine?.setScreen(screen)
     }
 
+    /// On every agent: a call with any of them may ask for it.
     func registerAction(_ name: String, handler: @escaping GraineInApp.DeferredActionHandler) -> () -> Void {
-        guard let graine = graine else { return {} }
-        return graine.registerAction(name, deferred: handler)
+        guard graine != nil else { return {} }
+        feedNewAgents()
+        heldActions.removeValue(forKey: name)?.offs.forEach { $0() }
+        nextActionToken += 1
+        let token = nextActionToken
+        let offs = everyAgent.map { $0.registerAction(name, deferred: handler) }
+        heldActions[name] = HeldAction(token: token, handler: handler, offs: offs)
+        return { [weak self] in
+            guard let self = self, let held = self.heldActions[name], held.token == token else { return }
+            held.offs.forEach { $0() }
+            self.heldActions.removeValue(forKey: name)
+        }
     }
 
     func callFields() -> CallsHostSnapshot {
@@ -267,12 +350,25 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             speakerOn: calls.speakerOn,
             agentSpeaking: calls.agentSpeaking,
             caption: calls.caption,
-            connectedAt: calls.connectedAt
+            connectedAt: calls.connectedAt,
+            agent: calls.agent
         )
+    }
+
+    func agentName(forCall callId: String) -> String? {
+        calls?.agentName(forCall: callId)
+    }
+
+    var callHosted: Bool {
+        calls?.hosted ?? false
     }
 
     var appActive: Bool {
         UIApplication.shared.applicationState == .active
+    }
+
+    var missedCallPending: Bool {
+        calls?.missedCall != nil
     }
 
     func nextTurn(_ block: @escaping () -> Void) {
@@ -323,10 +419,11 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             }
             return
         }
-        let controller = UIHostingController(rootView: GraineCallView(calls: calls))
+        // The brand's call screen for the device's appearance; the status bar over it follows its background.
+        let deviceDark = GraineInApp.windowIsDark()
+        let controller = UIHostingController(rootView: GraineCallView(calls: calls, deviceDark: deviceDark))
         controller.modalPresentationStyle = .fullScreen
-        // The call screen is dark whatever the app's appearance; so is the status bar over it.
-        controller.overrideUserInterfaceStyle = .dark
+        controller.overrideUserInterfaceStyle = GraineCallView.drawsDark(deviceDark: deviceDark, graine: calls.callAgent ?? graine) ? .dark : .light
         screen = controller
         top.present(controller, animated: true)
     }

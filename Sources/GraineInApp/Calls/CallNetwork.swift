@@ -24,16 +24,25 @@ final class URLSessionCallNetwork: CallNetwork {
     }
 
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void) {
+        postWithHeaders(url, body: body) { status, data, _ in completion(status, data) }
+    }
+
+    func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         session.dataTask(with: request) { data, response, error in
             if error != nil {
-                completion(0, nil)
+                completion(0, nil, [:])
                 return
             }
-            completion((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+            let http = response as? HTTPURLResponse
+            var headers: [String: String] = [:]
+            for (name, value) in http?.allHeaderFields ?? [:] {
+                if let n = name as? String, let v = value as? String { headers[n.lowercased()] = v }
+            }
+            completion(http?.statusCode ?? 0, data, headers)
         }.resume()
     }
 

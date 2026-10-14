@@ -385,6 +385,8 @@ final class EngineRig {
     private(set) var events: [CallEngine.Event] = []
     private(set) lazy var engine: CallEngine = makeEngine()
     var variables: [(String, String)] = [("who_called", "agent"), ("call_reason", "payment_due")]
+    /// The identity fields on the ticket; none by default, as before identity existed.
+    var identity: IdentityWire.Fields?
 
     private func makeEngine() -> CallEngine {
         CallEngine(
@@ -394,7 +396,8 @@ final class EngineRig {
                 variables: variables,
                 contextFrame: { [unowned self] in self.contextFrame },
                 session: { [unowned self] done in done(self.session) },
-                runAction: { [unowned self] name, args, answer in self.actionRunner(name, args, answer) }
+                runAction: { [unowned self] name, args, answer in self.actionRunner(name, args, answer) },
+                identity: identity
             ),
             audio: audio,
             network: network,

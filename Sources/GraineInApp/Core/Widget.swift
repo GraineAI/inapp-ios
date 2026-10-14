@@ -287,15 +287,17 @@ enum WidgetRules {
     // MARK: - Sentences
 
     /**
-     * The sentence the agent hears when several were chosen. One line, in the
-     * customer's voice, naming them — "I picked 2 items" is not something a
-     * person says.
+     * The sentence the agent hears when several were chosen — and the
+     * customer's own bubble in a text chat: the button's label as written,
+     * then the names ("Taken: Morning and Evening"). Never the label read as
+     * a verb, and never "I picked 2 items". No label: the names alone.
      */
-    static func manySummary(_ titles: [String], verb: String = "compare") -> String {
+    static func manySummary(_ titles: [String], label: String = "Compare") -> String {
         let names = titles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard let last = names.last else { return "" }
         let list = names.count == 1 ? last : names.dropLast().joined(separator: ", ") + " and " + last
-        return "Let's \(verb) \(list)."
+        let lead = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return lead.isEmpty ? list : "\(lead): \(list)"
     }
 
     /// Several chosen, one answer: the oldest choice gives way when the limit is reached.
@@ -305,9 +307,28 @@ enum WidgetRules {
         return current + [id]
     }
 
-    /// The label on the one button that answers a multi-choice. Disabled below two.
+    /**
+     * The label on the one button that answers a multi-choice. Disabled below
+     * two, it says how many more — and not "to <label>": the author's label is
+     * a button's word ("Compare", "Taken"), not always a verb, and "Pick 2 more
+     * to taken" is what reading it as one said.
+     */
     static func manyButtonLabel(chosen: Int, selectLabel: String) -> String {
-        chosen < 2 ? "Pick \(2 - chosen) more to \(selectLabel.lowercased())" : "\(selectLabel) \(chosen)"
+        chosen < 2 ? "Pick \(2 - chosen) more" : "\(selectLabel) \(chosen)"
+    }
+
+    /**
+     * A full-screen component's footer: on a call, "STILL LISTENING" and how to
+     * answer — the agent is still there, listening. A component from the chat
+     * is on no call: no footer at all.
+     */
+    static func screenFooter(prompt: String, typed: Bool) -> (label: String, line: String)? {
+        typed ? nil : ("STILL LISTENING", prompt.isEmpty ? "Tap one, or just say it." : prompt)
+    }
+
+    /// The component's close control, for a screen reader: in the chat there is no talking to keep on with.
+    static func closeLabel(typed: Bool) -> String {
+        typed ? "Close" : "Close and keep talking"
     }
 
     /// What stays on screen after a tap: the chosen thing's name, and its price or day. Nil when there is nothing to show.
@@ -653,7 +674,7 @@ struct WidgetContent {
             "titles": titles.joined(separator: ", "),
             "count": rows.count,
         ]
-        return (data, WidgetRules.manySummary(titles, verb: selectLabel.lowercased()))
+        return (data, WidgetRules.manySummary(titles, label: selectLabel))
     }
 
     /// `label`/`id` for quick_actions, `chosen` for the agent's own choices — each kind's own contract.

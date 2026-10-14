@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.6.2")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.7.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -55,6 +55,27 @@ struct MyApp: App {
 }
 ```
 
+## Several agents in one app
+
+Configure each agent under a name, with its own publishable key, and hand the
+one a screen talks to to its views:
+
+```swift
+GraineInApp.configure(GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_live_support…"))       // the default
+GraineInApp.configure(GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_live_sales…"), name: "sales")
+
+GraineChatView(graine: GraineInApp.named("sales"))      // on Plans
+GraineAgentBar()                                        // elsewhere: the default agent
+GraineInApp.shared.calls.startCall(reason: "upgrade", agent: "sales")
+```
+
+Each agent has its own design, chat, voice bar, actions, and scheduling and
+memory requests. The customer, the device and the screen are the app's:
+`identify` on any agent identifies them for every agent (`identify(nil)` signs
+out everywhere), and `setScreen`, `track` and taps reach every agent. One
+conversation at a time across agents. A ring Graine sends rings with the
+agent it is from.
+
 ## Tell it who and where
 
 ```swift
@@ -72,6 +93,35 @@ graine.track("otp_retry")                                          // context, n
 
 Values are masked on the device (PAN, email, card, phone, Aadhaar) before they
 leave it; report real values. `GraineMasking.addRule(pattern:token:)` adds your own.
+
+A form that changes one field at a time can say just that:
+`graine.updateField(GraineField(name: "pan", value: pan, status: .invalid))`,
+`graine.removeField("otp")`, and `graine.clearScreen("kyc_documents")` in a
+screen's teardown (it clears only if that screen is still the one described).
+Taps on controls with an accessibility identifier (or a button's label) reach
+the agent as `tap:<name>` — never a value — at most two a second
+(`GraineConfig.captureTaps`, on by default); name a SwiftUI control with
+`.graineTap("pay")`, or call `graine.tap("pay")`.
+
+## Who the customer is, and memory
+
+```swift
+graine.identify(["user_id": user.id, "name": user.firstName])            // memory on by default
+graine.identify(["user_id": user.id], memory: false)                     // this customer: not remembered
+graine.setMemory(true)                                                   // change their mind later
+let kept = try await graine.memories()                                   // what the agent remembers about them
+let deleted = try await graine.forgetMemory()                            // delete what the agent remembers about them
+graine.identify(nil)                                                     // sign-out
+```
+
+The agent's **Who is the user?** setting (Agent → Memory, in the dashboard) names
+the trait that says who the customer is — `user_id` unless you chose `email`,
+`phone` or a custom trait. Its value is sent only when a conversation starts,
+never in the prompt's variables or the screen context; Graine keeps a one-way
+key of it, not the value. A placeholder (`"guest"`, `"null"`, a masked value)
+is nobody: that conversation is anonymous and has no memory. The memory
+choice is remembered for each customer on the device. `graine.installId` is
+this install's id, kept in the Keychain through reinstalls.
 
 ## Let the agent act
 
@@ -126,10 +176,78 @@ again).
 (`onWidget`), friction (`onFriction`) and errors.
 
 Friction: when the customer sits on a screen with a field outstanding during a
-call (45s by default, from the dashboard, overridable with
+call or a chat (45s by default, from the dashboard, overridable with
 `GraineConfig.friction` / `configureFriction`), the agent is told
 `stalled_on_step`. Call `noteInteraction()` when the customer does something
 that is not a field edit.
+
+The bar draws the agent's components itself, above the bar — unless your app
+mounts its own `GraineWidgetView`, which then draws them alone.
+`graine.reopenComponent()` puts back the last one the customer closed.
+
+## The chat
+
+The bar offers what the dashboard offers (Embed & Widgets → What visitors
+get): the call, the chat, or both with a switch between them —
+`GraineAgentBar(surface: .chat)` opens on the chat when both are allowed. As a
+screen of its own:
+
+```swift
+NavigationLink("Ask our assistant") { GraineChatView() }          // SwiftUI
+present(GraineChatViewController(), animated: true)                // UIKit
+```
+
+Or draw your own from `graine.chat` (`GraineChat`, an `ObservableObject`):
+`open()` when the customer is in the chat, `send(_:)`, `close()` when they
+leave, and `turns` (one per message, each reply its own), `status` and
+`typing`. A message typed while offline is shown at once and sent when the
+chat is back; a dropped connection is made again on its own, then waits for
+the customer (or `retry()`). One conversation at a time: the chat ends a call
+and a call closes the chat. `GraineListener.onChatMessage(_:)` hears each
+reply (`proactive` when the agent spoke up unasked). Where Graine rings your
+customers, the chat window shows their booked calls on an **Upcoming calls**
+card, with Cancel (`chat.upcomingCalls`, `cancelUpcomingCall(id:)`).
+
+### Conversations continue
+
+A customer you `identify(_:)` who comes back — later today, tomorrow, on their
+other phone — finds the chat where they left it, and the agent picks up from
+there instead of greeting them again. The chat opens with the recent messages
+(the last 50, kept for a while after the last one), earlier calls show as one
+"Voice call · 6:05 PM" row, and day lines say Today, Yesterday or the date.
+Drawing your own chat? `turn.restored` marks a message from an earlier
+conversation and `turn.channel` (`.chat`, `.voice`) where it was said.
+`try await chat.newConversation()` starts a fresh thread (the header of
+`GraineChatView` offers it while an earlier conversation is on screen); what
+the agent remembers about the customer stays. `forgetMemory()` clears the chat
+on screen too. Anonymous customers, and those with memory off, start fresh
+every time; each agent in your app keeps its own conversation.
+
+## A bigger chat window
+
+How big the bar's chat opens is set per agent in the dashboard — **Embed &
+Widgets → Appearance → Chat window → Window size** — and the bar draws it with
+no code:
+
+| Size | On an iPhone | On an iPad |
+|---|---|---|
+| Compact | The window above the bar, as always | The same |
+| Large | A sheet over most of the screen, the app dimmed behind it; drag it down or tap outside to close | A panel 420 wide in the bottom corner |
+| Full screen | The whole screen, closed with the chevron at the top left | The whole screen |
+
+Your app can choose otherwise, for every chat or for one:
+
+```swift
+GraineInApp.configure(GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_live_…", chatSize: .large))
+
+GraineInApp.shared.chat.open(size: .full)   // opens the chat now, at this size, this once
+```
+
+The size passed to `open(size:)` wins until the chat closes, then
+`GraineConfig.chatSize`, then the dashboard's. A mounted `GraineAgentBar` moves
+to the chat when you open it this way, and switching between the call and the
+chat keeps the size. `GraineChatView` and `GraineChatViewController` stay as
+they are, for a chat you place yourself.
 
 ## Calls (CallKit + VoIP push)
 
@@ -168,6 +286,25 @@ calls.enableVoIPPushes { token in       // hex; nil when invalidated
 calls.addListener(self)
 ```
 
+**When Graine rings your customers** (your workspace uploaded its push
+credentials under In-app calling, in the dashboard), that is all: call
+`calls.enableVoIPPushes()` at launch — no `onToken` needed — and the SDK
+registers the token with Graine, rings the calls Graine sends, and tells
+Graine what became of each. Customers can book a call when the agent allows it:
+
+```swift
+let rules = graine.schedulingRules                 // usersCanBook, earliest(now:), latest(now:), …
+let call = try await graine.scheduleCall(at: tomorrowAt6pm, reason: "Finish my KYC")   // status .scheduled
+let upcoming = try await graine.scheduledCalls()  // [GraineScheduledCall], upcoming first
+let status = try await graine.cancelScheduledCall(id: call.id)                          // .cancelled
+```
+
+`scheduleCall` checks the rules before it sends anything. A refusal is a
+`GraineServiceError` with a typed `code`: `.schedulingOff`, `.tooSoon`,
+`.tooFar`, then the server's `.outsideWindow` (the agent's calling hours, in
+the phone's time zone), `.tooManyPending`, `.rateLimited` (with
+`retryAfterSeconds`).
+
 **The customer calls the agent**: `calls.startCall(reason: "card_blocked", variables: ["order": "A-1043"])`
 returns the call's id (nil while another call is live). The agent hears
 `who_called = "customer"` and `call_reason`.
@@ -181,8 +318,8 @@ returns the call's id (nil while another call is live). The agent hears
 ```
 
 `type` and `call_id` are required. It rings through CallKit; answering opens
-the conversation with `who_called = "agent"`, `call_reason` and the
-variables. Every push is reported to CallKit before its completion runs, as
+the conversation with `who_called = "agent"` (`"scheduled"` for a call Graine
+rang at a booked time), `call_reason` and the variables. Every push is reported to CallKit before its completion runs, as
 iOS requires — a malformed one, or one that arrives while a call is live, is
 reported and ended at once. An app with its own `PKPushRegistry` passes the
 payload to `calls.reportIncomingCall(payload:completion:)` instead.
@@ -202,8 +339,19 @@ func onCallState(_ state: GraineCallState, callId: String?) {}
 In the call: `calls.end()`, `setMuted(_:)`, `setSpeaker(_:)` (earpiece by
 default) and `answer()`. `GraineCalls` is an `ObservableObject` — `state`,
 `callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `caption`,
-`connectedAt` — and `GraineCallView()` is a ready call screen for while your
-app is open. One call at a time: starting one ends any call `voice` holds, and
+`transcript`, `connectedAt`, `hosted` — and `GraineCallView()` is a ready call
+screen for while your app is open, drawn in the brand's design (Web components →
+Design → Call screen): every state — ringing ("Scheduled call" for a call
+Graine rang for a booking), connecting, the call, ended, and a missed ring,
+which stays as "Missed call" with Call back (`calls.callBack()`) and Close
+(`calls.dismissMissedCall()`):
+
+```swift
+.fullScreenCover(isPresented: .constant(calls.showsCallScreen)) { GraineCallView() }
+```
+
+The system's own call screen shows the call's name and, unless you set
+`iconTemplateImageData`, the brand's launcher glyph. One call at a time: starting one ends any call `voice` holds, and
 `voice.start()` refuses while one is live. `endOnBackground` is `voice`'s
 setting; a native call keeps going in the background, as a phone call does.
 

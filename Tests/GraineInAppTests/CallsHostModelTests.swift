@@ -52,6 +52,7 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
     var runningWith: (publishableKey: String, baseUrl: String, debug: Bool)?
     var nextCallId: String? = "call-1"
     var appActive = true
+    var missedCallPending = false
 
     private(set) var made: [CallsHostOptions] = []
     private(set) var configured: [CallsHostOptions] = []
@@ -102,8 +103,11 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
         self.onToken = onToken
     }
 
-    func startCall(reason: String?, variables: [String: Any]) -> String? {
+    private(set) var placedAgents: [String?] = []
+
+    func startCall(reason: String?, variables: [String: Any], agent: String?) -> String? {
         placed.append((reason, variables))
+        placedAgents.append(agent)
         if let id = nextCallId {
             fields = CallsHostSnapshot(state: .connecting, callId: id, direction: .outgoing, callerName: "Acme")
         }
@@ -115,6 +119,10 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
     func setMuted(_ value: Bool) { muted.append(value) }
     func setSpeaker(_ on: Bool) { speaker.append(on) }
     func identify(_ traits: [String: Any]?) { identities.append(traits) }
+    private(set) var memoryChoices: [Bool] = []
+    var installIdValue: String? = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    func setMemory(_ enabled: Bool) { memoryChoices.append(enabled) }
+    var installId: String? { installIdValue }
     func setVariables(_ values: [String: Any?]) { variableChanges.append(values) }
     func setScreen(_ screen: GraineScreen?) { screens.append(screen) }
 
@@ -127,6 +135,14 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
     }
 
     func callFields() -> CallsHostSnapshot { fields }
+    /// The agent each call (by id) is with, as GraineCalls knows it.
+    var callAgents: [String: String] = [:]
+    func agentName(forCall callId: String) -> String? { callAgents[callId] }
+    /// Whether Graine rang the call in progress, as GraineCalls.hosted says it.
+    var callHosted = false
+    /// The time now, for an ended call's length.
+    var clock = Date(timeIntervalSince1970: 1_000)
+    func now() -> Date { clock }
     func presentCallScreen() { presented += 1 }
     func dismissCallScreen() { dismissed += 1 }
     func nextTurn(_ block: @escaping () -> Void) { turns.append(block) }
@@ -500,14 +516,14 @@ private final class HostRig {
 @Suite struct CallsHostSnapshotTests {
     private let keys: Set<String> = [
         "state", "callId", "direction", "reason", "callerName", "muted", "speakerOn", "agentSpeaking",
-        "caption", "connectedAt", "error",
+        "caption", "connectedAt", "error", "agent",
     ]
 
     @Test func everyKeyIsAlwaysThereAndIdleIsNullsAndFalses() {
         let json = CallsHostSnapshot().json
         #expect(Set(json.keys) == keys)
         #expect(json["state"] as? String == "idle")
-        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error"] {
+        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent"] {
             #expect(json[key] is NSNull, "\(key)")
         }
         for key in ["muted", "speakerOn", "agentSpeaking"] {
@@ -521,9 +537,10 @@ private final class HostRig {
             state: .active, callId: "c1", direction: .incoming, reason: "payment_due", callerName: "Acme",
             muted: true, speakerOn: true, agentSpeaking: true,
             caption: GraineCaption(role: .agent, text: "Hi Asha", live: true),
-            connectedAt: Date(timeIntervalSince1970: 1_760_000_000.123)
+            connectedAt: Date(timeIntervalSince1970: 1_760_000_000.123), agent: "sales"
         ).json
         #expect(Set(json.keys) == keys)
+        #expect(json["agent"] as? String == "sales", "the call's agent, by name")
         #expect(json["state"] as? String == "active")
         #expect(json["callId"] as? String == "c1")
         #expect(json["direction"] as? String == "incoming")
@@ -544,9 +561,10 @@ private final class HostRig {
             state: .idle, callId: "c1", direction: .outgoing, reason: "support", callerName: "Acme",
             muted: true, speakerOn: true, agentSpeaking: true,
             caption: GraineCaption(role: .customer, text: "hello", live: false),
-            connectedAt: Date(), error: "The microphone permission was not granted."
+            connectedAt: Date(), error: "The microphone permission was not granted.", agent: "sales"
         )
         #expect(stale.settled == CallsHostSnapshot(error: "The microphone permission was not granted."))
+        #expect(stale.json["agent"] is NSNull, "no call, no agent")
         let json = stale.json
         #expect(json["callId"] is NSNull)
         #expect(json["caption"] is NSNull)
@@ -619,6 +637,30 @@ private final class HostRig {
         #expect(JSON.canonical(named) == #"{"callerName":"Acme","callId":"c9","reason":null}"#)
         #expect(JSON.canonical(CallsHostEvent.tokenPayload(nil)) == #"{"token":null}"#)
         #expect(JSON.canonical(CallsHostEvent.tokenPayload("ab12")) == #"{"token":"ab12"}"#)
+    }
+
+    @Test func anOutcomeARingAndAnActionNameTheirAgentWhenItIsKnown() {
+        #expect(JSON.canonical(CallsHostEvent.outcomePayload(.missed, callId: "c1", agent: "sales"))
+            == #"{"agent":"sales","callId":"c1","outcome":"missed"}"#)
+        #expect(JSON.canonical(CallsHostEvent.incomingPayload(GraineIncomingCall(callId: "c9"), agent: "default"))
+            == #"{"agent":"default","callerName":null,"callId":"c9","reason":null}"#)
+        #expect(JSON.canonical(CallsHostEvent.actionPayload(requestId: "r1", name: "raise_ticket", arguments: [:], agent: "sales"))
+            == #"{"agent":"sales","arguments":{},"name":"raise_ticket","requestId":"r1"}"#)
+        #expect(CallsHostEvent.outcomePayload(.missed, callId: "c1")["agent"] == nil, "unknown: no key at all")
+    }
+
+    @Test func aCallGraineRangSaysSoAndAnEndedCallSaysHowLongItLasted() {
+        // The keys React Native's and Flutter's GraineCallOutcome read.
+        #expect(JSON.canonical(CallsHostEvent.outcomePayload(.ended(.remote), callId: "h1", hosted: true, durationSeconds: 95))
+            == #"{"callId":"h1","durationSeconds":95,"hosted":true,"outcome":"ended","reason":"remote"}"#)
+        #expect(JSON.canonical(CallsHostEvent.outcomePayload(.answered, callId: "h1", hosted: true, durationSeconds: 3))
+            == #"{"callId":"h1","hosted":true,"outcome":"answered"}"#, "a length only on an ended call")
+        #expect(JSON.canonical(CallsHostEvent.outcomePayload(.ended(.local), callId: "c1", durationSeconds: 12))
+            == #"{"callId":"c1","durationSeconds":12,"outcome":"ended","reason":"local"}"#, "not hosted: no key")
+        #expect(JSON.canonical(CallsHostEvent.ringingPayload(callId: "h1", agent: "sales"))
+            == #"{"agent":"sales","callId":"h1","hosted":true,"outcome":"ringing"}"#)
+        #expect(JSON.canonical(CallsHostEvent.incomingPayload(GraineIncomingCall(callId: "h1", callerName: "Acme", hosted: true)))
+            == #"{"callerName":"Acme","callId":"h1","hosted":true,"reason":null}"#)
     }
 
     @Test func anActionRequestCarriesJSONArguments() {
@@ -1203,6 +1245,37 @@ private final class HostRig {
         #expect(snapshot["reason"] is NSNull)
     }
 
+    @Test func aRingGraineSentRingsOnTheEventsAndItsEndSaysHostedAndHowLong() throws {
+        let rig = HostRig()
+        try rig.configure()
+        rig.platform.callAgents["h1"] = "default"
+        rig.platform.fields = CallsHostSnapshot(state: .ringing, callId: "h1", direction: .incoming)
+        rig.platform.callHosted = true
+        rig.core.incoming(GraineIncomingCall(callId: "h1", reason: "renewal", callerName: "Acme", hosted: true))
+        // The ring, then the engine's word to Graine that it is ringing — told to the app too.
+        #expect(rig.events.payloads("incoming").map { $0["hosted"] as? Bool } == [true])
+        #expect(rig.events.payloads("outcome").map { JSON.canonical($0) } == [#"{"agent":"default","callId":"h1","hosted":true,"outcome":"ringing"}"#])
+        rig.core.outcome(.answered, callId: "h1")
+        // Connected at 1 000 s; it ends 95 seconds later.
+        rig.platform.fields = CallsHostSnapshot(state: .ended(.remote), callId: "h1", direction: .incoming, connectedAt: Date(timeIntervalSince1970: 1_000))
+        rig.platform.clock = Date(timeIntervalSince1970: 1_095)
+        rig.core.outcome(.ended(.remote), callId: "h1")
+        let outcomes = rig.events.payloads("outcome")
+        #expect(outcomes.map { $0["outcome"] as? String } == ["ringing", "answered", "ended"])
+        #expect(outcomes.map { $0["hosted"] as? Bool } == [true, true, true])
+        #expect(outcomes.last?["durationSeconds"] as? Int == 95)
+        #expect(outcomes[1]["durationSeconds"] == nil)
+        // A ring refused while that call is live is another call's: nothing known about it is said.
+        rig.core.outcome(.missed, callId: "other")
+        #expect(rig.events.payloads("outcome").last?["hosted"] == nil)
+        // The app's own push: no ringing outcome, no hosted.
+        rig.platform.callHosted = false
+        rig.platform.fields = CallsHostSnapshot(state: .ringing, callId: "c2", direction: .incoming)
+        rig.core.incoming(GraineIncomingCall(callId: "c2", reason: "payment_due"))
+        #expect(rig.events.payloads("outcome").count == 4, "no ringing for the app's own ring")
+        #expect(rig.events.payloads("incoming").last?["hosted"] == nil)
+    }
+
     @Test func outcomesFromBeforeAnythingListenedReachTheFirstSink() throws {
         let rig = HostRig(listening: false)
         try rig.configure()
@@ -1386,5 +1459,68 @@ private final class HostRig {
         try rig.configure(["callScreen": "app"])
         rig.platform.runTurns()
         #expect(rig.platform.dismissed == 1)
+    }
+}
+
+@Suite struct CallsHostAgentsTests {
+    @Test func moreAgentsAreReadKeptAndChecked() throws {
+        let options = try CallsHostOptions.parse([
+            "publishableKey": "pk_main", "displayName": "Acme",
+            "agents": ["sales": ["publishableKey": "pk_sales"], " care ": ["publishableKey": "pk_care", "baseUrl": "https://www.graine.ai/"],
+                       "default": ["publishableKey": "pk_ignored"]],
+        ] as [String: Any])
+        #expect(options.agents == [
+            "sales": CallsHostOptions.Agent(publishableKey: "pk_sales", baseUrl: "https://www.graine.ai"),
+            "care": CallsHostOptions.Agent(publishableKey: "pk_care", baseUrl: "https://www.graine.ai"),
+        ])
+        #expect(try CallsHostOptions.parse(options.json) == options, "kept for a cold start, read back the same")
+        #expect(throws: GraineCallsHostError.invalidOptions("agents.sales.publishableKey is required")) {
+            _ = try CallsHostOptions.parse(["publishableKey": "pk", "displayName": "A", "agents": ["sales": ["baseUrl": "x"]]] as [String: Any])
+        }
+        #expect(throws: GraineCallsHostError.invalidOptions("agents must be an object")) {
+            _ = try CallsHostOptions.parse(["publishableKey": "pk", "displayName": "A", "agents": "sales"] as [String: Any])
+        }
+        #expect(CallsHostValues.callRequest(["reason": "help", "agent": " sales "]).agent == "sales")
+        #expect(CallsHostValues.callRequest(["reason": "help"]).agent == nil)
+    }
+
+    @Test func theSnapshotTheRingTheOutcomeAndTheActionNameTheCallsAgent() throws {
+        let rig = HostRig()
+        try rig.configure(["agents": ["sales": ["publishableKey": "pk_sales"]]])
+        rig.core.setActions(["raise_ticket"], sink: rig.sink)
+        // A ring Graine routed to the sales agent by the push's agent_id.
+        rig.platform.callAgents["h1"] = "sales"
+        rig.platform.fields = CallsHostSnapshot(state: .ringing, callId: "h1", direction: .incoming, agent: "sales")
+        rig.core.incoming(GraineIncomingCall(callId: "h1", reason: "renewal", callerName: "Sales", hosted: true))
+        rig.platform.runTurns()
+        #expect(rig.events.payloads("incoming").first?["agent"] as? String == "sales")
+        #expect(rig.events.payloads("state").last?["agent"] as? String == "sales")
+        #expect(rig.core.snapshot()["agent"] as? String == "sales")
+        let handler = try rig.handler("raise_ticket")
+        handler([:]) { _ in }
+        #expect(rig.events.payloads("action").first?["agent"] as? String == "sales", "the agent on the call asked")
+        rig.core.outcome(.answered, callId: "h1")
+        // A ring refused while that call is live is its own agent's: the default one here.
+        rig.platform.callAgents["h2"] = "default"
+        rig.core.outcome(.missed, callId: "h2")
+        // An outcome nobody can place says nothing about an agent.
+        rig.core.outcome(.missed, callId: "unknown")
+        // First the ring itself: Graine rang it, so the app hears it ringing — then what became of it, and of the others.
+        #expect(rig.events.payloads("outcome").map { $0["outcome"] as? String } == ["ringing", "answered", "missed", "missed"])
+        let agents = rig.events.payloads("outcome").map { $0["agent"] as? String }
+        #expect(agents == ["sales", "sales", "default", nil])
+        #expect(rig.events.payloads("outcome").last?["agent"] == nil)
+        rig.platform.fields = CallsHostSnapshot()
+        rig.core.callStateChanged(.idle)
+        rig.platform.runTurns()
+        #expect(rig.events.payloads("state").last?["agent"] is NSNull, "idle: no agent")
+    }
+
+    @Test func aCallIsPlacedWithTheAgentItNames() throws {
+        let rig = HostRig()
+        try rig.configure(["agents": ["sales": ["publishableKey": "pk_sales"]]])
+        #expect(rig.platform.configured.last?.agents["sales"]?.publishableKey == "pk_sales", "the device configures the other agents")
+        _ = rig.core.startCall(["reason": "upgrade", "agent": "sales"])
+        #expect(rig.platform.placedAgents == ["sales"])
     }
 }

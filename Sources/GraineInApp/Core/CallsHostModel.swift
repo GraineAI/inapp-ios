@@ -48,6 +48,9 @@ enum CallsHostCallScreen: String {
  *   debug            bool; false by default: the SDK's debug log (GraineConfig.debug)
  *   android          { smallIcon: string or null }
  *   ios              { iconTemplate: string or null, includesCallsInRecents: bool }
+ *   agents           { <name>: { publishableKey: string, baseUrl?: string } } — more agents for the
+ *                    calls (MULTI-AGENT.md): `startCall({agent})` calls one, and a ring Graine sends
+ *                    for one is routed to it
  *
  * Unknown keys are ignored, so an older SDK reads a newer package's options,
  * and null is the same as absent. A known key of the wrong type is refused,
@@ -72,6 +75,13 @@ struct CallsHostOptions: Equatable {
     var androidSmallIcon: String?
     var iosIconTemplate: String?
     var iosIncludesCallsInRecents = false
+    /// The other agents, by name: their keys (and hosts), for calls placed with them and rings routed to them.
+    var agents: [String: Agent] = [:]
+
+    struct Agent: Equatable {
+        var publishableKey: String
+        var baseUrl: String
+    }
 
     /// The ring timeout in seconds, as `GraineCallsConfig` takes it.
     var ringTimeout: TimeInterval { Double(ringTimeoutMs) / 1_000 }
@@ -116,6 +126,21 @@ struct CallsHostOptions: Equatable {
             options.iosIncludesCallsInRecents =
                 try bool(ios, "includesCallsInRecents", named: "ios.includesCallsInRecents") ?? false
         }
+        if let agents = try object(map, "agents") {
+            for rawName in agents.keys.sorted() {
+                let name = GraineAgentRegistry.normalise(rawName)
+                guard name != GraineAgentRegistry.defaultName else { continue }
+                guard let entry = CallsHostValues.map(agents[rawName]) else {
+                    throw GraineCallsHostError.invalidOptions("agents.\(rawName) must be an object")
+                }
+                guard let key = try string(entry, "publishableKey", named: "agents.\(rawName).publishableKey"), !key.isEmpty else {
+                    throw GraineCallsHostError.invalidOptions("agents.\(rawName).publishableKey is required")
+                }
+                let base = try string(entry, "baseUrl", named: "agents.\(rawName).baseUrl").flatMap(nonBlank)
+                    .map { GraineProtocol.trimTrailingSlashes($0) }.flatMap { $0.isEmpty ? nil : $0 } ?? options.baseUrl
+                options.agents[name] = Agent(publishableKey: key, baseUrl: base)
+            }
+        }
         return options
     }
 
@@ -135,6 +160,11 @@ struct CallsHostOptions: Equatable {
         var ios: [String: Any] = ["includesCallsInRecents": iosIncludesCallsInRecents]
         if let icon = iosIconTemplate { ios["iconTemplate"] = icon }
         out["ios"] = ios
+        if !agents.isEmpty {
+            var named: [String: Any] = [:]
+            for (name, agent) in agents { named[name] = ["publishableKey": agent.publishableKey, "baseUrl": agent.baseUrl] }
+            out["agents"] = named
+        }
         return out
     }
 
@@ -276,11 +306,12 @@ enum CallsHostValues {
         return GraineActionResult(status: status, message: message, data: data)
     }
 
-    /// `startCall`'s options: `{reason?, variables?}`.
-    static func callRequest(_ raw: Any?) -> (reason: String?, variables: [String: Any]) {
+    /// `startCall`'s options: `{reason?, variables?, agent?}` — `agent` names a configured agent; absent is the default.
+    static func callRequest(_ raw: Any?) -> (reason: String?, variables: [String: Any], agent: String?) {
         let request = CallsHostValues.map(raw) ?? [:]
         let reason = text(request["reason"])?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (reason, CallsHostValues.map(request["variables"]) ?? [:])
+        let agent = text(request["agent"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (reason, CallsHostValues.map(request["variables"]) ?? [:], agent)
     }
 
     /// A scalar as text; nil when it is absent, null, blank or not a scalar.
@@ -326,6 +357,12 @@ struct CallsHostSnapshot: Equatable {
     var connectedAt: Date?
     /// Why the last call failed; cleared when the next call starts.
     var error: String?
+    /**
+     * The name of the agent the call is with (`GraineInApp.configure(_:name:)`;
+     * "default" for the default agent): the one it was placed with, or the one
+     * its ring was routed to by the push's `agent_id`.
+     */
+    var agent: String?
 
     /// The idle rule applied and blanks made null: what is shown, and what is compared.
     var settled: CallsHostSnapshot {
@@ -335,6 +372,7 @@ struct CallsHostSnapshot: Equatable {
         out.reason = CallsHostSnapshot.present(reason)
         out.callerName = CallsHostSnapshot.present(callerName)
         out.error = CallsHostSnapshot.present(error)
+        out.agent = CallsHostSnapshot.present(agent)
         return out
     }
 
@@ -361,6 +399,7 @@ struct CallsHostSnapshot: Equatable {
             "caption": caption,
             "connectedAt": connectedAt,
             "error": CallsHostSnapshot.orNull(s.error),
+            "agent": CallsHostSnapshot.orNull(s.agent),
         ]
     }
 
@@ -427,19 +466,42 @@ enum CallsHostEvent {
     static let voipToken = "voipToken"
     static let action = "action"
 
-    /// `{callId, outcome, reason?, error?}`: `reason` (local, remote, failed) only with `ended`, `error` only with `failed`.
-    static func outcomePayload(_ outcome: GraineCallOutcome, callId: String) -> [String: Any] {
+    /**
+     * `{callId, outcome, reason?, error?, durationSeconds?, hosted?, agent?}`: `reason` (local, remote, failed)
+     * only with `ended`, `error` only with `failed`, `durationSeconds` with an `ended` call whose length is known,
+     * `hosted: true` for a call Graine rang (its outcomes reach Graine too), and `agent` — the name of the agent
+     * the call was with — when it is known. The keys React Native's and Flutter's GraineCallOutcome read.
+     */
+    static func outcomePayload(
+        _ outcome: GraineCallOutcome, callId: String, agent: String? = nil, hosted: Bool = false, durationSeconds: Int? = nil
+    ) -> [String: Any] {
         var out: [String: Any] = ["callId": callId, "outcome": outcome.wire]
         if let reason = outcome.endReason { out["reason"] = reason.rawValue }
         if let error = outcome.error { out["error"] = error }
+        if outcome.endReason != nil, let seconds = durationSeconds { out["durationSeconds"] = max(0, seconds) }
+        if hosted { out["hosted"] = true }
+        if let agent = agent { out["agent"] = agent }
         return out
     }
 
-    /// `{callId, reason, callerName}`, as the push said them.
-    static func incomingPayload(_ call: GraineIncomingCall) -> [String: Any] {
+    /**
+     * `{callId, outcome: "ringing", hosted: true, agent?}`: a call Graine rang is ringing on this device — what
+     * the engine tells Graine as CallKit rings it, told to the app as well.
+     */
+    static func ringingPayload(callId: String, agent: String? = nil) -> [String: Any] {
+        var out: [String: Any] = ["callId": callId, "outcome": "ringing", "hosted": true]
+        if let agent = agent { out["agent"] = agent }
+        return out
+    }
+
+    /// `{callId, reason, callerName, hosted?, agent?}`: as the push said them, `hosted: true` when Graine rang it, and the agent the ring was routed to.
+    static func incomingPayload(_ call: GraineIncomingCall, agent: String? = nil) -> [String: Any] {
         let reason: Any = call.reason ?? NSNull()
         let callerName: Any = call.callerName ?? NSNull()
-        return ["callId": call.callId, "reason": reason, "callerName": callerName]
+        var out: [String: Any] = ["callId": call.callId, "reason": reason, "callerName": callerName]
+        if call.hosted { out["hosted"] = true }
+        if let agent = agent { out["agent"] = agent }
+        return out
     }
 
     /// `{token}`: hex, or null once it is invalidated.
@@ -448,8 +510,11 @@ enum CallsHostEvent {
         return ["token": value]
     }
 
-    static func actionPayload(requestId: String, name: String, arguments: [String: Any]) -> [String: Any] {
-        ["requestId": requestId, "name": name, "arguments": JSON.normalize(arguments)]
+    /// `{requestId, name, arguments, agent?}`: `agent` is the agent whose call asked.
+    static func actionPayload(requestId: String, name: String, arguments: [String: Any], agent: String? = nil) -> [String: Any] {
+        var out: [String: Any] = ["requestId": requestId, "name": name, "arguments": JSON.normalize(arguments)]
+        if let agent = agent { out["agent"] = agent }
+        return out
     }
 }
 
@@ -659,8 +724,9 @@ struct CallsHostStore {
  * THE SDK'S CALL SCREEN over the app, when the app chose it (`callScreen:
  * "sdk"`): up while a call is live and the app is active — so a call answered
  * on the lock screen gets it the moment the app is opened — and down at idle,
- * not at "ended", so "Call ended" is read before it goes. With the app's own
- * screen (`"app"`), nothing is ever put over the app.
+ * not at "ended", so "Call ended" is read before it goes; a ring that rang out
+ * on screen stays as "Missed call" until the customer calls back or closes it.
+ * With the app's own screen (`"app"`), nothing is ever put over the app.
  */
 enum CallsHostCallScreenRule {
     enum Step: Equatable {
@@ -669,9 +735,10 @@ enum CallsHostCallScreenRule {
         case stay
     }
 
-    static func step(callScreen: CallsHostCallScreen?, state: GraineCallState, active: Bool, shown: Bool) -> Step {
+    /// `missedPending`: a ring the customer saw ring out is still on screen, offering a call back — it stays until they choose.
+    static func step(callScreen: CallsHostCallScreen?, state: GraineCallState, active: Bool, shown: Bool, missedPending: Bool = false) -> Step {
         guard callScreen == .sdk else { return shown ? .dismiss : .stay }
-        if state == .idle { return shown ? .dismiss : .stay }
+        if state == .idle { return shown && !missedPending ? .dismiss : .stay }
         return state.isLive && active && !shown ? .present : .stay
     }
 }
@@ -684,25 +751,43 @@ protocol CallsHostPlatform: AnyObject {
     func makeInstance(_ options: CallsHostOptions) -> (publishableKey: String, baseUrl: String, debug: Bool)
     func configureCalls(_ options: CallsHostOptions)
     func enableVoIPPushes(onToken: @escaping (String?) -> Void)
-    func startCall(reason: String?, variables: [String: Any]) -> String?
+    func startCall(reason: String?, variables: [String: Any], agent: String?) -> String?
     func answer()
     func end()
     func setMuted(_ muted: Bool)
     func setSpeaker(_ on: Bool)
     func identify(_ traits: [String: Any]?)
+    /// The current customer's memory choice (`GraineInApp.setMemory`).
+    func setMemory(_ enabled: Bool)
+    /// This install's id (`GraineInApp.installId`); nil before there is an instance.
+    var installId: String? { get }
     func setVariables(_ values: [String: Any?])
     func setScreen(_ screen: GraineScreen?)
     func registerAction(_ name: String, handler: @escaping GraineInApp.DeferredActionHandler) -> () -> Void
     /// The engine's half of the snapshot: everything but `reason` and `error`, which are the host's own.
     func callFields() -> CallsHostSnapshot
+    /// The name of the agent the call `callId` is with — the one it was placed with, or the one its ring was routed to — or nil when nobody knows.
+    func agentName(forCall callId: String) -> String?
+    /// Graine rang the call in progress (`GraineCalls.hosted`): its outcomes say `hosted`.
+    var callHosted: Bool { get }
+    /// The time now: an ended call's length is measured with it.
+    func now() -> Date
     /// In the foreground and active: not behind the lock screen, the app switcher or a system sheet.
     var appActive: Bool { get }
+    /// A missed ring the call screen is offering to call back (`GraineCalls.missedCall`).
+    var missedCallPending: Bool { get }
     func presentCallScreen()
     func dismissCallScreen()
     /// Run `block` on the next turn of the main loop.
     func nextTurn(_ block: @escaping () -> Void)
     /// Run `block` on the main loop after `seconds`.
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void)
+}
+
+extension CallsHostPlatform {
+    func agentName(forCall callId: String) -> String? { nil }
+    var callHosted: Bool { false }
+    func now() -> Date { Date() }
 }
 
 /**
@@ -748,6 +833,7 @@ final class CallsHostCore {
         let value: Value
     }
     private var heldIdentity: Held<[String: Any]?>?
+    private var heldMemory: Bool?
     private var heldVariables: Held<[String: Any]?>?
     private var heldScreen: Held<GraineScreen?>?
 
@@ -835,7 +921,7 @@ final class CallsHostCore {
         let before = (reason, error)
         reason = request.reason
         error = nil
-        guard let id = platform.startCall(reason: request.reason, variables: request.variables) else {
+        guard let id = platform.startCall(reason: request.reason, variables: request.variables, agent: request.agent) else {
             (reason, error) = before
             return nil
         }
@@ -875,6 +961,20 @@ final class CallsHostCore {
         platform.identify(traits)
     }
 
+    /// The current customer's memory choice: false — neither remembered nor recalled.
+    func setMemory(_ enabled: Bool) {
+        guard instance != nil else {
+            heldMemory = enabled
+            return
+        }
+        platform.setMemory(enabled)
+    }
+
+    /// This install's id, for the JavaScript or Dart SDK to send on its own requests: one id per device, in the Keychain.
+    func installId() -> String? {
+        platform.installId
+    }
+
     func setVariables(_ raw: Any?) {
         let values = CallsHostValues.map(raw)
         guard instance != nil else {
@@ -895,9 +995,11 @@ final class CallsHostCore {
 
     private func releaseHeld() {
         if let held = heldIdentity { platform.identify(held.value) }
+        if let held = heldMemory { platform.setMemory(held) }
         if let held = heldVariables { platform.setVariables(variables.replace(with: held.value)) }
         if let held = heldScreen { platform.setScreen(held.value) }
         heldIdentity = nil
+        heldMemory = nil
         heldVariables = nil
         heldScreen = nil
         for name in actions.names { register(name) }
@@ -928,7 +1030,10 @@ final class CallsHostCore {
     /// The agent asked for an action: to the sink that answers actions, or refused at once when it is gone.
     private func ask(_ name: String, _ arguments: [String: Any], _ answer: @escaping (GraineActionResult) -> Void) {
         let id = actions.begin(sink: sinks.actionSink, answer: answer)
-        guard sinks.emitAction(CallsHostEvent.actionPayload(requestId: id, name: name, arguments: arguments)) else {
+        // The agent on the call asked: the app runs it in that agent's own handlers.
+        let live = platform.callFields()
+        let agent = live.agent ?? live.callId.flatMap { platform.agentName(forCall: $0) }
+        guard sinks.emitAction(CallsHostEvent.actionPayload(requestId: id, name: name, arguments: arguments, agent: agent)) else {
             actions.resolve(id, .refused("The app is not listening for \"\(name)\" right now."))
             return
         }
@@ -977,17 +1082,28 @@ final class CallsHostCore {
     func incoming(_ call: GraineIncomingCall) {
         reason = call.reason
         error = nil
-        sinks.emit(CallsHostEvent.incoming, CallsHostEvent.incomingPayload(call))
+        let agent = platform.agentName(forCall: call.callId)
+        sinks.emit(CallsHostEvent.incoming, CallsHostEvent.incomingPayload(call, agent: agent))
+        // Graine rang it: the engine has told Graine it is ringing, and the app hears the same.
+        if call.hosted { sinks.emit(CallsHostEvent.outcome, CallsHostEvent.ringingPayload(callId: call.callId, agent: agent)) }
         changed()
     }
 
     func outcome(_ outcome: GraineCallOutcome, callId: String) {
+        let live = platform.callFields()
         if let why = outcome.error {
             // A push refused during a live call is another call's failure, not this one's.
-            let live = platform.callFields()
             if !live.state.isLive || live.callId == callId { error = why }
         }
-        sinks.emit(CallsHostEvent.outcome, CallsHostEvent.outcomePayload(outcome, callId: callId))
+        // What the engine knows of the call in progress: whether Graine rang it, and when its conversation opened.
+        let current = live.callId == callId
+        var seconds: Int?
+        if outcome.endReason != nil, current, let openedAt = live.connectedAt {
+            seconds = max(0, Int(platform.now().timeIntervalSince(openedAt).rounded()))
+        }
+        sinks.emit(CallsHostEvent.outcome, CallsHostEvent.outcomePayload(
+            outcome, callId: callId, agent: platform.agentName(forCall: callId), hosted: current && platform.callHosted, durationSeconds: seconds
+        ))
         changed()
     }
 
@@ -1018,7 +1134,8 @@ final class CallsHostCore {
         let now = current()
         if let next = gate.flush(now) { sinks.emit(CallsHostEvent.state, next.json) }
         switch CallsHostCallScreenRule.step(
-            callScreen: options?.callScreen, state: now.state, active: platform.appActive, shown: screenShown
+            callScreen: options?.callScreen, state: now.state, active: platform.appActive, shown: screenShown,
+            missedPending: platform.missedCallPending
         ) {
         case .present:
             screenShown = true

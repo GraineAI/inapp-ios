@@ -21,6 +21,10 @@ enum GraineIconName: String, CaseIterable {
     case call
     case chevron
     case close
+    /// "New conversation" in a chat window's header: a page and a pen.
+    case compose
+    /// The call screen's loudspeaker.
+    case speaker
 }
 
 /**
@@ -43,6 +47,8 @@ enum GraineIcons {
         .call: GraineIconPaths(body: nil, lines: "M13.832 16.568a1 1 0 0 0 1.213 -0.303l0.355 -0.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2A18 18 0 0 1 2 4a2 2 0 0 1 2 -2h3a2 2 0 0 1 2 2v3a2 2 0 0 1 -0.8 1.6l-0.468 0.351a1 1 0 0 0 -0.292 1.233a14 14 0 0 0 6.392 6.384"),
         .chevron: GraineIconPaths(body: nil, lines: "M6 15l6-6 6 6"),
         .close: GraineIconPaths(body: nil, lines: "M6 6l12 12M18 6 6 18"),
+        .compose: GraineIconPaths(body: nil, lines: "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"),
+        .speaker: GraineIconPaths(body: "M4 9.5h3.5L12 5.5v13l-4.5-4H4z", lines: "M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"),
     ]
 
     static func paths(_ name: GraineIconName) -> GraineIconPaths {

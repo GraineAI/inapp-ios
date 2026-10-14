@@ -323,12 +323,57 @@ public struct GraineIncomingCall: Equatable, Sendable {
     public let callerName: String?
     /// Extra prompt variables for this call.
     public let variables: [String: String]
+    /// Graine rang this call itself (the push says `hosted: "1"`): its outcomes are reported to Graine by the SDK.
+    public let hosted: Bool
+    /// The agent the push says the call is from (`agent_id`: its id, or its web-call twin's); routes the ring to that configured agent.
+    public let agentId: String?
 
-    public init(callId: String, reason: String? = nil, callerName: String? = nil, variables: [String: String] = [:]) {
+    public init(
+        callId: String, reason: String? = nil, callerName: String? = nil, variables: [String: String] = [:],
+        hosted: Bool = false, agentId: String? = nil
+    ) {
         self.callId = callId
         self.reason = reason
         self.callerName = callerName
         self.variables = variables
+        self.hosted = hosted
+        self.agentId = agentId
+    }
+}
+
+/**
+ * A RING NOBODY ANSWERED, kept so the call screen can say so and offer to call
+ * back — until the customer does, closes it, or another call comes.
+ */
+public struct GraineMissedCall: Equatable, Sendable {
+    public let callId: String
+    /// The name it rang with.
+    public let callerName: String
+    /// Why the agent called, when the push said (a call Graine rang keeps its reason on the server).
+    public let reason: String?
+    /// Graine rang it: a call booked for this customer.
+    public let hosted: Bool
+    public let at: Date
+    /// The configured agent that rang (its name); `callBack()` calls that agent.
+    public let agent: String?
+
+    public init(callId: String, callerName: String, reason: String? = nil, hosted: Bool = false, at: Date = Date(), agent: String? = nil) {
+        self.callId = callId
+        self.callerName = callerName
+        self.reason = reason
+        self.hosted = hosted
+        self.at = at
+        self.agent = agent
+    }
+
+    /// The call back's `call_reason`: the missed call's own, else that the customer is returning it.
+    var callBackReason: String { reason ?? "returning_missed_call" }
+
+    /// How long a missed ring is news: a screen opened later than this does not lead with it.
+    static let recentSeconds: TimeInterval = 10 * 60
+
+    func isRecent(now: Date = Date()) -> Bool {
+        now.timeIntervalSince(at) <= GraineMissedCall.recentSeconds && now >= at
     }
 }
 
@@ -363,8 +408,33 @@ enum CallPush {
             callId: id,
             reason: nonEmpty(fields["reason"]?.text),
             callerName: nonEmpty(fields["caller_name"]?.text),
-            variables: variables(fields["variables"]?.raw)
+            variables: variables(fields["variables"]?.raw),
+            hosted: isHosted(fields["hosted"]),
+            agentId: nonEmpty(fields["agent_id"]?.text)
         ))
+    }
+
+    /// The push's `agent_id` (at the top or under `data`), usable push or not.
+    static func agentId(_ payload: [AnyHashable: Any]) -> String? {
+        var fields = strings(payload)
+        if fields["agent_id"] == nil, let nested = payload["data"] as? [AnyHashable: Any] {
+            fields = strings(nested)
+        }
+        return nonEmpty(fields["agent_id"]?.text)
+    }
+
+    /// Whether a push — usable or not — says Graine rang it: `hosted: "1"` (or `true`), at the top or under `data`.
+    static func hosted(_ payload: [AnyHashable: Any]) -> Bool {
+        var fields = strings(payload)
+        if fields["hosted"] == nil, let nested = payload["data"] as? [AnyHashable: Any] {
+            fields = strings(nested)
+        }
+        return isHosted(fields["hosted"])
+    }
+
+    private static func isHosted(_ field: Field?) -> Bool {
+        guard let word = field?.value else { return false }
+        return word == "1" || word == "true"
     }
 
     /// The call id of a push that is not usable, when it has one — so even a refused ring can be reported.

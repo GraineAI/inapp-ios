@@ -223,6 +223,10 @@ public struct GraineThemeTokens: Equatable, Sendable {
     public let bubbles: GraineBubbleStyle
     /// `window`: the chat window, the caption card and every component card open as desktop windows.
     public let chrome: GraineDesignChrome
+    /// The chat window's own tokens (contract §7). Nil from an older server: it draws from `colors`, as before.
+    public let chat: GraineChatTokens?
+    /// The call screen's tokens (contract §7). Nil from an older server: the call screen draws as it did before designs.
+    public let call: GraineCallTokens?
 
     /**
      * The launcher glyph as an image, for a host that draws its own launcher
@@ -521,7 +525,9 @@ enum DesignTokens {
             glass: glass(t["glass"]),
             bubbles: GraineBubbleStyle(rawValue: word(t["bubbles"])) ?? .filled,
             // Absent (an older server) or a kind of frame this build does not know: a plain surface.
-            chrome: GraineDesignChrome(rawValue: word(t["chrome"])) ?? .none
+            chrome: GraineDesignChrome(rawValue: word(t["chrome"])) ?? .none,
+            chat: SurfaceTokens.chat(t["chat"], colors: colors),
+            call: SurfaceTokens.call(t["call"])
         )
     }
 
