@@ -45,6 +45,7 @@ enum CallsHostCallScreen: String {
  *   ringTimeoutMs    number; 30000 by default, and for anything not above 0
  *   appVersion       string or null
  *   callScreen       "sdk" (the default) or "app"
+ *   callTransport    "auto" (the default), "websocket" or "webrtc": the calls' audio (GraineCallsConfig.callTransport)
  *   debug            bool; false by default: the SDK's debug log (GraineConfig.debug)
  *   android          { smallIcon: string or null }
  *   ios              { iconTemplate: string or null, includesCallsInRecents: bool }
@@ -70,6 +71,7 @@ struct CallsHostOptions: Equatable {
     var ringTimeoutMs = CallsHostOptions.defaultRingTimeoutMs
     var appVersion: String?
     var callScreen = CallsHostCallScreen.sdk
+    var callTransport = GraineCallTransport.auto
     /// Read when the SDK instance is made, like the key and the base URL.
     var debug = false
     var androidSmallIcon: String?
@@ -117,6 +119,12 @@ struct CallsHostOptions: Equatable {
             }
             options.callScreen = screen
         }
+        if let word = try string(map, "callTransport") {
+            guard let transport = GraineCallTransport(rawValue: word) else {
+                throw GraineCallsHostError.invalidOptions("callTransport must be \"auto\", \"websocket\" or \"webrtc\"")
+            }
+            options.callTransport = transport
+        }
         options.debug = try bool(map, "debug", named: "debug") ?? false
         if let android = try object(map, "android") {
             options.androidSmallIcon = try string(android, "smallIcon", named: "android.smallIcon").flatMap(nonBlank)
@@ -156,6 +164,7 @@ struct CallsHostOptions: Equatable {
         ]
         if let sound = ringtoneSound { out["ringtoneSound"] = sound }
         if let version = appVersion { out["appVersion"] = version }
+        if callTransport != .auto { out["callTransport"] = callTransport.rawValue }
         if let icon = androidSmallIcon { out["android"] = ["smallIcon": icon] }
         var ios: [String: Any] = ["includesCallsInRecents": iosIncludesCallsInRecents]
         if let icon = iosIconTemplate { ios["iconTemplate"] = icon }
@@ -363,6 +372,10 @@ struct CallsHostSnapshot: Equatable {
      * its ring was routed to by the push's `agent_id`.
      */
     var agent: String?
+    /// The road the call's audio runs on: "webrtc" or "websocket", once decided.
+    var transport: String?
+    /// Why a call that tried WebRTC runs on the WebSocket (`no_answer`, `ice_timeout`, …).
+    var transportFallbackReason: String?
 
     /// The idle rule applied and blanks made null: what is shown, and what is compared.
     var settled: CallsHostSnapshot {
@@ -373,6 +386,8 @@ struct CallsHostSnapshot: Equatable {
         out.callerName = CallsHostSnapshot.present(callerName)
         out.error = CallsHostSnapshot.present(error)
         out.agent = CallsHostSnapshot.present(agent)
+        out.transport = CallsHostSnapshot.present(transport)
+        out.transportFallbackReason = CallsHostSnapshot.present(transportFallbackReason)
         return out
     }
 
@@ -400,6 +415,8 @@ struct CallsHostSnapshot: Equatable {
             "connectedAt": connectedAt,
             "error": CallsHostSnapshot.orNull(s.error),
             "agent": CallsHostSnapshot.orNull(s.agent),
+            "transport": CallsHostSnapshot.orNull(s.transport),
+            "transportFallbackReason": CallsHostSnapshot.orNull(s.transportFallbackReason),
         ]
     }
 

@@ -1032,8 +1032,19 @@ public final class GraineInApp {
         notifyListeners { $0.onWidget(frame) }
     }
 
-    /// The customer answered the component: to the conversation it belongs to. Main thread.
-    func answerComponent(widgetId: String, data: [String: Any], summary: String) {
+    /**
+     * ANSWER A COMPONENT the agent drew, from a UI of your own — on the
+     * conversation that is live: the chat (the structured answer, then the
+     * sentence that is the customer's turn, as the web chat sends them), else
+     * the call. `summary` is that sentence ("The Creta, please"): without it
+     * the answer lands and the conversation does not move; `data` goes to your
+     * webhook. `GraineWidgetView` and the bar answer for themselves.
+     */
+    public func answerComponent(widgetId: String, data: [String: Any], summary: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.answerComponent(widgetId: widgetId, data: data, summary: summary) }
+            return
+        }
         if let pending = componentFrame, GraineInApp.componentId(pending) == widgetId { componentFrame = nil }
         if chat.carriesConversation {
             chat.submitWidget(widgetId: widgetId, data: data, summary: summary)
@@ -1408,16 +1419,16 @@ public final class GraineInApp {
         }
     }
 
-    /// The local checks `scheduleCall` makes before it asks.
+    /// The local checks `scheduleCall` makes before it asks — refused in the booking sheet's words, the same on every SDK.
     static func check(_ date: Date, against rules: GraineSchedulingRules, now: Date) throws {
         guard rules.usersCanBook else {
-            throw GraineServiceError(code: .schedulingOff, message: "Calls can't be booked from the app for this assistant.")
+            throw GraineServiceError(code: .schedulingOff, message: Booking.errorLine(.schedulingOff, rules: rules))
         }
         if date < rules.earliest(now: now) {
-            throw GraineServiceError(code: .tooSoon, message: "That is too soon: calls can be booked from \(rules.minLeadMinutes) minutes ahead.")
+            throw GraineServiceError(code: .tooSoon, message: Booking.errorLine(.tooSoon, rules: rules))
         }
         if date > rules.latest(now: now) {
-            throw GraineServiceError(code: .tooFar, message: "That is too far ahead: calls can be booked up to \(rules.maxDaysAhead) days ahead.")
+            throw GraineServiceError(code: .tooFar, message: Booking.errorLine(.tooFar, rules: rules))
         }
     }
 

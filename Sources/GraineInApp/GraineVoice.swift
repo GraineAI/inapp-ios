@@ -45,6 +45,12 @@ public final class GraineVoice: NSObject, ObservableObject {
      * — a transcript outliving its call is a privacy question, not a feature.
      */
     @Published public private(set) var captions: [GraineCaption] = []
+    /**
+     * The captions switch — CC. The bar shows the line being said only while
+     * it is on. On by default: a caption nobody asked to hide is an
+     * accessibility default. What is said is kept (`captions`) either way.
+     */
+    @Published public private(set) var captionsOn = true
     /// The customer has finished a line and the agent has not started its answer. See `phase`.
     @Published private(set) var awaitingAgent = false
     /**
@@ -72,6 +78,47 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     /// Whether the engine is mounted.
     public var isAttached: Bool { webView != nil }
+
+    /// Turn the captions on or off — for your own CC button. The call goes on.
+    public func setCaptionsOn(_ on: Bool) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setCaptionsOn(on) }
+            return
+        }
+        if captionsOn != on { captionsOn = on }
+    }
+
+    /**
+     * A voice UI of your own came on screen (`viewOpened()`) or left it
+     * (`viewClosed()`) — `GraineAgentBar` says so itself. While one is open, a
+     * page still loading is the customer's wait, reported as `slowConnect`.
+     * Call them in pairs.
+     */
+    public func viewOpened() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.viewOpened() }
+            return
+        }
+        viewerAppeared()
+    }
+
+    /// The UI from `viewOpened()` left the screen.
+    public func viewClosed() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.viewClosed() }
+            return
+        }
+        viewerDisappeared()
+    }
+
+    /// Forget what has been said (`captions`) without ending the call.
+    public func clearCaptions() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.clearCaptions() }
+            return
+        }
+        if !captions.isEmpty { captions = [] }
+    }
 
     /**
      * What the call is doing, in one word — idle, connecting, reconnecting,

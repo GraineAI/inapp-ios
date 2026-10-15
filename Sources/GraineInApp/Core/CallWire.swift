@@ -169,41 +169,53 @@ enum CallWire {
     static let ticketValueLength = 200
     static let ticketTotalBytes = 1_024
 
+    /// Kept first, and dropped last: why a call is happening.
+    static let ticketFirstKeys = ["who_called", "call_reason"]
+
     /**
      * The variables on the ticket: the gateway builds the call's context from
-     * the ticket's signed claims and ignores the URL. At most 12 keys (the
-     * first twelve usable ones, in order), keys cut to 40 and values to 200
-     * UTF-16 units, and nothing at all over 1 KB.
+     * the ticket's signed claims and ignores the URL. At most 12 keys —
+     * `who_called` and `call_reason` first, then the rest in order — keys cut
+     * to 40 and values to 200 UTF-16 units, and trimmed to fit 1 KB: the
+     * biggest go first, one at a time (the later on a tie), the call's own
+     * only when nothing else is left. protocol.ts `variablesForTicket`.
      */
     static func ticketMetadata(_ variables: [(String, Any?)]) -> [(String, String)]? {
-        var out = OrderedFields()
-        var n = 0
-        for (rawKey, value) in variables {
-            if n >= ticketKeyLimit { break }
-            guard let text = scalarText(value) else { continue }
+        var entries: [(String, String)] = []
+        func add(_ rawKey: String, _ value: Any?) {
+            guard let text = scalarText(value) else { return }
             let key = utf16Prefix(rawKey, ticketKeyLength)
             let cut = utf16Prefix(text, ticketValueLength)
-            if key.isEmpty || cut.isEmpty { continue }
-            out.set(key, .string(cut))
-            n += 1
+            if key.isEmpty || cut.isEmpty || entries.contains(where: { $0.0 == key }) { return }
+            entries.append((key, cut))
         }
-        if n == 0 { return nil }
-        let pairs: [(String, String)] = out.pairs.map { pair in
-            if case let .string(s) = pair.1 { return (pair.0, s) }
-            return (pair.0, "")
+        for first in ticketFirstKeys {
+            if let found = variables.first(where: { $0.0 == first }) { add(found.0, found.1) }
         }
-        var bytes = 2
-        for (k, v) in pairs { bytes += k.utf8.count + v.utf8.count + 6 }
-        return bytes > ticketTotalBytes ? nil : pairs
+        for (k, v) in variables where !ticketFirstKeys.contains(k) { add(k, v) }
+        var kept = Array(entries.prefix(ticketKeyLimit))
+        // Bytes, not characters: a Devanagari name is three bytes a letter.
+        func size(_ p: (String, String)) -> Int { p.0.utf8.count + p.1.utf8.count + 6 }
+        var bytes = kept.reduce(2) { $0 + size($1) }
+        while !kept.isEmpty && bytes > ticketTotalBytes {
+            let rest = kept.contains { !ticketFirstKeys.contains($0.0) }
+            var drop = -1
+            for (i, p) in kept.enumerated() {
+                if rest && ticketFirstKeys.contains(p.0) { continue }
+                if drop < 0 || size(p) >= size(kept[drop]) { drop = i }
+            }
+            bytes -= size(kept[drop])
+            kept.remove(at: drop)
+        }
+        return kept.isEmpty ? nil : kept
     }
 
     /**
-     * The ticket's variables, as many as it holds. `ticketMetadata` keeps the
-     * first twelve and nothing at all over a kilobyte, so the whole list, handed
-     * over at once, could lose exactly the keys a call exists to carry
-     * (`who_called`, `call_reason`) behind one long app variable. The call's own
-     * go first and always win; the rest are added one at a time while the
-     * ticket still accepts them — the rule Android's `ticketVariables` follows.
+     * The ticket's variables, as many as it holds. `ticketMetadata` puts only
+     * `who_called` and `call_reason` first, so the whole list, handed over at
+     * once, could lose the call's other own variables to the app's. The call's
+     * own go first and always win; the rest are added one at a time while the
+     * ticket still takes them whole — the rule Android's `ticketVariables` follows.
      */
     static func ticketVariables(call: [(String, String)], rest: [(String, String)]) -> [(String, String)]? {
         func fit(_ list: [(String, String)]) -> [(String, String)]? {

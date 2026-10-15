@@ -19,10 +19,10 @@ import Testing
     @Test func everySelectorIsAnsweredByItsName() throws {
         let selectors: [String: (instance: [String], klass: [String])] = [
             "GraineObjC": ([
-                "name", "installId", "memoryChoice", "session", "sessionJSON", "chat", "calls", "voice", "bookingAvailable",
+                "name", "installId", "memoryChoice", "session", "sessionJSON", "themeJSON", "chat", "calls", "voice", "bookingAvailable",
                 "identify:", "identify:memory:", "identifyJSON:", "identifyJSON:memory:", "setMemory:",
                 "forgetMemoryWithCompletion:", "memoriesWithCompletion:", "memoriesJSONWithCompletion:",
-                "setVariables:", "setVariablesJSON:", "setScreen:", "setScreenJSON:", "updateField:", "updateFieldJSON:",
+                "setVariables:", "setVariablesJSON:", "currentVariables", "currentVariablesJSON", "setScreen:", "setScreenJSON:", "updateField:", "updateFieldJSON:",
                 "removeField:", "clearScreen:", "track:data:", "trackEvent:dataJSON:", "tap:", "noteInteraction",
                 "registerAction:handler:", "registerJSONAction:handler:",
                 "scheduleCallAt:reason:completion:", "scheduleCallJSONAt:reason:completion:",
@@ -37,7 +37,8 @@ import Testing
             ]),
             "GraineObjCChat": ([
                 "turns", "status", "reconnectAttempt", "typing", "isOpen", "snapshotJSON",
-                "open", "openWithSize:", "newConversationWithCompletion:", "close", "send:", "retry",
+                "open", "openWithSize:", "newConversationWithCompletion:", "close", "send:", "retry", "clear",
+                "upcomingCalls", "answerWidgetWithId:dataJSON:summary:", "refreshUpcomingCalls", "cancelUpcomingCall:",
                 "addListener:", "removeListener:", "observe:",
             ], []),
             "GraineObjCCalls": ([
@@ -47,7 +48,10 @@ import Testing
                 "direction", "muted", "speakerOn", "agentSpeaking", "hosted", "agent", "showsCallScreen", "snapshotJSON",
                 "addListener:", "removeListener:", "observe:", "observeOutcomes:", "observeIncoming:",
             ], []),
-            "GraineObjCVoice": (["attach", "start", "end", "setMuted:", "connected", "connecting", "muted", "snapshotJSON", "observe:"], []),
+            "GraineObjCVoice": ([
+                "attach", "start", "end", "setMuted:", "connected", "connecting", "muted", "snapshotJSON", "observe:",
+                "captionsOn", "setCaptionsOn:", "clearCaptions",
+            ], []),
             "GraineObjCRegistration": (["unregister"], []),
             "GraineObjCActionResult": (["status", "message", "data"], ["ok:", "ok:data:", "refused:", "error:"]),
             "GraineObjCMemory": (["identifier", "text", "createdAt", "updatedAt"], []),
@@ -327,6 +331,102 @@ import Testing
         graine.chat.close()
     }
 
+    @Test func aComponentIsAnsweredFromJSONOnTheChatThatDrewIt() throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session()
+        let graine = GraineObjC(graine: rig.graine)
+        graine.chat.open()
+        let socket = try #require(rig.network.socket)
+        socket.open()
+        socket.frame(["type": "widget", "widget": ["widget_id": "w9", "kind": "choices"]])
+        socket.clearSent()
+        graine.chat.answerWidget(id: "w9", dataJSON: #"{"choice":"yes","count":2}"#, summary: "Yes, please")
+        #expect(socket.sentTypes == ["widget_result", "text"])
+        let result = try #require(socket.sentFrames.first)
+        #expect(result["widget_id"] as? String == "w9")
+        #expect((result["data"] as? [String: Any])?["count"] as? Int == 2)
+        #expect(rig.graine.componentFrame == nil, "answered: nothing left to draw")
+        graine.chat.close()
+    }
+
+    @Test func theUpcomingCallsRideTheSnapshotAndTheObserverHearsThem() async throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session(["calls": ["hosted": true]])
+        let at = Date().addingTimeInterval(3_600)
+        rig.network.replies["/api/embed/calls/list"] = (200, #"{"calls":[{"id":"soon","at":"\#(Scheduling.isoTime(at))","status":"scheduled","source":"agent","reason":"Delivery"}]}"#)
+        let graine = GraineObjC(graine: rig.graine)
+        var changes = 0
+        let registration = graine.chat.observe { changes += 1 }
+        graine.chat.open()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let snapshot = try #require(parse(graine.chat.snapshotJSON) as? [String: Any])
+        let call = try #require((snapshot["upcomingCalls"] as? [[String: Any]])?.first)
+        #expect(call["id"] as? String == "soon")
+        #expect(call["source"] as? String == "agent")
+        #expect(call["reason"] as? String == "Delivery")
+        #expect(call["at"] is NSNumber, "epoch milliseconds, as every time the facade hands over")
+        #expect(graine.chat.upcomingCalls.map { $0.identifier } == ["soon"])
+        #expect(changes > 0)
+        graine.chat.cancelUpcomingCall("soon")
+        try await Task.sleep(nanoseconds: 80_000_000)
+        #expect(graine.chat.upcomingCalls.isEmpty, "cancelled: off the card")
+        #expect(rig.network.bodies("/api/embed/calls/cancel").first?["callId"] as? String == "soon")
+        graine.chat.refreshUpcomingCalls()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        #expect(rig.network.bodies("/api/embed/calls/list").count >= 2, "asked again")
+        registration.unregister()
+        graine.chat.close()
+    }
+
+    @Test func theMergedVariablesAreReadAsTheSdkMergesThem() throws {
+        let rig = PlatformRig(variables: ["plan": "Free", "city": "Pune"])
+        defer { rig.sandbox.clean() }
+        let graine = GraineObjC(graine: rig.graine)
+        graine.setVariablesJSON(#"{"plan":"Plus","cart_total":1299}"#)
+        let json = try #require(ObjCBridge.object(graine.currentVariablesJSON) as? [String: String])
+        #expect(json == rig.graine.currentVariables(), "the SDK's merged set, as JSON")
+        #expect(json["plan"] == "Plus", "the app's runtime value beats the build's")
+        #expect(json["city"] == "Pune")
+        #expect(json["cart_total"] == "1299", "a string: it goes into a sentence")
+        #expect(graine.currentVariables == json)
+    }
+
+    @Test func everyDesignsTokensCrossTheBridgeWhole() throws {
+        let cases = try #require(try ContractFile.load("design.json")["cases"] as? [[String: Any]])
+        var crossed = 0
+        for c in cases {
+            guard let design = GraineDesign.parse(c["design"]) else { continue }
+            for tokens in [design.light, design.dark] {
+                // As a bridge reads it: JSON text, then the SDK's own reader — the same tokens back, chat and call included.
+                let json = try #require(ObjCBridge.object(ObjCBridge.text(ObjCBridge.theme(tokens))))
+                #expect(DesignTokens.parse(json, scheme: tokens.scheme) == tokens, "\(tokens.preset) \(tokens.scheme)")
+                #expect(json["v"] as? Int == 1)
+                #expect((json["motion"] as? [String: Any])?["durationMs"] is Int, "whole milliseconds, as Android writes them")
+                crossed += 1
+            }
+        }
+        #expect(crossed >= 2)
+    }
+
+    @Test func theThemeIsJSONOnceTheSessionBringsADesignAndTheEventSaysSo() throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        let graine = GraineObjC(graine: rig.graine)
+        #expect(graine.themeJSON == nil, "no session, no tokens")
+        var heard: [String] = []
+        let registration = graine.observeEvents { name, _ in heard.append(name) }
+        let raw = try #require((try ContractFile.load("design.json")["cases"] as? [[String: Any]])?.first?["design"])
+        rig.session(["design": raw])
+        let tokens = try #require(rig.graine.theme)
+        let json = try #require(ObjCBridge.object(graine.themeJSON))
+        #expect((json["colors"] as? [String: Any])?["accent"] as? String == tokens.colors.accent)
+        #expect(json["scheme"] as? String == tokens.scheme)
+        #expect(heard.contains("theme"), "the tokens arriving are news for a bridge")
+        registration.unregister()
+    }
+
     @Test func theChatWindowsSizeIsTheConfiguresAndAnOpens() {
         func size(_ word: String?) -> GraineChatSize? {
             GraineObjC.config(
@@ -426,6 +526,9 @@ import Testing
         #expect(graine.calls.agent == nil)
         let voice = try #require(parse(graine.voice.snapshotJSON) as? [String: Any])
         #expect(voice["connected"] as? Bool == false)
+        #expect(voice["captionsOn"] as? Bool == true, "the captions switch is on until it is turned off")
+        #expect((voice["captions"] as? [Any])?.isEmpty == true)
+        #expect(graine.voice.captionsOn)
     }
 
     @Test func agentNamesAreTrimmedAndEmptyIsTheDefault() {

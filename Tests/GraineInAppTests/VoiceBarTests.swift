@@ -276,6 +276,28 @@ import Testing
     }
 }
 
+/// The caption above the bar: the line being said, on a call, while the captions switch (CC) is on.
+@Suite struct CaptionLineTests {
+    private let said = [
+        GraineCaption(role: .customer, text: "What does it cost?", live: false),
+        GraineCaption(role: .agent, text: "It costs", live: true),
+    ]
+
+    @Test func theLastLineOnACallWhileTheCaptionsAreOn() {
+        #expect(VoiceBar.Caption.line(connected: true, captionsOn: true, captions: said) == said[1])
+    }
+
+    @Test func theSwitchOffHidesItWhatIsSaidIsKept() {
+        #expect(VoiceBar.Caption.line(connected: true, captionsOn: false, captions: said) == nil)
+    }
+
+    @Test func noCallNoLinesOrABlankLineShowNothing() {
+        #expect(VoiceBar.Caption.line(connected: false, captionsOn: true, captions: said) == nil)
+        #expect(VoiceBar.Caption.line(connected: true, captionsOn: true, captions: []) == nil, "cleared: nothing said since")
+        #expect(VoiceBar.Caption.line(connected: true, captionsOn: true, captions: [GraineCaption(role: .agent, text: "  ", live: true)]) == nil)
+    }
+}
+
 @Suite struct CallPhaseTests {
 
     private func phase(

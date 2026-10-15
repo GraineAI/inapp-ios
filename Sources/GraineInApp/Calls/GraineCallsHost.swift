@@ -270,7 +270,8 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             ringtoneSound: options.ringtoneSound,
             iconTemplateImageData: options.iosIconTemplate.flatMap { UIImage(named: $0)?.pngData() },
             includesCallsInRecents: options.iosIncludesCallsInRecents,
-            ringTimeout: options.ringTimeout
+            ringTimeout: options.ringTimeout,
+            callTransport: options.callTransport
         ))
     }
 
@@ -351,7 +352,9 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             agentSpeaking: calls.agentSpeaking,
             caption: calls.caption,
             connectedAt: calls.connectedAt,
-            agent: calls.agent
+            agent: calls.agent,
+            transport: calls.transport?.rawValue,
+            transportFallbackReason: calls.transportFallbackReason
         )
     }
 

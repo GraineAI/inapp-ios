@@ -156,6 +156,16 @@ public final class GraineChat: ObservableObject {
     }
 
     /**
+     * Empty the chat on screen — a new topic, a tidy screen. Only the screen:
+     * the conversation goes on, a message still waiting for the connection is
+     * still sent, and nothing Graine keeps — the conversation that continues,
+     * what the agent remembers — is touched. `newConversation()` starts over.
+     */
+    public func clear() {
+        graine.onMain { self.connection.clearScreen() }
+    }
+
+    /**
      * START A NEW CONVERSATION — a fresh thread, as a support chat offers one.
      *
      * The chat hangs up, Graine lets go of the conversation it kept for this

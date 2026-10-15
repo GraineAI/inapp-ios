@@ -164,6 +164,98 @@ enum ObjCBridge {
         }
     }
 
+    /**
+     * The design's tokens as the contract spells them — the session's `light`
+     * or `dark` set, keys and words exactly as every SDK reads them (Android's
+     * `ThemeTokens.toJson()`): for a bridge drawing UI of its own.
+     */
+    static func theme(_ t: GraineThemeTokens) -> [String: Any] {
+        // Whole numbers whole, as Android writes them; the rest in their shortest decimal form — Foundation's
+        // writer spells -0.026 with seventeen digits, which its own reader then lands one step off.
+        func n(_ d: Double) -> Any {
+            if d.isFinite, d.rounded() == d, abs(d) < 1e15 { return Int(d) }
+            return NSDecimalNumber(string: "\(d)")
+        }
+        let c = t.colors
+        let f = t.font
+        func shadow(_ s: GraineThemeTokens.Shadow?) -> Any {
+            guard let s = s else { return NSNull() }
+            return ["y": n(s.y), "blur": n(s.blur), "spread": n(s.spread), "opacity": n(s.opacity), "color": s.color] as [String: Any]
+        }
+        var o: [String: Any] = [
+            "v": 1,
+            "preset": t.preset,
+            "scheme": t.scheme,
+            "colors": [
+                "background": c.background, "surface": c.surface, "surfaceRaised": c.surfaceRaised, "text": c.text,
+                "textMuted": c.textMuted, "border": c.border, "accent": c.accent, "onAccent": c.onAccent,
+                "accentSoft": c.accentSoft, "success": c.success, "warning": c.warning, "danger": c.danger,
+                "userBubble": c.userBubble, "userBubbleText": c.userBubbleText, "agentBubble": c.agentBubble,
+                "agentBubbleText": c.agentBubbleText, "scrim": c.scrim,
+            ],
+            "font": [
+                "body": f.body, "heading": f.heading,
+                "scale": ["caption": n(f.scale.caption), "body": n(f.scale.body), "title": n(f.scale.title), "display": n(f.scale.display)],
+                "weights": ["body": f.weights.body, "strong": f.weights.strong, "title": f.weights.title],
+                "letterSpacing": ["body": n(f.letterSpacing.body), "title": n(f.letterSpacing.title)],
+                "lineHeight": ["body": n(f.lineHeight.body), "title": n(f.lineHeight.title)],
+            ] as [String: Any],
+            "shape": [
+                "radius": ["sm": n(t.shape.radius.sm), "md": n(t.shape.radius.md), "lg": n(t.shape.radius.lg), "xl": n(t.shape.radius.xl)],
+                "borderWidth": n(t.shape.borderWidth),
+                "launcher": t.shape.launcher.rawValue,
+            ] as [String: Any],
+            "spacing": ["unit": n(t.spacing.unit), "cardPadding": n(t.spacing.cardPadding), "gap": n(t.spacing.gap)],
+            "elevation": [
+                "card": shadow(t.elevation.card),
+                "floating": shadow(t.elevation.floating),
+                "hardOffset": t.elevation.hardOffset.map { ["x": n($0.x), "y": n($0.y)] as Any } ?? NSNull(),
+            ] as [String: Any],
+            "motion": ["durationMs": Int(t.motion.durationMs.rounded()), "easing": t.motion.easing, "bounce": n(t.motion.bounce)] as [String: Any],
+            "icons": [
+                "style": t.icons.style,
+                "stroke": n(t.icons.stroke),
+                "launcher": t.icons.launcher.map { ["id": $0.id, "path": $0.path, "stroke": $0.stroke] as Any } ?? NSNull(),
+            ] as [String: Any],
+            "glass": t.glass.map { ["blur": n($0.blur), "surfaceOpacity": n($0.surfaceOpacity)] as Any } ?? NSNull(),
+            "bubbles": t.bubbles.rawValue,
+            "chrome": t.chrome.rawValue,
+        ]
+        // Only what the server sent: a design from before these tokens writes without them, as Android's does.
+        if let chat = t.chat {
+            o["chat"] = [
+                "title": chat.title, "subtitle": chat.subtitle, "avatar": chat.avatar, "placeholder": chat.placeholder,
+                "showTimestamps": chat.showTimestamps, "suggestions": chat.suggestions,
+                "background": chat.background, "pattern": chat.pattern, "patternColor": chat.patternColor,
+                "headerBackground": chat.headerBackground, "headerText": chat.headerText, "headerSubtext": chat.headerSubtext,
+                "composerBackground": chat.composerBackground, "composerText": chat.composerText,
+                "composerPlaceholder": chat.composerPlaceholder, "composerBorder": chat.composerBorder,
+                "size": chat.size.rawValue,
+                "showUpcomingCalls": chat.showUpcomingCalls, "upcomingTitle": chat.upcomingTitle,
+                "showHistory": chat.showHistory, "newConversation": chat.newConversation,
+            ] as [String: Any]
+        }
+        if let call = t.call {
+            o["call"] = [
+                "background": call.background, "backgroundTo": call.backgroundTo.map { $0 as Any } ?? NSNull(),
+                "text": call.text, "textMuted": call.textMuted,
+                "avatar": call.avatar, "avatarShape": call.avatarShape, "avatarFill": call.avatarFill, "avatarText": call.avatarText,
+                "buttonFill": call.buttonFill, "buttonIcon": call.buttonIcon,
+                "buttonActiveFill": call.buttonActiveFill, "buttonActiveIcon": call.buttonActiveIcon,
+                "endFill": call.endFill, "endIcon": call.endIcon, "endShape": call.endShape,
+                "acceptFill": call.acceptFill, "acceptIcon": call.acceptIcon,
+                "declineFill": call.declineFill, "declineIcon": call.declineIcon,
+                "callbackFill": call.callbackFill, "callbackIcon": call.callbackIcon,
+                "captions": call.captions, "timer": call.timer, "controls": call.controls, "ringtone": call.ringtone,
+                "statusText": [
+                    "ringing": call.statusText.ringing, "connecting": call.statusText.connecting, "ended": call.statusText.ended,
+                    "scheduled": call.statusText.scheduled, "missed": call.statusText.missed,
+                ],
+            ] as [String: Any]
+        }
+        return o
+    }
+
     static func callState(_ s: GraineCallState) -> (word: String, endReason: String?) {
         switch s {
         case .idle: return ("idle", nil)
@@ -374,7 +466,8 @@ public final class GraineObjCSession: NSObject {
  * `name` and its `payload` (`json` is the same payload as JSON text). Names:
  * `sessionReady`, `caption`, `voiceEnded`, `widget`, `widgetPending`,
  * `chatMessage`, `actionRequested`, `actionCompleted`, `friction`,
- * `micDenied`, `error`. Main thread. Held weakly.
+ * `micDenied`, `theme` (the design's tokens, as `themeJSON` has them), `error`.
+ * Main thread. Held weakly.
  */
 @objc(GraineObjCListener)
 public protocol GraineObjCListener: AnyObject {
@@ -615,6 +708,12 @@ public final class GraineObjC: NSObject {
         setVariables(ObjCBridge.object(json))
     }
 
+    /** Every variable the agent will receive, merged in precedence order (`GraineInApp.currentVariables()`). */
+    @objc public var currentVariables: [String: String] { graine.currentVariables() }
+
+    /// `currentVariables` as a JSON object, for a bridge.
+    @objc public var currentVariablesJSON: String { ObjCBridge.text(graine.currentVariables()) }
+
     // MARK: The screen
 
     /// What the user is looking at: `screen`, `title`, `journey`, `fields`, `error`, `data`, `availableActions`. Nil: nothing.
@@ -789,6 +888,14 @@ public final class GraineObjC: NSObject {
     /// The session as JSON, for a bridge; nil before it has loaded.
     @objc public var sessionJSON: String? { graine.session.map { ObjCBridge.text(ObjCBridge.session($0)) } }
 
+    /**
+     * The brand's design tokens to draw right now (`GraineInApp.theme`) as the
+     * contract's token JSON, for a bridge drawing UI of its own; nil before the
+     * session loads and when it carries no design. The `theme` event says when
+     * they change (the session arriving, the device switching light and dark).
+     */
+    @objc public var themeJSON: String? { graine.theme.map { ObjCBridge.text(ObjCBridge.theme($0)) } }
+
     /// Hear every event (held weakly). Main thread.
     @objc(addListener:)
     public func addListener(_ listener: GraineObjCListener) {
@@ -844,5 +951,6 @@ final class ObjCEventRelay: GraineListener {
         facade?.emit("friction", ["name": signal.name, "screen": signal.screen, "detail": signal.detail])
     }
     func onChatMessage(_ turn: GraineChatTurn) { facade?.emit("chatMessage", ["turn": ObjCBridge.turn(turn)]) }
+    func onTheme(_ tokens: GraineThemeTokens?) { facade?.emit("theme", tokens.map { ObjCBridge.theme($0) } ?? [:]) }
     func onError(_ message: String) { facade?.emit("error", ["message": message]) }
 }

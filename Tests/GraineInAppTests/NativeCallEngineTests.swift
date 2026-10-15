@@ -111,9 +111,11 @@ import Testing
         #expect(t.count == 12)
         #expect(t.first { $0.0 == "who_called" }?.1 == "agent")
         #expect(t.first { $0.0 == "call_reason" }?.1 == "payment_due")
-        // Over a kilobyte, the SDK's give way; the call's stay. (All at once, this was nothing at all.)
+        // Over a kilobyte, the SDK's give way; the call's stay — handed over all at once too
+        // (that was nothing at all): the biggest of the rest go, the later on a tie.
         let big = (0..<12).map { ("key\($0)", String(repeating: "x", count: 150)) }
-        #expect(CallWire.ticketMetadata((call + big).map { ($0.0, $0.1 as Any?) }) == nil)
+        let whole = try #require(CallWire.ticketMetadata((call + big).map { ($0.0, $0.1 as Any?) }))
+        #expect(whole.map { $0.0 } == ["who_called", "call_reason", "key0", "key1", "key2", "key3", "key4", "key5"])
         let t2 = try #require(CallWire.ticketVariables(call: [("who_called", "agent")], rest: big))
         #expect(t2.first?.0 == "who_called")
         #expect((2...11).contains(t2.count))

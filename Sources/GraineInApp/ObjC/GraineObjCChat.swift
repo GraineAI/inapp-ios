@@ -34,7 +34,7 @@ public final class GraineObjCChatTurn: NSObject {
     }
 }
 
-/// Hears the chat change — its turns, its status or the typing indicator. Main thread. Held weakly.
+/// Hears the chat change — its turns, its status, the typing indicator or the upcoming calls. Main thread. Held weakly.
 @objc(GraineObjCChatListener)
 public protocol GraineObjCChatListener: AnyObject {
     @objc(graineChatChanged:)
@@ -62,6 +62,7 @@ public final class GraineObjCChat: NSObject {
             chat.$turns.sink { [weak self] _ in self?.changed() },
             chat.$status.sink { [weak self] _ in self?.changed() },
             chat.$typing.sink { [weak self] _ in self?.changed() },
+            chat.$upcomingCalls.sink { [weak self] _ in self?.changed() },
         ]
     }
 
@@ -90,7 +91,18 @@ public final class GraineObjCChat: NSObject {
     /// The user is in the chat.
     @objc public var isOpen: Bool { objcOnMainSync { self.graine.chat.isOpen } }
 
-    /// The whole chat as JSON, for a bridge: `{turns: [{id, role, text, live, delivery, at, proactive, restored, channel}], status, attempt, typing, open}`.
+    /**
+     * The user's calls still to come, soonest first, at most three — the chat
+     * window's Upcoming calls card (`GraineChat.upcomingCalls`). Main thread.
+     */
+    @objc public var upcomingCalls: [GraineObjCScheduledCall] {
+        objcOnMainSync { self.graine.chat.upcomingCalls.map { GraineObjCScheduledCall($0) } }
+    }
+
+    /**
+     * The whole chat as JSON, for a bridge: `{turns: [{id, role, text, live, delivery, at, proactive, restored, channel}],
+     * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}]}`.
+     */
     @objc public var snapshotJSON: String {
         objcOnMainSync {
             let chat = self.graine.chat
@@ -101,6 +113,7 @@ public final class GraineObjCChat: NSObject {
                 "attempt": status.attempt,
                 "typing": chat.typing,
                 "open": chat.isOpen,
+                "upcomingCalls": chat.upcomingCalls.map { ObjCBridge.scheduledCall($0) },
             ] as [String: Any])
         }
     }
@@ -140,6 +153,29 @@ public final class GraineObjCChat: NSObject {
     /// Connect now, and send what could not be sent.
     @objc(retry)
     public func retry() { graine.chat.retry() }
+
+    /// Empty the chat on screen; the conversation goes on (`GraineChat.clear()`).
+    @objc(clear)
+    public func clear() { graine.chat.clear() }
+
+    /**
+     * Answer a component the agent drew, from a UI of your own
+     * (`GraineInApp.answerComponent`), on the conversation that is live:
+     * `dataJSON` the structured answer as a JSON object (nil: none),
+     * `summary` the sentence that is the user's turn.
+     */
+    @objc(answerWidgetWithId:dataJSON:summary:)
+    public func answerWidget(id: String, dataJSON: String?, summary: String) {
+        graine.answerComponent(widgetId: id, data: ObjCBridge.object(dataJSON) ?? [:], summary: summary)
+    }
+
+    /// Fetch the upcoming calls again (the card refreshes itself; after a booking made elsewhere).
+    @objc(refreshUpcomingCalls)
+    public func refreshUpcomingCalls() { graine.chat.refreshUpcomingCalls() }
+
+    /// Cancel one of the upcoming calls: it leaves `upcomingCalls` once Graine has called it off.
+    @objc(cancelUpcomingCall:)
+    public func cancelUpcomingCall(_ callId: String) { graine.chat.cancelUpcomingCall(id: callId) }
 
     @objc(addListener:)
     public func addListener(_ listener: GraineObjCChatListener) {

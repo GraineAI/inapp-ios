@@ -516,14 +516,14 @@ private final class HostRig {
 @Suite struct CallsHostSnapshotTests {
     private let keys: Set<String> = [
         "state", "callId", "direction", "reason", "callerName", "muted", "speakerOn", "agentSpeaking",
-        "caption", "connectedAt", "error", "agent",
+        "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason",
     ]
 
     @Test func everyKeyIsAlwaysThereAndIdleIsNullsAndFalses() {
         let json = CallsHostSnapshot().json
         #expect(Set(json.keys) == keys)
         #expect(json["state"] as? String == "idle")
-        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent"] {
+        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason"] {
             #expect(json[key] is NSNull, "\(key)")
         }
         for key in ["muted", "speakerOn", "agentSpeaking"] {

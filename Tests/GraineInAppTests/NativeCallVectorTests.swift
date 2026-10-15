@@ -123,7 +123,7 @@ import Testing
         #expect(limits["valueLength"]?.int == CallWire.ticketValueLength)
         #expect(limits["totalBytes"]?.int == CallWire.ticketTotalBytes)
         let cases = try #require(block["cases"]?.array)
-        #expect(cases.count == 5)
+        #expect(cases.count == 8)
         for c in cases {
             let name = c["name"]?.string ?? "?"
             let got = CallWire.ticketMetadata(try #require(c["vars"]).orderedPairs)

@@ -351,3 +351,17 @@ private func ms(_ d: Date) -> Int64 { Int64((d.timeIntervalSince1970 * 1000).rou
         #expect(rig.network.socket !== socket)
     }
 }
+
+/// Turns for the tests that may only reach the public API (an app cannot make a turn: it reads `chat.turns`).
+enum ChatRowFixtures {
+    /// An earlier call on 13 Oct (two voice turns), then a typed message on 14 Oct — in UTC.
+    static func callThenToday() -> (turns: [GraineChatTurn], now: Date) {
+        let earlier = Date(timeIntervalSince1970: 1_760_353_200)   // 2025-10-13T11:00:00Z
+        let now = Date(timeIntervalSince1970: 1_760_439_600)       // 2025-10-14T11:00:00Z
+        return ([
+            GraineChatTurn(id: "a1", role: .agent, text: "Hi", live: false, delivery: .sent, at: earlier, proactive: false, restored: true, channel: .voice),
+            GraineChatTurn(id: "a2", role: .customer, text: "Yo", live: false, delivery: .sent, at: earlier, proactive: false, restored: true, channel: .voice),
+            GraineChatTurn(id: "t1", role: .customer, text: "Now", live: false, delivery: .sent, at: now, proactive: false),
+        ], now)
+    }
+}

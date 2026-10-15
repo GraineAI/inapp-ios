@@ -23,19 +23,23 @@ public struct GraineCallsConfig {
     public var includesCallsInRecents: Bool
     /// Seconds an agent's call rings before it is missed.
     public var ringTimeout: TimeInterval
+    /// The road the calls' audio takes: `auto` (WebRTC when the app includes GraineInAppRTC), `websocket` or `webrtc`.
+    public var callTransport: GraineCallTransport
 
     public init(
         displayName: String = "",
         ringtoneSound: String? = nil,
         iconTemplateImageData: Data? = nil,
         includesCallsInRecents: Bool = false,
-        ringTimeout: TimeInterval = 30
+        ringTimeout: TimeInterval = 30,
+        callTransport: GraineCallTransport = .auto
     ) {
         self.displayName = displayName
         self.ringtoneSound = ringtoneSound
         self.iconTemplateImageData = iconTemplateImageData
         self.includesCallsInRecents = includesCallsInRecents
         self.ringTimeout = ringTimeout
+        self.callTransport = callTransport
     }
 }
 
@@ -111,6 +115,10 @@ public final class GraineCalls: NSObject, ObservableObject {
      * back, `dismissMissedCall()`, or another call rings or is placed.
      */
     @Published public private(set) var missedCall: GraineMissedCall?
+    /// The road the current call's audio runs on (`.webrtc` or `.websocket`), once decided; nil before.
+    @Published public internal(set) var transport: GraineCallTransport?
+    /// Why a call that tried WebRTC runs on the WebSocket (`mint_failed`, `register_failed`, `no_response`, `no_answer`, `ice_timeout`, `error`); nil otherwise.
+    @Published public internal(set) var transportFallbackReason: String?
 
     /// Whether a call screen has something to show: a call, its last second, or a missed ring (of the last ten minutes) to call back.
     public var showsCallScreen: Bool {
@@ -135,7 +143,7 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var incoming: GraineIncomingCall?
     private var outgoingReason: String?
     private var outgoingVariables: [String: String] = [:]
-    private var engine: CallEngine?
+    private var engine: CallConversation?
     private var ringItem: DispatchWorkItem?
     private var settleItem: DispatchWorkItem?
     private var unwatchContext: (() -> Void)?
@@ -420,6 +428,7 @@ public final class GraineCalls: NSObject, ObservableObject {
             provider.configuration = providerConfiguration(for: ringer)
             transition(.incoming(id: call.callId))
             armRingTimeout(uuid, seconds: ringTimeout(hosted: call.hosted, agent: ringer))
+            prepareRing(call, agent: ringer)
         }
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(name: name)) { [weak self] error in
             DispatchQueue.main.async {
@@ -572,11 +581,16 @@ public final class GraineCalls: NSObject, ObservableObject {
             // joins the conversation to the call it rang (or the app placed).
             identity: graine.identityFields(callId: callId)
         )
-        let engine = CallEngine(
+        let engine = CallConversation(
             setup: setup,
             audio: audio,
             network: URLSessionCallNetwork(),
             scheduler: DispatchCallScheduler(),
+            transport: config.callTransport,
+            debug: graine.config.debug,
+            onTransport: { [weak self, callId] report in
+                DispatchQueue.main.async { self?.transportDecided(report, callId: callId) }
+            },
             onEvent: { [weak self] event in
                 DispatchQueue.main.async { self?.engineEvent(event, uuid: uuid) }
             }
@@ -749,6 +763,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         direction = nil
         caption = nil
         if !transcript.isEmpty { transcript = [] }
+        if transport != nil { transport = nil }
+        if transportFallbackReason != nil { transportFallbackReason = nil }
         if hosted { hosted = false }
         if agent != nil { agent = nil }
         callAgent = nil

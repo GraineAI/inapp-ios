@@ -135,6 +135,8 @@ final class CallEngine {
         case gateway
         /// Straight to the conversation host (no ticket could be minted).
         case direct
+        /// On WebRTC, through the opt-in module (CallConversation).
+        case webrtc
     }
 
     enum Event {

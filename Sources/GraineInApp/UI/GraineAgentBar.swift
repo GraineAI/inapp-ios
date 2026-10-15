@@ -451,11 +451,9 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         return first.isEmpty ? "A" : first
     }
 
-    /// The line being said now, on a call. The whole transcript would push the bar off the screen.
+    /// The line being said now, on a call, while the captions are on.
     private var captionLine: GraineCaption? {
-        guard voice.connected, let last = voice.captions.last,
-              !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return last
+        VoiceBar.Caption.line(connected: voice.connected, captionsOn: voice.captionsOn, captions: voice.captions)
     }
 
     /// What the dashboard offers and which opens — the customer's last switch, else the app's, else the dashboard's.

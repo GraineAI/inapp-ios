@@ -41,6 +41,17 @@ enum VoiceBar {
         /// "YOU", above the customer's own lines.
         static let youSize = 10.5
         static let youTracking = 0.6
+
+        /**
+         * The line the bar shows above it: the last one said, on a call, while
+         * the captions switch is on — never an empty one. The whole transcript
+         * would push the bar off the screen.
+         */
+        static func line(connected: Bool, captionsOn: Bool, captions: [GraineCaption]) -> GraineCaption? {
+            guard connected, captionsOn, let last = captions.last,
+                  !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return last
+        }
     }
 
     /// The chat window, above the bar while the customer is in the chat.

@@ -9,23 +9,34 @@ import Foundation
  * wherever the device's day changes between rows. A conversation all from
  * today draws exactly what it always did. The React Native SDK's chatRows
  * (protocol.ts), ported. Foundation only: `swift test` proves it on a Mac.
+ *
+ * Public for a chat of your own, drawn from `GraineChat.turns`:
+ *
+ *     ForEach(GraineChatRows.build(chat.turns)) { row in
+ *         switch row {
+ *         case .day(let line): Text(GraineChatRows.dayLabel(line))
+ *         case .voice(let call): Text(GraineChatRows.callLabel(call))
+ *         case .turn(let turn): MyBubble(turn)
+ *         }
+ *     }
  */
 
 /// Which day a separator names: the contract's "today", "yesterday", or the local date.
-enum ChatDay: Equatable {
+public enum GraineChatDay: Equatable, Sendable {
     case today
     case yesterday
     case date
 }
 
 /// A day separator: which day, the local date (YYYY-MM-DD), and the first message's time on it.
-struct ChatDayLine: Equatable {
-    let day: ChatDay
-    let date: String
-    let at: Date
+public struct GraineChatDayLine: Equatable, Sendable {
+    public let day: GraineChatDay
+    /// The device's date, YYYY-MM-DD.
+    public let date: String
+    public let at: Date
 
     /// The contract's word for it: "today", "yesterday" or the local date.
-    var key: String {
+    public var key: String {
         switch day {
         case .today: return "today"
         case .yesterday: return "yesterday"
@@ -34,21 +45,22 @@ struct ChatDayLine: Equatable {
     }
 }
 
-/// An earlier call: when its first turn was said, and which turns (indices into the transcript) it stands for.
-struct ChatCallLine: Equatable {
-    let id: String
-    let at: Date
-    let first: Int
-    let last: Int
+/// An earlier call: when its first turn was said, and which turns (indices into the transcript) it stands for — never their words.
+public struct GraineChatCallLine: Equatable, Sendable {
+    public let id: String
+    public let at: Date
+    public let first: Int
+    public let last: Int
 }
 
-enum ChatRow: Equatable, Identifiable {
-    case day(ChatDayLine)
-    case voice(ChatCallLine)
+/// One row of a chat window: a day separator, an earlier call, or a message.
+public enum GraineChatRow: Equatable, Identifiable {
+    case day(GraineChatDayLine)
+    case voice(GraineChatCallLine)
     case turn(GraineChatTurn)
 
     /// Stable while the conversation grows: a separator by its date, a call by its first turn, a bubble by its turn.
-    var id: String {
+    public var id: String {
         switch self {
         case .day(let line): return "day-\(line.date)"
         case .voice(let line): return line.id
@@ -57,9 +69,21 @@ enum ChatRow: Equatable, Identifiable {
     }
 }
 
-enum ChatRows {
-    /// The rows for `turns` (oldest first), on the device's days as `calendar` counts them.
-    static func build(_ turns: [GraineChatTurn], now: Date = Date(), calendar: Calendar = .current) -> [ChatRow] {
+typealias ChatDay = GraineChatDay
+typealias ChatDayLine = GraineChatDayLine
+typealias ChatCallLine = GraineChatCallLine
+typealias ChatRow = GraineChatRow
+typealias ChatRows = GraineChatRows
+
+/**
+ * THE ROWS A CHAT WINDOW DRAWS, for a chat of your own: a bubble per chat
+ * turn, one "Voice call" row for a run of voice turns on one day, and a day
+ * separator before the first row when it is not from today and wherever the
+ * device's day changes. The SDK's own chat window draws exactly these.
+ */
+public enum GraineChatRows {
+    /// The rows for `turns` (oldest first), on the device's days as `calendar` counts them. Rebuild whenever `turns` changes.
+    public static func build(_ turns: [GraineChatTurn], now: Date = Date(), calendar: Calendar = .current) -> [GraineChatRow] {
         let today = localDate(now, calendar)
         let yesterday = calendar.date(byAdding: .day, value: -1, to: now).map { localDate($0, calendar) }
         var rows: [ChatRow] = []
@@ -89,7 +113,7 @@ enum ChatRows {
     }
 
     /// "Today", "Yesterday", else the date in the device's words ("Tue 14 Oct"), with the year when it is not this one.
-    static func dayLabel(_ line: ChatDayLine, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String {
+    public static func dayLabel(_ line: GraineChatDayLine, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String {
         switch line.day {
         case .today: return "Today"
         case .yesterday: return "Yesterday"
@@ -104,16 +128,17 @@ enum ChatRows {
     }
 
     /// "Voice call · 6:05 PM" — the call's first turn, in the device's short time.
-    static func callLabel(_ line: ChatCallLine, calendar: Calendar = .current, locale: Locale = .current) -> String {
+    public static func callLabel(_ line: GraineChatCallLine, calendar: Calendar = .current, locale: Locale = .current) -> String {
         "Voice call · " + clock(line.at, calendar: calendar, locale: locale)
     }
 
     /// What a screen reader says for the row: "Voice call at 6:05 PM".
-    static func callSpoken(_ line: ChatCallLine, calendar: Calendar = .current, locale: Locale = .current) -> String {
+    public static func callSpoken(_ line: GraineChatCallLine, calendar: Calendar = .current, locale: Locale = .current) -> String {
         "Voice call at " + clock(line.at, calendar: calendar, locale: locale)
     }
 
-    static func clock(_ date: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+    /// A time in the device's short words: "6:05 PM".
+    public static func clock(_ date: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = locale
         formatter.timeZone = calendar.timeZone
@@ -123,12 +148,12 @@ enum ChatRows {
     }
 
     /// The header's "New conversation" belongs to a conversation that continues: offered while restored turns are on screen.
-    static func offersNewConversation(_ turns: [GraineChatTurn]) -> Bool {
+    public static func offersNewConversation(_ turns: [GraineChatTurn]) -> Bool {
         turns.contains { $0.restored }
     }
 
     /// The brand's starters belong to a new chat: not once the customer has said something, nor on a conversation that continues.
-    static func offersStarters(_ turns: [GraineChatTurn]) -> Bool {
+    public static func offersStarters(_ turns: [GraineChatTurn]) -> Bool {
         !turns.contains { $0.role == .customer || $0.restored }
     }
 

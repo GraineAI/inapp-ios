@@ -91,6 +91,30 @@ public final class GraineObjCCalls: NSObject {
         #endif
     }
 
+    /**
+     * The road the calls' audio takes: "auto" (the default — WebRTC when the
+     * app includes GraineInAppRTC), "websocket" or "webrtc". Anything else is "auto".
+     */
+    @objc public var callTransport: String {
+        get {
+            #if os(iOS)
+            return objcOnMainSync { graine.calls.config.callTransport.rawValue }
+            #else
+            return GraineCallTransport.auto.rawValue
+            #endif
+        }
+        set {
+            #if os(iOS)
+            let transport = GraineCallTransport.from(newValue) ?? .auto
+            onMain {
+                var config = self.graine.calls.config
+                config.callTransport = transport
+                self.graine.calls.configure(config)
+            }
+            #endif
+        }
+    }
+
     /// Receive the agent's calls as VoIP pushes. Call at every launch.
     @objc(enableVoIPPushes)
     public func enableVoIPPushes() {
@@ -189,6 +213,10 @@ public final class GraineObjCCalls: NSObject {
     @objc public var agent: String? { snapshot()["agent"] as? String }
     /// A call screen has something to show: a call, or a missed ring to call back.
     @objc public var showsCallScreen: Bool { snapshot()["showsCallScreen"] as? Bool ?? false }
+    /// The road the call's audio runs on: "webrtc" or "websocket"; nil before it is decided.
+    @objc public var transport: String? { snapshot()["transport"] as? String }
+    /// Why a call that tried WebRTC runs on the WebSocket ("no_answer", "ice_timeout", …); nil otherwise.
+    @objc public var transportFallbackReason: String? { snapshot()["transportFallbackReason"] as? String }
 
     /// The call as JSON, for a bridge: every field above, plus `caption` and `missedCall`.
     @objc public var snapshotJSON: String { ObjCBridge.text(snapshot()) }
@@ -198,7 +226,7 @@ public final class GraineObjCCalls: NSObject {
             var o: [String: Any] = [
                 "state": "idle", "endReason": NSNull(), "callId": NSNull(), "callerName": "", "direction": NSNull(),
                 "hosted": false, "muted": false, "speakerOn": false, "agentSpeaking": false, "showsCallScreen": false,
-                "agent": NSNull(),
+                "agent": NSNull(), "transport": NSNull(), "transportFallbackReason": NSNull(),
             ]
             #if os(iOS)
             let c = graine.calls
@@ -214,6 +242,8 @@ public final class GraineObjCCalls: NSObject {
             o["agentSpeaking"] = c.agentSpeaking
             o["showsCallScreen"] = c.showsCallScreen
             o["agent"] = c.agent ?? NSNull()
+            o["transport"] = c.transport?.rawValue ?? NSNull()
+            o["transportFallbackReason"] = c.transportFallbackReason ?? NSNull()
             if let caption = c.caption {
                 o["caption"] = ["role": caption.role == .agent ? "agent" : "user", "text": caption.text, "live": caption.live] as [String: Any]
             }
@@ -394,20 +424,41 @@ public final class GraineObjCVoice: NSObject {
         #endif
     }
 
+    /// The captions switch (`GraineVoice.setCaptionsOn(_:)`): the bar shows the line being said only while it is on.
+    @objc(setCaptionsOn:)
+    public func setCaptionsOn(_ on: Bool) {
+        #if os(iOS)
+        graine.voice.setCaptionsOn(on)
+        #endif
+    }
+
+    /// Forget what has been said without ending the call (`GraineVoice.clearCaptions()`).
+    @objc(clearCaptions)
+    public func clearCaptions() {
+        #if os(iOS)
+        graine.voice.clearCaptions()
+        #endif
+    }
+
     @objc public var connected: Bool { snapshot()["connected"] as? Bool ?? false }
     @objc public var connecting: Bool { snapshot()["connecting"] as? Bool ?? false }
     @objc public var muted: Bool { snapshot()["muted"] as? Bool ?? false }
+    /// The captions switch; on until it is turned off.
+    @objc public var captionsOn: Bool { snapshot()["captionsOn"] as? Bool ?? true }
 
-    /// `{connected, connecting, muted}` as JSON, for a bridge.
+    /// `{connected, connecting, muted, captionsOn, captions: [{role, text, live}]}` as JSON, for a bridge.
     @objc public var snapshotJSON: String { ObjCBridge.text(snapshot()) }
 
     func snapshot() -> [String: Any] {
         objcOnMainSync {
             #if os(iOS)
             let v = graine.voice
-            return ["connected": v.connected, "connecting": v.connecting, "muted": v.muted]
+            return [
+                "connected": v.connected, "connecting": v.connecting, "muted": v.muted, "captionsOn": v.captionsOn,
+                "captions": v.captions.map { ["role": $0.role == .agent ? "agent" : "user", "text": $0.text, "live": $0.live] as [String: Any] },
+            ]
             #else
-            return ["connected": false, "connecting": false, "muted": false]
+            return ["connected": false, "connecting": false, "muted": false, "captionsOn": true, "captions": [Any]()]
             #endif
         }
     }

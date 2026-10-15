@@ -26,6 +26,12 @@ public struct GraineHostedCallsSettings: Equatable, Sendable {
     public let maxDaysAhead: Int?
     public let minLeadMinutes: Int?
     public let maxPendingPerUser: Int?
+    /**
+     * The dashboard's say on the native calls' audio (`calls.audioTransport`):
+     * `.websocket` turns WebRTC off for this agent whatever the app asked;
+     * `.webrtc`, or nil (no opinion), leaves the app's `callTransport` to decide.
+     */
+    public let audioTransport: GraineCallTransport?
 
     /// Graine rings iOS devices for this agent.
     public var ringsThisPlatform: Bool {
@@ -50,7 +56,8 @@ public struct GraineHostedCallsSettings: Equatable, Sendable {
             usersCanBook: rules?.usersCanBook ?? false,
             maxDaysAhead: rules?.maxDaysAhead,
             minLeadMinutes: rules?.minLeadMinutes,
-            maxPendingPerUser: rules?.maxPendingPerUser
+            maxPendingPerUser: rules?.maxPendingPerUser,
+            audioTransport: (JSON.unwrap(o["audioTransport"]) as? String).flatMap(GraineCallTransport.from).flatMap { $0 == .auto ? nil : $0 }
         )
     }
 }

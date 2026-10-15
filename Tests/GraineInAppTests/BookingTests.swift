@@ -229,6 +229,22 @@ private func bookable(_ extra: [String: Any] = [:]) -> [String: Any] {
         #expect(Booking.errorLine(.tooManyPending, rules: one) == "You already have 1 call booked — cancel one first")
     }
 
+    @Test func scheduleCallRefusesInTheSheetsWords() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func refusal(_ date: Date, _ rules: GraineSchedulingRules) -> String? {
+            do { try GraineInApp.check(date, against: rules, now: now); return nil } catch let e as GraineServiceError { return e.message } catch { return "\(error)" }
+        }
+        let one = GraineSchedulingRules(usersCanBook: true, minLeadMinutes: 1, maxDaysAhead: 1, maxPendingPerUser: 1)
+        #expect(refusal(now.addingTimeInterval(-60), one) == "Pick a time at least 1 minute from now")
+        #expect(refusal(now.addingTimeInterval(3 * 86_400), one) == "Pick a time within 1 day")
+        let many = GraineSchedulingRules(usersCanBook: true, minLeadMinutes: 5, maxDaysAhead: 14, maxPendingPerUser: 3)
+        #expect(refusal(now.addingTimeInterval(60), many) == "Pick a time at least 5 minutes from now")
+        #expect(refusal(now.addingTimeInterval(15 * 86_400), many) == "Pick a time within 14 days")
+        let off = GraineSchedulingRules(usersCanBook: false, minLeadMinutes: 5, maxDaysAhead: 14, maxPendingPerUser: 3)
+        #expect(refusal(now.addingTimeInterval(3_600), off) == "Booking a call isn't available right now")
+        #expect(refusal(now.addingTimeInterval(3_600), many) == nil)
+    }
+
     @Test func aRefusalStaysInTheSheetAndTooSoonMovesTheOfferOn() throws {
         let rules = GraineSchedulingRules(usersCanBook: true, minLeadMinutes: 5, maxDaysAhead: 14, hostedRinging: true)
         let calendar = kolkata()

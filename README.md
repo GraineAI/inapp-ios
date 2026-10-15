@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.8.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.9.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -81,12 +81,12 @@ agent it is from.
 ```swift
 let graine = GraineInApp.shared
 graine.identify(["name": user.firstName, "plan": user.plan])     // nil on sign-out
-graine.setVariables(["cart_total": 1299])                          // nil under a key removes it
+graine.setVariables(["app_version": "4.2.0"])                     // nil under a key removes it
 graine.setScreen(GraineScreen(
-    screen: "kyc_documents",
-    title: "Upload your documents",
-    journey: .init(name: "KYC", step: 2, of: 4),
-    fields: [GraineField(name: "pan", label: "PAN", value: pan, status: .invalid, error: "Not recognised")]
+    screen: "signup_email",
+    title: "Your email address",
+    journey: .init(name: "Sign-up", step: 2, of: 4),
+    fields: [GraineField(name: "email", label: "Email", value: email, status: .invalid, error: "Not recognised")]
 ))
 graine.track("otp_retry")                                          // context, never a nudge
 ```
@@ -95,8 +95,8 @@ Values are masked on the device (PAN, email, card, phone, Aadhaar) before they
 leave it; report real values. `GraineMasking.addRule(pattern:token:)` adds your own.
 
 A form that changes one field at a time can say just that:
-`graine.updateField(GraineField(name: "pan", value: pan, status: .invalid))`,
-`graine.removeField("otp")`, and `graine.clearScreen("kyc_documents")` in a
+`graine.updateField(GraineField(name: "email", value: email, status: .invalid))`,
+`graine.removeField("otp")`, and `graine.clearScreen("signup_email")` in a
 screen's teardown (it clears only if that screen is still the one described).
 Taps on controls with an accessibility identifier (or a button's label) reach
 the agent as `tap:<name>` — never a value — at most two a second
@@ -126,9 +126,10 @@ this install's id, kept in the Keychain through reinstalls.
 ## Let the agent act
 
 ```swift
-let unregister = graine.registerAction("set_tenure") { args in
-    tenure = args["months"] as? Int ?? 12
-    return .ok("Tenure set to \(tenure) months")
+let unregister = graine.registerAction("set_reminder") { args in
+    let minutes = args["minutes"] as? Int ?? 15
+    reminders.schedule(minutes: minutes)
+    return .ok("Reminder set for \(minutes) minutes from now")
 }
 graine.registerAction("upload_document", deferred: { args, done in
     upload(args) { ok in done(ok ? .ok("Uploaded") : .error("Upload failed")) }
@@ -167,11 +168,13 @@ Without the bar: `graine.voice.attach(to: window)` once, then
 `graine.voice.start()` / `.end()` / `.setMuted(_:)`. `GraineVoice` is an
 `ObservableObject`, so your own SwiftUI can draw from `connected`, `connecting`,
 `phase` (idle, connecting, reconnecting, thinking, speaking, listening),
-`quality`, `online`, `reconnecting`, `connectivity`, `captions`, and a connect's
+`quality`, `online`, `reconnecting`, `connectivity`, `captions` (with the CC
+switch `captionsOn`: `setCaptionsOn(_:)`, `clearCaptions()`), and a connect's
 own progress: `connectStage` (registering, dialling, retrying, switching),
 `slowConnect` (waited on past `GraineConfig.Timing.slowConnectMs`, 4 s by
 default) and `callFailed` (neither transport could carry it; `start()` tries
-again).
+again). A voice UI of your own calls `voice.viewOpened()` / `viewClosed()` as it
+comes and goes, so a slow page load is reported while it is open.
 `GraineListener` (held weakly) reports the same events, plus components
 (`onWidget`), friction (`onFriction`) and errors.
 
@@ -183,7 +186,10 @@ that is not a field edit.
 
 The bar draws the agent's components itself, above the bar — unless your app
 mounts its own `GraineWidgetView`, which then draws them alone.
-`graine.reopenComponent()` puts back the last one the customer closed.
+`graine.reopenComponent()` puts back the last one the customer closed. Drawing
+one yourself (from `onWidget`)? Answer it with
+`graine.answerComponent(widgetId:data:summary:)` — the structured answer and the
+sentence that is the customer's turn, on the conversation that is live.
 
 ## The chat
 
@@ -199,8 +205,8 @@ present(GraineChatViewController(), animated: true)                // UIKit
 
 Or draw your own from `graine.chat` (`GraineChat`, an `ObservableObject`):
 `open()` when the customer is in the chat, `send(_:)`, `close()` when they
-leave, and `turns` (one per message, each reply its own), `status` and
-`typing`. A message typed while offline is shown at once and sent when the
+leave, `clear()` to empty the screen (the conversation goes on), and `turns`
+(one per message, each reply its own), `status` and `typing`. A message typed while offline is shown at once and sent when the
 chat is back; a dropped connection is made again on its own, then waits for
 the customer (or `retry()`). One conversation at a time: the chat ends a call
 and a call closes the chat. `GraineListener.onChatMessage(_:)` hears each
@@ -216,7 +222,8 @@ there instead of greeting them again. The chat opens with the recent messages
 (the last 50, kept for a while after the last one), earlier calls show as one
 "Voice call · 6:05 PM" row, and day lines say Today, Yesterday or the date.
 Drawing your own chat? `turn.restored` marks a message from an earlier
-conversation and `turn.channel` (`.chat`, `.voice`) where it was said.
+conversation and `turn.channel` (`.chat`, `.voice`) where it was said;
+`GraineChatRows.build(chat.turns)` gives the rows to draw (day lines, one row per earlier call).
 `try await chat.newConversation()` starts a fresh thread (the header of
 `GraineChatView` offers it while an earlier conversation is on screen); what
 the agent remembers about the customer stays. `forgetMemory()` clears the chat
@@ -294,7 +301,7 @@ Graine what became of each. Customers can book a call when the agent allows it:
 
 ```swift
 let rules = graine.schedulingRules                 // usersCanBook, earliest(now:), latest(now:), …
-let call = try await graine.scheduleCall(at: tomorrowAt6pm, reason: "Finish my KYC")   // status .scheduled
+let call = try await graine.scheduleCall(at: tomorrowAt6pm, reason: "Follow-up")   // status .scheduled
 let upcoming = try await graine.scheduledCalls()  // [GraineScheduledCall], upcoming first
 let status = try await graine.cancelScheduledCall(id: call.id)                          // .cancelled
 ```
@@ -305,7 +312,7 @@ let status = try await graine.cancelScheduledCall(id: call.id)                  
 the phone's time zone), `.tooManyPending`, `.rateLimited` (with
 `retryAfterSeconds`).
 
-**The customer calls the agent**: `calls.startCall(reason: "card_blocked", variables: ["order": "A-1043"])`
+**The customer calls the agent**: `calls.startCall(reason: "support", variables: ["ticket": "T-1043"])`
 returns the call's id (nil while another call is live). The agent hears
 `who_called = "customer"` and `call_reason`.
 
@@ -359,6 +366,51 @@ setting; a native call keeps going in the background, as a phone call does.
 Flutter (`graine_inapp`) packages carry these same calls and drive them
 through `GraineCallsHost`. In those apps, use the package's own API; the
 host is not called directly.
+
+### Calls on WebRTC (optional)
+
+Add the WebRTC module and these calls carry their audio over WebRTC instead of
+the WebSocket: a jitter buffer and loss concealment keep the agent's voice
+steady on a network that drops or delays packets, and the platform's echo
+canceller runs on the call. It is its own package, so an app that does not add
+it never downloads it, and `GraineInApp` keeps no dependencies:
+
+```swift
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.9.0")
+```
+
+In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its
+`GraineInAppRTC` library to the same target as `GraineInApp`. With CocoaPods,
+`pod 'GraineInAppRTC'`. **Nothing else changes**: no code, no `Info.plist`
+entry, no new capability — the calls find the module by themselves. (A build
+that strips code nothing references can call `GraineRTC.install()` at launch.)
+
+- **What the person notices.** The same ring, the same call screen, the same
+  "Connecting…". On a weak or changing network the agent's voice holds up
+  instead of stalling and catching up. Today the agent's voice on this path is
+  telephone quality.
+- **When WebRTC cannot carry a call** — a network that blocks it, a server that
+  turns it down — the call continues on the WebSocket inside the same call: no
+  second ring; the screen says "Connecting…" a moment longer. A call the agent
+  cannot take at all (no credit left, the agent switched off) ends with that
+  reason, as it does without the module.
+- **Choosing.** `GraineCallsConfig(callTransport: .auto)` is the default:
+  WebRTC when the module is in the app. `.websocket` keeps the WebSocket;
+  `.webrtc` asks for WebRTC wherever it can carry the call. The agent's **In-app
+  call audio** setting in the dashboard can move its calls back to the WebSocket
+  without an app release.
+- **Which one ran.** `calls.transport` (`.webrtc` or `.websocket`) and
+  `calls.transportFallbackReason` (`mint_failed`, `register_failed`,
+  `no_response`, `no_answer`, `ice_timeout` or `error`) for a call that tried
+  WebRTC and did not use it. Objective-C: `callTransport`, `transport`,
+  `transportFallbackReason` on `GraineObjCCalls`, as strings.
+- **Size.** About 12 MB more installed on an arm64 iPhone, about 6 MB more to
+  download — almost all of it the WebRTC library.
+- **Licences.** The module ships a prebuilt WebRTC library: add its
+  `THIRD-PARTY-NOTICES.md` to your app's open-source notices. If another package
+  in your app pins `webrtc-xcframework` to a different version, the two cannot
+  be resolved together; leave the module out (calls stay on the WebSocket) or
+  align the versions.
 
 ## Booking a call from your app
 

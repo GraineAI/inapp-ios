@@ -210,6 +210,20 @@ final class ChatConnection {
         }
     }
 
+    /**
+     * Empty the screen only (the app's `GraineChat.clear()`): the turns and the
+     * typing indicator go; the connection, and the messages still waiting for
+     * it, stay — those are sent when it is up, off the screen.
+     */
+    func clearScreen() {
+        scheduler.run { [self] in
+            transcript.clear()
+            stopAwaiting()
+            agentTyping = false
+            onEvent(.changed)
+        }
+    }
+
     // MARK: - Opening
 
     private func connect() {

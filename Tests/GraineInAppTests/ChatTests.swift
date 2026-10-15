@@ -283,6 +283,33 @@ private final class ChatRig {
         _ = waited
     }
 
+    @Test func clearingEmptiesTheScreenAndTheConversationGoesOn() throws {
+        let rig = ChatRig()
+        let socket = rig.online()
+        socket.frame(["type": "text", "data": "Welcome!<end_of_stream>"])
+        rig.chat.send("Hi")
+        #expect(rig.chat.typing)
+        rig.chat.clearScreen()
+        #expect(rig.chat.transcript.turns.isEmpty)
+        #expect(!rig.chat.typing, "the typing indicator was part of the screen")
+        #expect(rig.chat.status == .online, "the conversation goes on")
+        #expect(!socket.sent.contains(CallWire.stopFrame), "nothing was hung up")
+        #expect(rig.network.posts.filter { $0.path != "/api/embed/ticket" }.isEmpty, "nothing Graine keeps was touched")
+        socket.frame(["type": "text", "data": "Hello again."])
+        #expect(rig.chat.transcript.turns.map { $0.text } == ["Hello again."])
+    }
+
+    @Test func aMessageWaitingToGoStillGoesAfterAClear() throws {
+        let rig = ChatRig()
+        rig.chat.send("typed offline")
+        rig.chat.clearScreen()
+        #expect(rig.chat.transcript.turns.isEmpty)
+        let socket = try #require(rig.network.socket)
+        socket.open()
+        #expect(socket.sent.contains(ChatWire.textFrame("typed offline")), "a clear dropped what was waiting to go")
+        #expect(rig.chat.transcript.turns.isEmpty, "sent, not put back on the screen")
+    }
+
     @Test func aConversationTheServerEndedIsNotDialledAgainUntilTheCustomerSpeaks() throws {
         let rig = ChatRig()
         let socket = rig.online()
@@ -476,6 +503,22 @@ private final class ChatRig {
         #expect(heard.messages.first?.proactive == true)
         #expect(rig.graine.chat.turns.count == 1)
         #expect(rig.graine.chat.status == .online)
+    }
+
+    @Test func clearEmptiesTheChatOnScreenOnly() throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session()
+        rig.graine.chat.open()
+        let socket = try #require(rig.network.socket)
+        socket.open()
+        socket.frame(["type": "text", "data": "Welcome!<end_of_stream>"])
+        #expect(rig.graine.chat.turns.count == 1)
+        rig.graine.chat.clear()
+        #expect(rig.graine.chat.turns.isEmpty)
+        #expect(rig.graine.chat.status == .online, "the conversation goes on")
+        #expect(rig.graine.chat.isOpen)
+        #expect(rig.network.sockets.count == 1, "no new conversation")
     }
 
     @Test func anotherCustomerOnThisPhoneStartsWithAnEmptyChat() throws {
