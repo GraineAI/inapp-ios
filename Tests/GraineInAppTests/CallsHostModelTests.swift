@@ -147,6 +147,24 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
     func dismissCallScreen() { dismissed += 1 }
     func nextTurn(_ block: @escaping () -> Void) { turns.append(block) }
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) { timers.append((seconds, block)) }
+
+    /// The permissions as the phone holds them, and what asking changes them to.
+    var permissions = GraineCallPermissions(microphone: .denied, notifications: .notNeeded, fullScreen: .notNeeded)
+    var permissionsAfterAsking: GraineCallPermissions?
+    private(set) var permissionRequests = 0
+    private(set) var settingsOpened: [GraineCallPermission] = []
+    var setupProblems: [GraineCallSetupProblem] = []
+    func callPermissions() -> GraineCallPermissions { permissions }
+    func requestCallPermissions(_ done: @escaping (GraineCallPermissions) -> Void) {
+        permissionRequests += 1
+        if let after = permissionsAfterAsking { permissions = after }
+        done(permissions)
+    }
+    func openCallSettings(_ item: GraineCallPermission) -> Bool {
+        settingsOpened.append(item)
+        return true
+    }
+    func callSetupProblems() -> [GraineCallSetupProblem] { setupProblems }
 }
 
 /// A host core on the fake platform, with a store of its own and (by default) one sink listening.
@@ -1522,5 +1540,42 @@ private final class HostRig {
         #expect(rig.platform.configured.last?.agents["sales"]?.publishableKey == "pk_sales", "the device configures the other agents")
         _ = rig.core.startCall(["reason": "upgrade", "agent": "sales"])
         #expect(rig.platform.placedAgents == ["sales"])
+    }
+}
+
+@Suite struct CallsHostPermissionsTests {
+    @Test func thePermissionsReachABridgeAsWords() {
+        let rig = HostRig()
+        #expect(rig.core.callPermissions() as? [String: String] == ["microphone": "denied", "notifications": "notNeeded", "fullScreen": "notNeeded"])
+    }
+
+    @Test func askingAnswersThePermissionsAsTheyStandAfter() {
+        let rig = HostRig()
+        rig.platform.permissionsAfterAsking = GraineCallPermissions(microphone: .granted, notifications: .notNeeded, fullScreen: .notNeeded)
+        var answered: [String: Any]?
+        rig.core.requestCallPermissions { answered = $0 }
+        #expect(rig.platform.permissionRequests == 1)
+        #expect(answered?["microphone"] as? String == "granted")
+    }
+
+    @Test func settingsOpenForAKnownItemOnly() {
+        let rig = HostRig()
+        #expect(rig.core.openCallSettings("microphone"))
+        #expect(rig.core.openCallSettings("full_screen"), "the other spelling of fullScreen")
+        #expect(rig.core.openCallSettings("NOTIFICATIONS"))
+        #expect(!rig.core.openCallSettings("camera"))
+        #expect(!rig.core.openCallSettings(nil))
+        #expect(!rig.core.openCallSettings(42))
+        #expect(rig.platform.settingsOpened == [.microphone, .fullScreen, .notifications])
+    }
+
+    @Test func setupProblemsReachABridgeAsCodesAndSentences() {
+        let rig = HostRig()
+        #expect(rig.core.callSetupProblems().isEmpty)
+        rig.platform.setupProblems = [GraineCallSetupProblem(code: "background_voip_missing", message: "Add voip.")]
+        let problems = rig.core.callSetupProblems()
+        #expect(problems.count == 1)
+        #expect(problems.first?["code"] as? String == "background_voip_missing")
+        #expect(problems.first?["message"] as? String == "Add voip.")
     }
 }

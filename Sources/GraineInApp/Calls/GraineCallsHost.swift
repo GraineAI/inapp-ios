@@ -25,6 +25,9 @@ import UIKit
  * call's agent by name ("default" for the default one). The wrapper's actions
  * and variables reach every agent.
  *
+ * Permissions and setup: `callPermissions`, `requestCallPermissions`,
+ * `openCallSettings` and `callSetupProblems`, as JSON-safe maps.
+ *
  * Events: `state` (the snapshot, at most once per turn of the main loop),
  * `outcome`, `incoming`, `voipToken` and `action`. Main thread: a call from
  * another thread hops there first (`configure`, `restore`, `snapshot`,
@@ -110,6 +113,28 @@ public final class GraineCallsHost: NSObject {
 
     public func setSpeaker(_ on: Bool) {
         onMain { self.core.setSpeaker(on) }
+    }
+
+    // MARK: - Permissions and setup
+
+    /// The call permissions: `{microphone, notifications, fullScreen}`, each `granted`, `denied`, `blocked` or `notNeeded`. Readable before `configure`.
+    public func callPermissions() -> [String: Any] {
+        onMainSync { core.callPermissions() }
+    }
+
+    /// Ask for the call permissions the system can still ask for, when the app chooses; `done` gets them as they stand after, on the main thread.
+    public func requestCallPermissions(_ done: @escaping ([String: Any]) -> Void) {
+        onMain { self.core.requestCallPermissions(done) }
+    }
+
+    /// Open the Settings page for `microphone`, `notifications` or `fullScreen`: true when one was asked to open.
+    public func openCallSettings(_ item: String?) -> Bool {
+        onMainSync { core.openCallSettings(item) }
+    }
+
+    /// What the app's setup still lacks for calls: `[{code, message}]`, empty when nothing is missing (and before `configure`).
+    public func callSetupProblems() -> [[String: Any]] {
+        onMainSync { core.callSetupProblems() }
     }
 
     // MARK: - What the agent knows
@@ -376,6 +401,31 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
 
     func nextTurn(_ block: @escaping () -> Void) {
         DispatchQueue.main.async(execute: block)
+    }
+
+    func callPermissions() -> GraineCallPermissions {
+        calls?.callPermissions ?? GraineCalls.systemCallPermissions()
+    }
+
+    func requestCallPermissions(_ done: @escaping (GraineCallPermissions) -> Void) {
+        if let calls = calls {
+            calls.requestCallPermissions(completion: done)
+            return
+        }
+        // No instance yet: the system's microphone, asked the same way.
+        guard SystemMicPermission().permission == .undetermined else {
+            done(GraineCalls.systemCallPermissions())
+            return
+        }
+        GraineVoice.requestMic { _ in done(GraineCalls.systemCallPermissions()) }
+    }
+
+    func openCallSettings(_ item: GraineCallPermission) -> Bool {
+        GraineCalls.openSettings(item)
+    }
+
+    func callSetupProblems() -> [GraineCallSetupProblem] {
+        calls?.callSetupProblems ?? []
     }
 
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) {

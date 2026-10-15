@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.9.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.10.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -362,10 +362,59 @@ The system's own call screen shows the call's name and, unless you set
 `voice.start()` refuses while one is live. `endOnBackground` is `voice`'s
 setting; a native call keeps going in the background, as a phone call does.
 
+### Permissions and setup: what the SDK does, what your app adds
+
+**The SDK does by itself:** the CallKit provider and the PushKit registry,
+every VoIP push reported to CallKit as iOS requires, the call's audio session
+(voice processing, Bluetooth, the earpiece), the microphone asked for when a
+call starts without it, the VoIP token registered with Graine and every
+outcome reported — and a check of your setup at `configure`, each problem
+logged once as a warning (`Calls setup (code): …`, subsystem `ai.graine.inapp`)
+with the exact fix.
+
+**Your app adds** only what an SDK cannot add to an app: the Push
+Notifications capability, Background Modes *Audio* and *Voice over IP*, and
+`NSMicrophoneUsageDescription` (above); `calls.enableVoIPPushes()` at every
+launch; and, if you like, the microphone asked for at a moment you choose
+rather than at the first call:
+
+```swift
+// Onboarding, or a "Call me" screen — never needed at launch.
+let p = await calls.requestCallPermissions()
+// p.microphone: .granted · .denied (not asked yet) · .blocked (only Settings can change it)
+// p.notifications, p.fullScreen: .notNeeded — CallKit rings, and draws its own full screen
+if p.microphone == .blocked { calls.openCallSettings(.microphone) }   // the app's page in Settings
+```
+
+`calls.callPermissions` reads them at any time (again when the app returns to
+the foreground); `allGranted` is true when each is granted or not needed.
+`requestCallPermissions(completion:)` is the same with a completion handler.
+
+**What is still missing**, in plain words — the same list the log shows:
+
+```swift
+for problem in calls.callSetupProblems { print(problem.code, problem.message) }
+```
+
+| Code | What it means |
+| --- | --- |
+| `microphone_usage_missing` | No `NSMicrophoneUsageDescription`: iOS closes the app when a call asks for the microphone |
+| `background_audio_missing` | No `audio` background mode: a call goes silent when the screen locks |
+| `background_voip_missing` | No `voip` background mode: iOS does not wake the app for a ring |
+| `push_entitlement_missing` | The build is signed without Push Notifications (read from development and ad hoc builds) |
+| `voip_pushes_not_enabled` | `enableVoIPPushes()` not called 15 seconds after `configure`: calls can't ring |
+| `no_voip_token` | No VoIP token 15 seconds after `enableVoIPPushes()` (never reported on the simulator) |
+| `microphone_blocked` | Only Settings can let calls hear the customer |
+| `hosted_ringing_off` | Graine can't ring this phone: no push credentials uploaded for iOS |
+
+A problem is never an exception: calls still work where they can.
+Objective-C: `callPermissionsJSON`, `requestCallPermissionsJSONWithCompletion:`,
+`openCallSettings:` and `callSetupProblemsJSON` on `GraineObjCCalls`.
+
 **Frameworks**: the React Native (`@graineai/inapp-react-native-calls`) and
 Flutter (`graine_inapp`) packages carry these same calls and drive them
-through `GraineCallsHost`. In those apps, use the package's own API; the
-host is not called directly.
+through `GraineCallsHost` (permissions and the setup check included). In
+those apps, use the package's own API; the host is not called directly.
 
 ### Calls on WebRTC (optional)
 
@@ -376,7 +425,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.9.0")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.10.0")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

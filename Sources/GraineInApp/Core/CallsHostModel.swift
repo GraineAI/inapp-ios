@@ -323,6 +323,16 @@ enum CallsHostValues {
         return (reason, CallsHostValues.map(request["variables"]) ?? [:], agent)
     }
 
+    /**
+     * A call permission by its word: `microphone`, `notifications` or
+     * `fullScreen` (`full_screen` and any case too); nil for anything else.
+     */
+    static func permission(_ raw: Any?) -> GraineCallPermission? {
+        guard let word = text(raw)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let folded = word.replacingOccurrences(of: "_", with: "").lowercased()
+        return GraineCallPermission.allCases.first { $0.rawValue.lowercased() == folded }
+    }
+
     /// A scalar as text; nil when it is absent, null, blank or not a scalar.
     private static func text(_ raw: Any?) -> String? {
         guard let text = JSON.text(raw), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -799,6 +809,14 @@ protocol CallsHostPlatform: AnyObject {
     func nextTurn(_ block: @escaping () -> Void)
     /// Run `block` on the main loop after `seconds`.
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void)
+    /// The call permissions as the phone holds them (`GraineCalls.callPermissions`); readable before any instance.
+    func callPermissions() -> GraineCallPermissions
+    /// Ask for the call permissions the system can still ask for; `done` gets them after, on the main thread.
+    func requestCallPermissions(_ done: @escaping (GraineCallPermissions) -> Void)
+    /// Open the Settings page that changes `item`: true when one was asked to open.
+    func openCallSettings(_ item: GraineCallPermission) -> Bool
+    /// What the app's setup still lacks for calls (`GraineCalls.callSetupProblems`); none before there is an instance.
+    func callSetupProblems() -> [GraineCallSetupProblem]
 }
 
 extension CallsHostPlatform {
@@ -1122,6 +1140,29 @@ final class CallsHostCore {
             outcome, callId: callId, agent: platform.agentName(forCall: callId), hosted: current && platform.callHosted, durationSeconds: seconds
         ))
         changed()
+    }
+
+    // MARK: Permissions and setup
+
+    /// `{microphone, notifications, fullScreen}`, each `granted`, `denied`, `blocked` or `notNeeded`.
+    func callPermissions() -> [String: Any] {
+        platform.callPermissions().fields
+    }
+
+    /// Ask for what the system can still ask for, then answer the permissions as they stand. Never at launch on its own: the app chooses when.
+    func requestCallPermissions(_ done: @escaping ([String: Any]) -> Void) {
+        platform.requestCallPermissions { done($0.fields) }
+    }
+
+    /// The Settings page for `microphone`, `notifications` or `fullScreen`: true when one was asked to open, false for any other word.
+    func openCallSettings(_ raw: Any?) -> Bool {
+        guard let item = CallsHostValues.permission(raw) else { return false }
+        return platform.openCallSettings(item)
+    }
+
+    /// `[{code, message}]`: what the app's setup still lacks for calls, in plain words with the fix.
+    func callSetupProblems() -> [[String: Any]] {
+        platform.callSetupProblems().map(\.fields)
     }
 
     /// The app came to the foreground: a call answered on the lock screen gets its screen now.

@@ -1,4 +1,4 @@
 /// The SDK's version, sent nowhere secret — it lands on the call record to tell builds apart.
 public enum GraineVersion {
-    public static let name = "0.9.0"
+    public static let name = "0.10.0"
 }

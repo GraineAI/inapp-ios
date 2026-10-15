@@ -47,6 +47,7 @@ import Testing
                 "setMuted:", "setSpeaker:", "callBack", "dismissMissedCall", "state", "endReason", "callId", "callerName",
                 "direction", "muted", "speakerOn", "agentSpeaking", "hosted", "agent", "showsCallScreen", "snapshotJSON",
                 "addListener:", "removeListener:", "observe:", "observeOutcomes:", "observeIncoming:",
+                "callPermissionsJSON", "requestCallPermissionsJSONWithCompletion:", "openCallSettings:", "callSetupProblemsJSON",
             ], []),
             "GraineObjCVoice": ([
                 "attach", "start", "end", "setMuted:", "connected", "connecting", "muted", "snapshotJSON", "observe:",

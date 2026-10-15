@@ -195,6 +195,47 @@ public final class GraineObjCCalls: NSObject {
         #endif
     }
 
+    // MARK: Permissions and setup
+
+    /// The call permissions as JSON `{microphone, notifications, fullScreen}`, each `granted`, `denied`, `blocked` or `notNeeded` (`GraineCalls.callPermissions`).
+    @objc public var callPermissionsJSON: String {
+        #if os(iOS)
+        return ObjCBridge.text(objcOnMainSync { graine.calls.callPermissions.fields })
+        #else
+        return ObjCBridge.text(GraineCallPermissions(microphone: .notNeeded, notifications: .notNeeded, fullScreen: .notNeeded).fields)
+        #endif
+    }
+
+    /// Ask for the call permissions the system can still ask for (`GraineCalls.requestCallPermissions`); `completion` gets them as `callPermissionsJSON` has them, on the main thread.
+    @objc(requestCallPermissionsJSONWithCompletion:)
+    public func requestCallPermissionsJSON(completion: @escaping (String) -> Void) {
+        #if os(iOS)
+        graine.calls.requestCallPermissions { completion(ObjCBridge.text($0.fields)) }
+        #else
+        completion(callPermissionsJSON)
+        #endif
+    }
+
+    /// Open the Settings page for `microphone`, `notifications` or `fullScreen`: YES when one was asked to open.
+    @objc(openCallSettings:)
+    public func openCallSettings(_ item: String) -> Bool {
+        #if os(iOS)
+        guard let permission = CallsHostValues.permission(item) else { return false }
+        return graine.calls.openCallSettings(permission)
+        #else
+        return false
+        #endif
+    }
+
+    /// What the app's setup still lacks for calls, as JSON `[{code, message}]` (`GraineCalls.callSetupProblems`); `[]` when nothing is missing.
+    @objc public var callSetupProblemsJSON: String {
+        #if os(iOS)
+        return ObjCBridge.text(graine.calls.callSetupProblems.map(\.fields))
+        #else
+        return "[]"
+        #endif
+    }
+
     // MARK: The state
 
     /// `idle`, `ringing`, `connecting`, `active` or `ended`.

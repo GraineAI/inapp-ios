@@ -81,7 +81,11 @@ public extension GraineCallsListener {
  * One call at a time; a push while a call is live is reported and missed.
  * Starting a call ends any call the web view engine (`voice`) holds. Placing
  * or answering a call asks for the microphone if the app does not hold it; a
- * call that does not get it ends `failed`.
+ * call that does not get it ends `failed`. `requestCallPermissions()` asks
+ * earlier, when the app chooses (onboarding); `callPermissions` reads them;
+ * `openCallSettings(_:)` opens Settings. `callSetupProblems` says what the
+ * app's setup still lacks — an Info.plist entry, a background mode, the push
+ * registration — and each one is logged once, with its fix.
  * `ObservableObject`: draw your own screen from `state`, `muted`, `speakerOn`,
  * `agentSpeaking` and `caption`, or present `GraineCallView`. Main thread.
  */
@@ -153,6 +157,13 @@ public final class GraineCalls: NSObject, ObservableObject {
     private let micPermission: MicPermissionSource
     /// The device's VoIP token, hex, once PushKit has given it.
     private var voipToken: String?
+    /// The setup self-check's clock: when `configure` first ran, and when VoIP pushes were enabled.
+    private var configuredAt: Date?
+    private var voipEnabledAt: Date?
+    /// The app runs a PKPushRegistry of its own and hands its token over (`voipTokenUpdated`).
+    private var ownPushRegistry = false
+    /// Each setup problem is logged once a launch.
+    private var setupLog = CallSetup.LogOnce()
     /// Calls Graine rang (`hosted: "1"`), and the agent each belongs to: their outcomes go back to that agent's workspace.
     private var hostedCalls: [String: GraineInApp] = [:]
     /// The agent the current call is with: its key, its variables, its actions, its design.
@@ -247,6 +258,7 @@ public final class GraineCalls: NSObject, ObservableObject {
         onMain {
             self.config = config
             self.provider?.configuration = self.providerConfiguration(for: self.callAgent ?? self.graine)
+            self.startSetupCheck()
         }
     }
 
@@ -270,6 +282,7 @@ public final class GraineCalls: NSObject, ObservableObject {
     public func enableVoIPPushes(onToken: ((String?) -> Void)? = nil) {
         onMain {
             self.onToken = onToken
+            self.voipPushesEnabled()
             _ = self.ensureProvider()
             let registry = self.registry ?? PKPushRegistry(queue: .main)
             registry.delegate = self
@@ -466,7 +479,11 @@ public final class GraineCalls: NSObject, ObservableObject {
      * Graine. Only for an app that runs its own registry.
      */
     public func voipTokenUpdated(_ token: String?) {
-        onMain { self.tokenArrived(token) }
+        onMain {
+            self.ownPushRegistry = true
+            self.voipPushesEnabled()
+            self.tokenArrived(token)
+        }
     }
 
     /// Answer the ringing call from your own screen (the system's call screen answers by itself).
@@ -541,6 +558,135 @@ public final class GraineCalls: NSObject, ObservableObject {
         onMain {
             if self.missedCall != nil { self.missedCall = nil }
         }
+    }
+
+    // MARK: - Permissions and setup
+
+    /**
+     * The call permissions as the phone holds them now: the microphone
+     * (`granted`, `denied` — not asked yet — or `blocked`, which only Settings
+     * can change); notifications and the full-screen ring are `notNeeded` on
+     * iOS, where CallKit rings. Read it again when the app returns to the
+     * foreground: the customer may have changed Settings.
+     */
+    public var callPermissions: GraineCallPermissions {
+        CallSetup.permissions(microphone: micPermission.permission)
+    }
+
+    /**
+     * Ask for the call permissions the system can still ask for — on iOS the
+     * microphone, once — at a moment the app chooses (onboarding, a "Call me"
+     * screen). The SDK never asks on its own at launch; a call that starts
+     * without the microphone still asks then. `completion` gets the
+     * permissions as they stand after, on the main thread.
+     */
+    public func requestCallPermissions(completion: @escaping (GraineCallPermissions) -> Void) {
+        onMain {
+            guard self.micPermission.permission == .undetermined else {
+                completion(self.callPermissions)
+                return
+            }
+            self.micPermission.request { _ in completion(self.callPermissions) }
+        }
+    }
+
+    /// `requestCallPermissions(completion:)`, awaited.
+    public func requestCallPermissions() async -> GraineCallPermissions {
+        await withCheckedContinuation { done in
+            requestCallPermissions { done.resume(returning: $0) }
+        }
+    }
+
+    /**
+     * Open the Settings page that changes `item` — the app's own page, where
+     * the microphone is switched on. True when Settings was asked to open.
+     */
+    @discardableResult
+    public func openCallSettings(_ item: GraineCallPermission) -> Bool {
+        guard Thread.isMainThread else {
+            var opened = false
+            DispatchQueue.main.sync { opened = self.openCallSettings(item) }
+            return opened
+        }
+        return GraineCalls.openSettings(item)
+    }
+
+    /**
+     * What the app's setup still lacks for calls, read now: each a stable
+     * `code` and a sentence with the exact fix — `NSMicrophoneUsageDescription`
+     * or a background mode missing from Info.plist, no push entitlement (where
+     * the build shows it), `enableVoIPPushes()` never called or no VoIP token
+     * 15 seconds on, the microphone blocked, or Graine not ringing this phone.
+     * Empty when nothing is missing. Calls still work where they can.
+     */
+    public var callSetupProblems: [GraineCallSetupProblem] {
+        guard Thread.isMainThread else {
+            var problems: [GraineCallSetupProblem] = []
+            DispatchQueue.main.sync { problems = self.callSetupProblems }
+            return problems
+        }
+        return CallSetup.problems(setupFacts())
+    }
+
+    /// The first `configure` starts the self-check: what is missing now is logged now, and what is still missing once the push registration has had its time.
+    private func startSetupCheck() {
+        guard configuredAt == nil else { return }
+        configuredAt = Date()
+        logSetupProblems()
+        logSetupProblems(after: CallSetup.settleSeconds)
+    }
+
+    private func voipPushesEnabled() {
+        guard voipEnabledAt == nil else { return }
+        voipEnabledAt = Date()
+        logSetupProblems(after: CallSetup.settleSeconds)
+    }
+
+    /// Each problem not yet said this launch, as a warning with its fix. Nothing before `configure`.
+    private func logSetupProblems(after seconds: TimeInterval? = nil) {
+        if let seconds = seconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.5) { [weak self] in self?.logSetupProblems() }
+            return
+        }
+        guard configuredAt != nil else { return }
+        for problem in setupLog.fresh(callSetupProblems) {
+            GraineLog.warning("Calls setup (\(problem.code)): \(problem.message)")
+        }
+    }
+
+    private func setupFacts() -> CallSetupFacts {
+        let now = Date()
+        var facts = CallSetupFacts()
+        facts.info = Bundle.main.infoDictionary ?? [:]
+        facts.pushEntitlement = GraineCalls.pushEntitlement
+        facts.voipPushesEnabled = registry != nil || ownPushRegistry
+        facts.hasVoipToken = voipToken != nil
+        facts.secondsSinceConfigure = configuredAt.map { now.timeIntervalSince($0) }
+        facts.secondsSinceVoipEnabled = voipEnabledAt.map { now.timeIntervalSince($0) }
+        #if targetEnvironment(simulator)
+        facts.simulator = true
+        #endif
+        facts.microphone = CallSetup.microphone(micPermission.permission)
+        facts.hostedRinging = CallSetup.hostedRinging(graine.peers.compactMap { $0.sessionOrCached }.map { $0.calls })
+        return facts
+    }
+
+    /// The push entitlement as the build's embedded profile shows it, read once.
+    static let pushEntitlement: CallSetup.PushEntitlement = {
+        let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+        return CallSetup.pushEntitlement(provisioningProfile: url.flatMap { try? Data(contentsOf: $0) })
+    }()
+
+    /// The call permissions with no instance yet: the system's microphone.
+    static func systemCallPermissions() -> GraineCallPermissions {
+        CallSetup.permissions(microphone: SystemMicPermission().permission)
+    }
+
+    /// The app's page in Settings: the microphone's switch is there (and its notifications', for an app that posts any). Main thread.
+    static func openSettings(_ item: GraineCallPermission) -> Bool {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return false }
+        UIApplication.shared.open(url)
+        return true
     }
 
     // MARK: - The conversation
@@ -987,6 +1133,8 @@ extension GraineCalls {
     fileprivate func sessionArrived() {
         provider?.configuration = providerConfiguration(for: callAgent ?? graine)
         registerDevice()
+        // Whether Graine rings this phone is known now.
+        logSetupProblems()
     }
 
     /// A token from PushKit (or the app's own registry): to the app, and to every agent whose workspace rings it.

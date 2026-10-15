@@ -129,7 +129,7 @@ enum ApnsEnvironment {
     }
 
     /// The XML property list a CMS-signed profile wraps.
-    private static func plistInside(_ data: Data) -> Data? {
+    static func plistInside(_ data: Data) -> Data? {
         guard let start = data.range(of: Data("<?xml".utf8)),
               let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex) else { return nil }
         return data.subdata(in: start.lowerBound..<end.upperBound)
