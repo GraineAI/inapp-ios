@@ -1,3 +1,7 @@
+## 0.10.1
+
+- No change on iOS: released beside Android 0.10.1, whose SDK registers for pushes itself, to keep every SDK on one version.
+
 ## 0.10.0
 
 - **Call permissions, asked when the app chooses.** `calls.requestCallPermissions()` (async, or `requestCallPermissions(completion:)`) asks for the microphone once, at a moment the app chooses — never on its own at launch; a call that starts without it still asks then. `calls.callPermissions` reads them: the microphone `.granted`, `.denied` (not asked yet) or `.blocked` (only Settings can change it); notifications and the full-screen ring `.notNeeded` — CallKit rings and draws its own screen. `allGranted`, and `openCallSettings(_:)` for the app's page in Settings. Types: `GraineCallPermission`, `GraineCallPermissionStatus` (`isSatisfied`), `GraineCallPermissions`.
