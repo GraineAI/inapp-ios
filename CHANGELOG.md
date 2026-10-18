@@ -1,3 +1,7 @@
+## 0.10.2
+
+- **A WebRTC call the server acknowledges but never answers is dialled again after 3 seconds.** The engine used to wait out the whole 12-second WebRTC attempt for such a call — a long *Connecting…*, then the call continued without WebRTC — because its 15-second answer ceiling could never fire inside that budget. Now, 3 s after the server's first reply with no answer, the stuck dial is cancelled and made once more on a fresh connection (what a second tap did by hand); a second stuck dial continues on the standard connection, with `transportFallbackReason` `no_answer`. Nothing to change in your app. The fix is in `GraineInAppRTC`: update it beside `GraineInApp`, both to 0.10.2.
+
 ## 0.10.1
 
 - No change on iOS: released beside Android 0.10.1, whose SDK registers for pushes itself, to keep every SDK on one version.
