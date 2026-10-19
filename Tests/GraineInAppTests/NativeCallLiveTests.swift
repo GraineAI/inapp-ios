@@ -369,6 +369,7 @@ final class LiveLog {
             }
         case .format(let f): formatValue = f
         case .ended(let e): endingValue = e
+        case .reconnecting, .level: break
         }
     }
 

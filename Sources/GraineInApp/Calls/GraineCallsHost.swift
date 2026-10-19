@@ -389,6 +389,7 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             muted: calls.muted,
             speakerOn: calls.speakerOn,
             agentSpeaking: calls.agentSpeaking,
+            reconnecting: calls.isReconnecting,
             caption: calls.caption,
             connectedAt: calls.connectedAt,
             agent: calls.agent,

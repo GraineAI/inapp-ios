@@ -264,6 +264,8 @@ public final class GraineObjCCalls: NSObject {
     @objc public var muted: Bool { snapshot()["muted"] as? Bool ?? false }
     @objc public var speakerOn: Bool { snapshot()["speakerOn"] as? Bool ?? false }
     @objc public var agentSpeaking: Bool { snapshot()["agentSpeaking"] as? Bool ?? false }
+    /// The connected call is bringing its lost connection back (WebRTC only; the WebSocket never reconnects).
+    @objc public var reconnecting: Bool { snapshot()["reconnecting"] as? Bool ?? false }
     @objc public var hosted: Bool { snapshot()["hosted"] as? Bool ?? false }
     /// The agent the call is with, by name (`default` for the default agent): the one a call was placed with, or a ring routed to. Nil with no call.
     @objc public var agent: String? { snapshot()["agent"] as? String }
@@ -281,7 +283,7 @@ public final class GraineObjCCalls: NSObject {
         objcOnMainSync {
             var o: [String: Any] = [
                 "state": "idle", "endReason": NSNull(), "callId": NSNull(), "callerName": "", "direction": NSNull(),
-                "hosted": false, "muted": false, "speakerOn": false, "agentSpeaking": false, "showsCallScreen": false,
+                "hosted": false, "muted": false, "speakerOn": false, "agentSpeaking": false, "reconnecting": false, "showsCallScreen": false,
                 "agent": NSNull(), "transport": NSNull(), "transportFallbackReason": NSNull(),
             ]
             #if os(iOS)
@@ -296,6 +298,7 @@ public final class GraineObjCCalls: NSObject {
             o["muted"] = c.muted
             o["speakerOn"] = c.speakerOn
             o["agentSpeaking"] = c.agentSpeaking
+            o["reconnecting"] = c.isReconnecting
             o["showsCallScreen"] = c.showsCallScreen
             o["agent"] = c.agent ?? NSNull()
             o["transport"] = c.transport?.rawValue ?? NSNull()

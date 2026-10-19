@@ -16,7 +16,9 @@ import Foundation
  *                   socket in the same system call: no second ring, the
  *                   customer sees "Connecting…" a moment longer. The reason is
  *                   kept for the call screen and the log
- *   after media     never: a call that dropped has dropped
+ *   after media     never: a call that dropped has dropped. While WebRTC
+ *                   brings a lost media path back, the call is `reconnecting`
+ *                   (the voice socket never is: one socket, the whole call)
  *
  * On WebRTC the audio is RTP; captions, the agent's actions and the screen
  * travel the control channel as the voice socket's own frames, and are
@@ -55,6 +57,7 @@ final class CallConversation {
     private var rtcAudioWatch: CallAudioWatch?
     private var spokenTurn = ""
     private var speaking = false
+    private var reconnecting = false
     private var timers: [Int: CallTimer] = [:]
     private var nextTimerId = 0
     /// When the customer tapped (or answered), on the scheduler's clock: the analytics rows count from it.
@@ -308,6 +311,15 @@ final class CallConversation {
         case .speaking(let value):
             setSpeaking(value)
 
+        case .reconnecting(let value):
+            // Only after media: a path that never connected falls back to the socket instead.
+            guard rtcConnected else { return }
+            setReconnecting(value)
+
+        case .level(let value):
+            guard rtcConnected else { return }
+            onEvent(.level(value))
+
         case .control(let text):
             control(text)
 
@@ -423,6 +435,12 @@ final class CallConversation {
         onEvent(.speaking(value))
     }
 
+    private func setReconnecting(_ value: Bool) {
+        guard reconnecting != value else { return }
+        reconnecting = value
+        onEvent(.reconnecting(value))
+    }
+
     private func closeSpokenTurn() {
         if !spokenTurn.isEmpty {
             onEvent(.caption(GraineCaption(role: .agent, text: spokenTurn, live: false)))
@@ -445,6 +463,8 @@ final class CallConversation {
             call.hangUp()
         }
         setSpeaking(false)
+        // A call that ends while reconnecting is reconnecting no more: said before its end.
+        setReconnecting(false)
         closeSpokenTurn()
         onEvent(.ended(ending))
     }

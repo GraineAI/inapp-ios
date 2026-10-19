@@ -512,11 +512,12 @@ enum DesignTokens {
     static func parse(_ raw: Any?, scheme: String) -> GraineThemeTokens? {
         guard let t = JSON.unwrap(raw) as? [String: Any] else { return nil }
         guard let colors = self.colors(t["colors"]) else { return nil }
+        let typography = font(t["font"])
         return GraineThemeTokens(
             preset: JSON.nonEmpty(t["preset"]) ?? "",
             scheme: scheme,
             colors: colors,
-            font: font(t["font"]),
+            font: typography,
             shape: shape(t["shape"]),
             spacing: spacing(t["spacing"]),
             elevation: elevation(t["elevation"]),
@@ -527,7 +528,8 @@ enum DesignTokens {
             // Absent (an older server) or a kind of frame this build does not know: a plain surface.
             chrome: GraineDesignChrome(rawValue: word(t["chrome"])) ?? .none,
             chat: SurfaceTokens.chat(t["chat"], colors: colors),
-            call: SurfaceTokens.call(t["call"])
+            // The call screen's look leaves the name's and status line's weights to the scheme's type when a server predates it.
+            call: SurfaceTokens.call(t["call"], font: typography)
         )
     }
 

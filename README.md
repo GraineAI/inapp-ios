@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.11.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.12.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -345,10 +345,12 @@ func onCallState(_ state: GraineCallState, callId: String?) {}
 
 In the call: `calls.end()`, `setMuted(_:)`, `setSpeaker(_:)` (earpiece by
 default) and `answer()`. `GraineCalls` is an `ObservableObject` — `state`,
-`callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `caption`,
-`transcript`, `connectedAt`, `hosted` — and `GraineCallView()` is a ready call
-screen for while your app is open, drawn in the brand's design (Web components →
-Design → Call screen): every state — ringing ("Scheduled call" for a call
+`callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `agentLevel`
+(the agent's voice level, 0–1), `isReconnecting` (a WebRTC call getting its
+connection back), `caption`, `transcript`, `connectedAt`, `hosted` — and
+`GraineCallView()` is a ready call screen for while your app is open, drawn in
+the brand's design (Web components → Design → Call screen): every state —
+ringing ("Scheduled call" for a call
 Graine rang for a booking), connecting, the call, ended, and a missed ring,
 which stays as "Missed call" with Call back (`calls.callBack()`) and Close
 (`calls.dismissMissedCall()`):
@@ -425,7 +427,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.11.0")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.12.0")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

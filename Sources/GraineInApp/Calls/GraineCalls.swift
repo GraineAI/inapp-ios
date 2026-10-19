@@ -54,12 +54,20 @@ public protocol GraineCallsListener: AnyObject {
     func onCallState(_ state: GraineCallState, callId: String?)
     /// What became of a call: answered, declined, missed, ended (local, remote, failed) or failed. Tell your server.
     func onCallOutcome(_ outcome: GraineCallOutcome, callId: String)
+    /**
+     * The connected call lost its connection and is bringing it back (true),
+     * or has it back (false) — `isReconnecting`. Only after the call
+     * connected, and false again before it ends. A call on WebRTC can
+     * reconnect; one on the WebSocket never does.
+     */
+    func onCallReconnecting(_ reconnecting: Bool)
 }
 
 public extension GraineCallsListener {
     func onIncomingCall(_ call: GraineIncomingCall) {}
     func onCallState(_ state: GraineCallState, callId: String?) {}
     func onCallOutcome(_ outcome: GraineCallOutcome, callId: String) {}
+    func onCallReconnecting(_ reconnecting: Bool) {}
 }
 
 /**
@@ -87,7 +95,8 @@ public extension GraineCallsListener {
  * app's setup still lacks — an Info.plist entry, a background mode, the push
  * registration — and each one is logged once, with its fix.
  * `ObservableObject`: draw your own screen from `state`, `muted`, `speakerOn`,
- * `agentSpeaking` and `caption`, or present `GraineCallView`. Main thread.
+ * `agentSpeaking`, `agentLevel`, `isReconnecting` and `caption`, or present
+ * `GraineCallView`. Main thread.
  */
 public final class GraineCalls: NSObject, ObservableObject {
     // MARK: - State
@@ -103,6 +112,20 @@ public final class GraineCalls: NSObject, ObservableObject {
     @Published public private(set) var speakerOn = false
     /// The agent's voice is playing — from the audio itself, not from the agent's text.
     @Published public private(set) var agentSpeaking = false
+    /**
+     * How loud the agent's voice is as it is heard, 0–1: measured from the
+     * call's audio on either transport, eased (up over 60 ms, down over 240)
+     * and updated about ten times a second while it moves. 0 at idle. For a
+     * visualiser: `GraineCallView` draws it.
+     */
+    @Published public private(set) var agentLevel: Double = 0
+    /**
+     * The connected call lost its connection and is bringing it back: its
+     * audio is not flowing. Only after the call connected; false again before
+     * it ends (`onCallReconnecting`). A call on WebRTC can reconnect; one on
+     * the WebSocket never does — losing its socket ends the call.
+     */
+    @Published public private(set) var isReconnecting = false
     /// The latest line: the agent's words as they are said, or the customer's as they are heard.
     @Published public private(set) var caption: GraineCaption?
     /// When the conversation opened; nil before.
@@ -150,6 +173,10 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var engine: CallConversation?
     private var ringItem: DispatchWorkItem?
     private var settleItem: DispatchWorkItem?
+    /// `agentLevel`, eased toward each level the call reports (Core/AgentLevel.swift), and its next step.
+    private var levelEasing = AgentLevelEasing()
+    private var levelItem: DispatchWorkItem?
+    private var levelSteppedAt: TimeInterval?
     private var unwatchContext: (() -> Void)?
     private var routeObserver: NSObjectProtocol?
     private var audioActive = false
@@ -799,6 +826,13 @@ public final class GraineCalls: NSObject, ObservableObject {
             audioWatch.opened(audioRunning: audioActive)
         case .speaking(let value):
             if agentSpeaking != value { agentSpeaking = value }
+        case .reconnecting(let value):
+            // Only for a call still under way; its end clears it (`transition`).
+            guard machine.state.isLive || !value else { return }
+            setReconnecting(value)
+        case .level(let value):
+            guard machine.state.isLive else { return }
+            heardLevel(value)
         case .caption(let line):
             caption = line
             transcript = CaptionLog.fold(transcript, line)
@@ -823,6 +857,45 @@ public final class GraineCalls: NSObject, ObservableObject {
             }
         }
     }
+
+    private func setReconnecting(_ value: Bool) {
+        guard isReconnecting != value else { return }
+        isReconnecting = value
+        if graine.config.debug { GraineLog.trace(value ? "call: reconnecting" : "call: reconnected") }
+        notifyListeners { $0.onCallReconnecting(value) }
+    }
+
+    /// A level from the call: `agentLevel` follows it, a step every 100 ms until it gets there.
+    private func heardLevel(_ level: Double) {
+        levelEasing.hear(level)
+        guard levelItem == nil, !levelEasing.settled else { return }
+        levelSteppedAt = ProcessInfo.processInfo.systemUptime - AgentLevelEasing.stepSeconds
+        stepLevel()
+    }
+
+    private func stepLevel() {
+        levelItem = nil
+        let now = ProcessInfo.processInfo.systemUptime
+        let value = levelEasing.step(dtMs: (now - (levelSteppedAt ?? now)) * 1_000)
+        levelSteppedAt = now
+        if agentLevel != value { agentLevel = value }
+        guard !levelEasing.settled else { return }
+        let item = DispatchWorkItem { [weak self] in self?.stepLevel() }
+        levelItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + AgentLevelEasing.stepSeconds, execute: item)
+    }
+
+    /// The call is over: the voice is silent and its level forgotten.
+    private func resetLevel() {
+        levelItem?.cancel()
+        levelItem = nil
+        levelSteppedAt = nil
+        levelEasing.reset()
+        if agentLevel != 0 { agentLevel = 0 }
+    }
+
+    /// Whether a level has arrived on this call: until one does, a call screen moves with `agentSpeaking`.
+    var agentLevelHeard: Bool { levelEasing.heard }
 
     private func audioFailed(_ message: String, uuid: UUID) {
         guard callUUID == uuid, machine.state.isLive else { return }
@@ -896,6 +969,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             missedItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + CallScreen.missedHoldSeconds, execute: item)
         }
+        // A call that ends while reconnecting is reconnecting no more — said before its end is.
+        if case .ended = t.state, isReconnecting { setReconnecting(false) }
         if state != t.state { state = t.state }
         // Every agent's assistant steps aside while a native call is live.
         for agent in graine.peers { agent.nativeCallLive = t.state.isLive }
@@ -928,6 +1003,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         unwatchContext?()
         unwatchContext = nil
         if agentSpeaking { agentSpeaking = false }
+        setReconnecting(false)
+        resetLevel()
         if !audioActive { restoreAudioSession() }
     }
 

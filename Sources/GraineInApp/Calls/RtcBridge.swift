@@ -81,6 +81,14 @@ import Foundation
     case connected
     /// The agent's voice is (or stopped being) audible, from the incoming audio level.
     case speaking(Bool)
+    /**
+     * The media path, up before, was lost and is being brought back (true) —
+     * the call screen's "Reconnecting" — or it is back (false). Never before
+     * the media flowed; false again before the call's end.
+     */
+    case reconnecting(Bool)
+    /// The agent's voice level, 0–1 — what the receiver plays out — five times a second while the call is live.
+    case level(Double)
     /// A control-channel frame — a caption, an action, a component — exactly as it arrived.
     case control(String)
     /// WebRTC cannot carry this call, and nothing has been heard yet: the core carries it on the socket.

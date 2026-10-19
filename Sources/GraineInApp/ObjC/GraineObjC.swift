@@ -250,10 +250,40 @@ enum ObjCBridge {
                 "statusText": [
                     "ringing": call.statusText.ringing, "connecting": call.statusText.connecting, "ended": call.statusText.ended,
                     "scheduled": call.statusText.scheduled, "missed": call.statusText.missed,
+                    "outgoing": call.statusText.outgoing, "reconnecting": call.statusText.reconnecting,
                 ],
             ] as [String: Any]
+            // The look (contract/DESIGN.md "Call screen" → "The look"), as the session spelled it.
+            var look = callLook(call.look, number: n)
+            look.merge([
+                "preset": call.preset, "layout": call.layout, "avatarSize": n(call.avatarSize), "rings": call.rings,
+                "buttonStyle": call.buttonStyle, "buttonShape": call.buttonShape, "buttonSize": n(call.buttonSize),
+                "buttonLabels": call.buttonLabels, "visualizer": call.visualizer, "visualizerSensitivity": n(call.visualizerSensitivity),
+                "captionStyle": call.captionStyle, "captionPosition": call.captionPosition,
+                "nameSize": n(call.nameSize), "nameWeight": call.nameWeight, "statusSize": n(call.statusSize), "statusWeight": call.statusWeight,
+                "states": call.states.mapValues { callLook($0, number: n) as Any },
+            ]) { _, new in new }
+            o["call"] = (o["call"] as? [String: Any] ?? [:]).merging(look) { old, _ in old }
         }
         return o
+    }
+
+    /// One moment's look as a dictionary, the session's spelling.
+    static func callLook(_ l: GraineCallLook, number n: (Double) -> Any) -> [String: Any] {
+        func action(_ a: GraineCallLook.Action) -> [String: Any] {
+            ["fill": a.fill, "fillAlpha": n(a.fillAlpha), "icon": a.icon, "stroke": a.stroke.map { $0 as Any } ?? NSNull(),
+             "activeFill": a.activeFill, "activeIcon": a.activeIcon]
+        }
+        let names = ["answer", "decline", "end", "callback", "mute", "speaker", "chat", "close"]
+        return [
+            "backdrop": [
+                "type": l.backdrop.type, "stops": l.backdrop.stops.map { ["color": $0.color, "at": n($0.at)] as [String: Any] },
+                "angle": n(l.backdrop.angle), "motion": l.backdrop.motion, "intensity": n(l.backdrop.intensity), "scrim": n(l.backdrop.scrim),
+            ] as [String: Any],
+            "ink": l.ink, "text": l.text, "textMuted": l.textMuted, "avatarRingColor": l.avatarRingColor,
+            "actions": Dictionary(uniqueKeysWithValues: names.map { ($0, action(l.actions[$0]) as Any) }),
+            "visualizerColor": l.visualizerColor, "captionFill": l.captionFill, "captionFillAlpha": n(l.captionFillAlpha),
+        ]
     }
 
     static func callState(_ s: GraineCallState) -> (word: String, endReason: String?) {

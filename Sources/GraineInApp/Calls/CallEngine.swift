@@ -15,6 +15,12 @@ import Foundation
  *   CallScheduler  the clock, the timers and the one queue the engine runs on
  *
  * The wire protocol is sdk/NATIVE-CALLS.md, verified against production.
+ *
+ * One socket carries the whole call: a close or a failure once it is open
+ * ends the call (`dropped`), and nothing reconnects inside it — so this
+ * engine never reports `reconnecting`; that moment is WebRTC's alone
+ * (CallConversation). The agent's voice level is measured here, from the
+ * audio decoded for the speaker (HeardLevels), and reported as it is heard.
  */
 
 /// The microphone and the speaker, for one call.
@@ -142,6 +148,14 @@ final class CallEngine {
     enum Event {
         case opened(Transport)
         case speaking(Bool)
+        /**
+         * The call's media path, up before, is being brought back (true) or is
+         * back (false). WebRTC's only (CallConversation): this engine's socket
+         * is never reconnected inside a call.
+         */
+        case reconnecting(Bool)
+        /// The agent's voice level, 0–1, as it is heard: about ten a second while it plays, 0 once it has played out.
+        case level(Double)
         case caption(GraineCaption)
         /// What the agent's audio turned out to be, once known.
         case format(AgentAudioFormat)
@@ -198,6 +212,11 @@ final class CallEngine {
     /// When the agent audio received so far is due to have been heard (AgentSpeech.audible).
     private var audibleUntil: Double?
     private var speaking = false
+    /// The agent's voice level as it will be heard — each window of decoded audio, due when it plays.
+    private var heard = HeardLevels()
+    private var levelTimer: CallTimer?
+    /// The level last reported; 0 is reported once when the voice has played out.
+    private var levelShown = 0.0
     private var bargedIn = false
     private var muted = false
     /// The spoken turn's words so far, for joining its phrases.
@@ -578,6 +597,7 @@ final class CallEngine {
 
         case .clear:
             audio.clear()
+            levelsCleared()
             speakingTimer?.cancel()
             speakingTimer = nil
             setSpeaking(false)
@@ -615,7 +635,12 @@ final class CallEngine {
             latched = latch
             onEvent(.format(latch))
         }
+        // It starts to be heard when what the speaker already holds has played. Digital silence is
+        // silent whatever it was decoded as (mu-law reads it as a full-scale DC step, which is not heard).
+        let startsAt = scheduler.now + audio.bufferedSeconds()
         audio.play(decoded.pcm16, sampleRate: decoded.sampleRate)
+        heard.add(decoded.pcm16, sampleRate: decoded.sampleRate, startsAt: startsAt, silent: !bytes.contains { $0 != 0 })
+        levelsDue()
         sendVoiceRow(AgentAudioFormat(kind: decoded.kind, sampleRate: decoded.sampleRate))
         audibleUntil = scheduler.now + audio.bufferedSeconds()
     }
@@ -643,6 +668,42 @@ final class CallEngine {
         // A new agent turn may be barged into once.
         if !value { bargedIn = false }
         onEvent(.speaking(value))
+    }
+
+    /**
+     * THE VOICE LEVEL, AS IT IS HEARD: every HeardLevels.windowSeconds while
+     * any is queued, the level of the window playing now; once the voice has
+     * played out, 0, and the ticks stop — a quiet call schedules nothing.
+     */
+    private func levelsDue() {
+        guard levelTimer == nil else { return }
+        levelTimer = scheduler.after(0) { [weak self] in self?.levelTick() }
+    }
+
+    private func levelTick() {
+        levelTimer = nil
+        guard phase == .open else { return }
+        let due = heard.due(scheduler.now)
+        // Silence while silent says nothing new: no report.
+        if let level = due, level > 0 || levelShown > 0 {
+            reportLevel(level)
+        } else if due == nil, heard.isEmpty, levelShown > 0 {
+            reportLevel(0)
+        }
+        if !heard.isEmpty || levelShown > 0 {
+            levelTimer = scheduler.after(HeardLevels.windowSeconds) { [weak self] in self?.levelTick() }
+        }
+    }
+
+    /// What was queued will not be heard (the customer interrupted): its levels go, and the voice is silent now.
+    private func levelsCleared() {
+        heard.clear()
+        if levelShown > 0 { reportLevel(0) }
+    }
+
+    private func reportLevel(_ level: Double) {
+        levelShown = level
+        onEvent(.level(level))
     }
 
     /// The spoken turn is over: its caption settles and the next phrase starts a new one.
@@ -712,10 +773,13 @@ final class CallEngine {
         openTimer?.cancel()
         pingTimer?.cancel()
         speakingTimer?.cancel()
+        levelTimer?.cancel()
         connectTimer = nil
         openTimer = nil
         pingTimer = nil
         speakingTimer = nil
+        levelTimer = nil
+        heard.clear()
         for timer in timers.values { timer.cancel() }
         timers = [:]
         if closeSocket, let sock = socket {

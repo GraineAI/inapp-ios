@@ -539,7 +539,7 @@ private final class HostRig {
 
 @Suite struct CallsHostSnapshotTests {
     private let keys: Set<String> = [
-        "state", "callId", "direction", "reason", "callerName", "muted", "speakerOn", "agentSpeaking",
+        "state", "callId", "direction", "reason", "callerName", "muted", "speakerOn", "agentSpeaking", "reconnecting",
         "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason",
     ]
 
@@ -550,7 +550,7 @@ private final class HostRig {
         for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason"] {
             #expect(json[key] is NSNull, "\(key)")
         }
-        for key in ["muted", "speakerOn", "agentSpeaking"] {
+        for key in ["muted", "speakerOn", "agentSpeaking", "reconnecting"] {
             #expect(json[key] as? Bool == false, "\(key)")
         }
         #expect(JSONSerialization.isValidJSONObject(json))
@@ -559,7 +559,7 @@ private final class HostRig {
     @Test func aLiveCallShowsEverything() throws {
         let json = CallsHostSnapshot(
             state: .active, callId: "c1", direction: .incoming, reason: "payment_due", callerName: "Acme",
-            muted: true, speakerOn: true, agentSpeaking: true,
+            muted: true, speakerOn: true, agentSpeaking: true, reconnecting: true,
             caption: GraineCaption(role: .agent, text: "Hi Asha", live: true),
             connectedAt: Date(timeIntervalSince1970: 1_760_000_000.123), agent: "sales"
         ).json
@@ -573,6 +573,7 @@ private final class HostRig {
         #expect(json["muted"] as? Bool == true)
         #expect(json["speakerOn"] as? Bool == true)
         #expect(json["agentSpeaking"] as? Bool == true)
+        #expect(json["reconnecting"] as? Bool == true)
         #expect((json["connectedAt"] as? NSNumber)?.int64Value == 1_760_000_000_123, "milliseconds since the epoch")
         let caption = try #require(json["caption"] as? [String: Any])
         #expect(JSON.canonical(caption) == #"{"live":true,"role":"agent","text":"Hi Asha"}"#)
@@ -583,7 +584,7 @@ private final class HostRig {
     @Test func atIdleOnlyTheErrorSurvives() {
         let stale = CallsHostSnapshot(
             state: .idle, callId: "c1", direction: .outgoing, reason: "support", callerName: "Acme",
-            muted: true, speakerOn: true, agentSpeaking: true,
+            muted: true, speakerOn: true, agentSpeaking: true, reconnecting: true,
             caption: GraineCaption(role: .customer, text: "hello", live: false),
             connectedAt: Date(), error: "The microphone permission was not granted.", agent: "sales"
         )
@@ -1273,6 +1274,16 @@ private final class HostRig {
         rig.core.engineChanged()
         rig.platform.runTurns()
         #expect(rig.events.payloads("state").last?["agentSpeaking"] as? Bool == true)
+        // Reconnecting, and back: each is news to a screen.
+        rig.platform.fields.reconnecting = true
+        rig.core.engineChanged()
+        rig.platform.runTurns()
+        #expect(rig.events.payloads("state").last?["reconnecting"] as? Bool == true)
+        rig.platform.fields.reconnecting = false
+        rig.core.engineChanged()
+        rig.platform.runTurns()
+        #expect(rig.events.payloads("state").count == 4)
+        #expect(rig.events.payloads("state").last?["reconnecting"] as? Bool == false)
     }
 
     @Test func aNewSinkReadsTheSnapshot() throws {

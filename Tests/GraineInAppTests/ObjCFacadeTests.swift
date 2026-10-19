@@ -45,7 +45,7 @@ import Testing
                 "configureWithDisplayName:ringtoneSound:ringTimeout:includesCallsInRecents:", "enableVoIPPushes",
                 "startCallWithReason:variables:", "startCallJSONWithReason:variablesJSON:", "prepareCallJSONWithReason:variablesJSON:", "answer", "decline", "end",
                 "setMuted:", "setSpeaker:", "callBack", "dismissMissedCall", "state", "endReason", "callId", "callerName",
-                "direction", "muted", "speakerOn", "agentSpeaking", "hosted", "agent", "showsCallScreen", "snapshotJSON",
+                "direction", "muted", "speakerOn", "agentSpeaking", "reconnecting", "hosted", "agent", "showsCallScreen", "snapshotJSON",
                 "addListener:", "removeListener:", "observe:", "observeOutcomes:", "observeIncoming:",
                 "callPermissionsJSON", "requestCallPermissionsJSONWithCompletion:", "openCallSettings:", "callSetupProblemsJSON",
             ], []),
@@ -525,6 +525,8 @@ import Testing
         #expect(calls["showsCallScreen"] as? Bool == false)
         #expect(calls["agent"] is NSNull, "no call: no agent")
         #expect(graine.calls.agent == nil)
+        #expect(calls["reconnecting"] as? Bool == false, "the bridge's key, beside agentSpeaking")
+        #expect(!graine.calls.reconnecting)
         let voice = try #require(parse(graine.voice.snapshotJSON) as? [String: Any])
         #expect(voice["connected"] as? Bool == false)
         #expect(voice["captionsOn"] as? Bool == true, "the captions switch is on until it is turned off")

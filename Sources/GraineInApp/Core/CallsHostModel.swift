@@ -372,6 +372,8 @@ struct CallsHostSnapshot: Equatable {
     var muted = false
     var speakerOn = false
     var agentSpeaking = false
+    /// The connected call is bringing its lost connection back (GraineCalls.isReconnecting).
+    var reconnecting = false
     var caption: GraineCaption?
     var connectedAt: Date?
     /// Why the last call failed; cleared when the next call starts.
@@ -421,6 +423,7 @@ struct CallsHostSnapshot: Equatable {
             "muted": s.muted,
             "speakerOn": s.speakerOn,
             "agentSpeaking": s.agentSpeaking,
+            "reconnecting": s.reconnecting,
             "caption": caption,
             "connectedAt": connectedAt,
             "error": CallsHostSnapshot.orNull(s.error),
