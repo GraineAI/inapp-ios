@@ -10,6 +10,13 @@ import Foundation
  * ring, or anything else that ends the call hangs it up — no INVITE was ever
  * sent, so nobody was called. A leg nobody takes is closed after `keepSeconds`
  * whatever happens.
+ *
+ * A leg minted with something other than what the answer would mint — the
+ * customer became known or changed while it rang (an app its push woke before
+ * the session said who they are), or the variables did — is not taken: it is
+ * hung up and the call minted again, as Android does, so the conversation runs
+ * as who the customer is now — at the gateway, with the grant asked for the
+ * ring under them (GraineInApp.warmCalls).
  */
 final class RingPreparation {
     static let shared = RingPreparation()
@@ -17,29 +24,41 @@ final class RingPreparation {
     /// Longer than any ring (60 s at most) — a backstop, not the rule.
     static let keepSeconds: TimeInterval = 90
 
+    /// A leg, and what it was minted with: its request's mint body for an empty session id.
+    private struct Prepared {
+        let leg: GraineRtcCall
+        let mint: Data?
+    }
+
     private let lock = NSLock()
-    private var legs: [String: GraineRtcCall] = [:]
+    private var legs: [String: Prepared] = [:]
     private var watching = Set<ObjectIdentifier>()
 
-    /// Keep `leg` for the answer to `callId`. One per call: an older one is hung up.
-    func put(_ callId: String, _ leg: GraineRtcCall) {
+    /// Keep `leg` for the answer to `callId`, with what it was minted with. One per call: an older one is hung up.
+    func put(_ callId: String, _ leg: GraineRtcCall, mint: Data? = nil) {
         lock.lock()
         let older = legs[callId]
-        legs[callId] = leg
+        legs[callId] = Prepared(leg: leg, mint: mint)
         lock.unlock()
-        older?.hangUp()
+        older?.leg.hangUp()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.keepSeconds) { [weak self, weak leg] in
             guard let self = self, let leg = leg else { return }
             self.discard(callId, only: leg)
         }
     }
 
-    /// The answer takes it: the caller owns it from here.
-    func take(_ callId: String?) -> GraineRtcCall? {
+    /// The answer takes it — the caller owns it from here — when it was minted with `mint` (nil: whatever it was minted with).
+    func take(_ callId: String?, mint: Data? = nil) -> GraineRtcCall? {
         guard let id = callId, !id.isEmpty else { return nil }
         lock.lock()
-        defer { lock.unlock() }
-        return legs.removeValue(forKey: id)
+        let held = legs.removeValue(forKey: id)
+        lock.unlock()
+        guard let prepared = held else { return nil }
+        if let wanted = mint, let had = prepared.mint, wanted != had {
+            prepared.leg.hangUp()
+            return nil
+        }
+        return prepared.leg
     }
 
     /// Hang it up and forget it — or only `leg`, when another took its place.
@@ -47,11 +66,10 @@ final class RingPreparation {
         guard let id = callId else { return }
         lock.lock()
         let held = legs[id]
-        if let held = held, leg == nil || held === leg {
-            legs.removeValue(forKey: id)
-        }
+        let matches = held.map { leg == nil || $0.leg === leg } ?? false
+        if matches { legs.removeValue(forKey: id) }
         lock.unlock()
-        if let held = held, leg == nil || held === leg { held.hangUp() }
+        if matches { held?.leg.hangUp() }
     }
 
     var count: Int {
@@ -123,8 +141,13 @@ extension GraineCalls {
                 guard let self = self, let session = session, self.callId == call.callId, self.state == .ringing,
                       CallTransportChoice.decide(requested: requested, dashboard: session.calls?.audioTransport, rtcAvailable: true) == .webrtc
                 else { return }
-                let leg = module.makeCall(CallConversation.rtcRequest(setup: setup, session: session, debug: debug))
-                RingPreparation.shared.put(call.callId, leg)
+                // A call that rang: its mint's answer brings a grant for exactly this call — kept, so a mint made for it
+                // once it is answered (a leg made then, a redial) goes to the telephony gateway; only an answer without
+                // one has it asked for on its own. One request to the web route per ring.
+                var request = CallConversation.rtcRequest(setup: setup, session: session, debug: debug)
+                request.rang = true
+                let leg = module.makeCall(request)
+                RingPreparation.shared.put(call.callId, leg, mint: request.mintBody(""))
                 leg.prepare()
                 if debug { GraineLog.trace("call: preparing WebRTC while it rings") }
             }

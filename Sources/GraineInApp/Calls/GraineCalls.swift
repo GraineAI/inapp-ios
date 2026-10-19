@@ -216,6 +216,9 @@ public final class GraineCalls: NSObject, ObservableObject {
         processCalls?.watch(agent)
     }
 
+    /// The app's calls, if anything has made them yet — without making them. Main thread.
+    static var existing: GraineCalls? { processCalls }
+
     private var watchedAgents: [ObjectIdentifier] = []
 
     private func watch(_ agent: GraineInApp) {
@@ -259,6 +262,8 @@ public final class GraineCalls: NSObject, ObservableObject {
             self.config = config
             self.provider?.configuration = self.providerConfiguration(for: self.callAgent ?? self.graine)
             self.startSetupCheck()
+            // Calls off WebRTC: a call prepared for the tap on it is let go.
+            if config.callTransport == .websocket { for agent in self.graine.peers { agent.releasePreparedCall() } }
         }
     }
 
@@ -331,8 +336,11 @@ public final class GraineCalls: NSObject, ObservableObject {
             GraineLog.warning("No agent is configured under the name \"\(agent ?? "")\"; startCall was refused.")
             return nil
         }
-        // The same shape on every platform ("call_" and a lowercase UUID), so a server sees one kind of id.
-        let id = "call_" + UUID().uuidString.lowercased()
+        let own = GraineCalls.maskedVariables(variables)
+        // The same shape on every platform ("call_" and a lowercase UUID), so a server sees one kind of id: the prepared
+        // call's, when this is the call prepareCall got ready (it dials at once); else the one the agent's warm grant was
+        // asked for (the call then mints at the telephony gateway); else a new one.
+        let id = target.preparedCallId(reason: reason, own: own) ?? target.nextCallId() ?? GraineInApp.newCallId()
         let uuid = UUID()
         endWebViewCall()
         settleItem?.cancel()
@@ -345,7 +353,7 @@ public final class GraineCalls: NSObject, ObservableObject {
         self.agent = target.name
         rememberAgent(target.name, forCall: id)
         outgoingReason = reason
-        outgoingVariables = GraineCalls.maskedVariables(variables)
+        outgoingVariables = own
         callerName = resolvedDisplayName(for: target)
         direction = .outgoing
         callId = id
@@ -366,6 +374,32 @@ public final class GraineCalls: NSObject, ObservableObject {
             micPermission.request(proceed)
         }
         return id
+    }
+
+    /**
+     * Get the agent's next call ready before the customer taps — call it when a
+     * screen that offers a call appears — so that `startCall` with the same
+     * reason and variables connects in about a second instead of two to four.
+     *
+     * Cheap to call every time the screen appears: while a call prepared for
+     * the same agent, the same customer, reason and variables is less than
+     * four minutes old, nothing is sent. Nothing is dialled and nothing is
+     * billed until `startCall`. It does nothing without the GraineInAppRTC
+     * module, when calls use the WebSocket, before the agent's configuration
+     * has loaded, or while a call is ringing or live.
+     *
+     * The prepared call is let go, quietly, when the app goes to the
+     * background, the customer changes (identify, sign-out, their memory
+     * choice, the time zone), four minutes pass, calls stop using WebRTC, or a
+     * call rings. `startCall` then simply prepares the call at the tap.
+     * `agent` names a configured agent (`GraineInApp.configure(_:name:)`); nil
+     * is the default.
+     */
+    public func prepareCall(reason: String? = nil, variables: [String: Any] = [:], agent: String? = nil) {
+        onMain {
+            guard !self.machine.state.isLive, let target = self.resolveAgent(named: agent) else { return }
+            target.prepareNextCall(reason: reason, own: GraineCalls.maskedVariables(variables))
+        }
     }
 
     /// The agent under `name` (any configured one), the default for nil; nil for a name nobody configured.
@@ -423,6 +457,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         if let call = ringing { rememberAgent(ringer.name, forCall: call.callId) }
         for (id, _) in outcomes where id != liveId { rememberAgent(ringer.name, forCall: id) }
         if let call = ringing {
+            // The ring wins: a call prepared for the customer's tap is let go, on every agent.
+            for agent in graine.peers { agent.releasePreparedCall() }
             // The machine first: a second push a moment from now must find this call live.
             endWebViewCall()
             settleItem?.cancel()
@@ -734,6 +770,10 @@ public final class GraineCalls: NSObject, ObservableObject {
             scheduler: DispatchCallScheduler(),
             transport: config.callTransport,
             debug: graine.config.debug,
+            // The call prepareCall got ready for this agent, when this is it; else one prepared while it rang.
+            takePrepared: { [weak graine] id, mint in
+                graine?.takePreparedCall(id: id, mint: mint) ?? RingPreparation.shared.take(id, mint: mint)
+            },
             onTransport: { [weak self, callId] report in
                 DispatchQueue.main.async { self?.transportDecided(report, callId: callId) }
             },

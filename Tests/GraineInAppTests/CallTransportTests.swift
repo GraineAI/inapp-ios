@@ -12,6 +12,11 @@ import Testing
 
 final class FakeRtcCall: GraineRtcCall {
     var onEvent: ((GraineRtcEvent) -> Void)?
+    /// Who hears this leg's readiness and loss while it is prepared ahead: the test reports through it.
+    var onPrepared: ((GraineRtcPreparedState) -> Void)?
+    /// Whether the call dialling it said it was prepared ahead of the tap, and the transport row it handed it.
+    var preparedAhead = false
+    var transportRow: String?
     private(set) var steps: [String] = []
     private(set) var sent: [(frame: String, kind: String?)] = []
     var directResult = true
@@ -36,12 +41,28 @@ final class FakeRtcModule: GraineRtcModule {
     var isSupported = true
     private(set) var calls: [FakeRtcCall] = []
     private(set) var requests: [GraineRtcRequest] = []
+    /// What the SDK asked to be prepared ahead of any call, and whether it handed a log with it.
+    private(set) var warmUps: [GraineRtcRequest] = []
+    private(set) var warmUpLogs: [Bool] = []
+    /// What startCall asked for its id with, and what this module answers.
+    private(set) var nextCallIdRequests: [GraineRtcRequest] = []
+    var nextCallIdAnswer: String?
 
     func makeCall(_ request: GraineRtcRequest) -> GraineRtcCall {
         requests.append(request)
         let call = FakeRtcCall()
         calls.append(call)
         return call
+    }
+
+    func warmUp(_ request: GraineRtcRequest, log: ((String) -> Void)?) {
+        warmUps.append(request)
+        warmUpLogs.append(log != nil)
+    }
+
+    func nextCallId(_ request: GraineRtcRequest) -> String? {
+        nextCallIdRequests.append(request)
+        return nextCallIdAnswer
     }
 
     var call: FakeRtcCall? { calls.last }
@@ -57,6 +78,9 @@ final class ConversationRig {
     var contextFrame: [String: Any]?
     var prepared: GraineRtcCall?
     private(set) var takenFor: [String?] = []
+    /// What the answer would mint with, as it asked for the prepared leg; and what that leg was minted with (nil: anything).
+    private(set) var takenMints: [Data] = []
+    var preparedMint: Data?
     var actionRunner: (String, [String: Any], @escaping (GraineActionResult) -> Void) -> Void = { _, _, answer in answer(.ok("done")) }
     private(set) var events: [CallEngine.Event] = []
     private(set) var reports: [CallTransportReport] = []
@@ -88,10 +112,14 @@ final class ConversationRig {
             scheduler: scheduler,
             transport: transport,
             rtcModule: { [unowned self] in self.installed ? self.module : nil },
-            takePrepared: { [unowned self] id in
+            takePrepared: { [unowned self] id, mint in
                 self.takenFor.append(id)
-                defer { self.prepared = nil }
-                return self.prepared
+                self.takenMints.append(mint)
+                // Through a RingPreparation of its own, as the shared one hands a prepared leg over.
+                let store = RingPreparation()
+                if let leg = self.prepared, let id = id { store.put(id, leg, mint: self.preparedMint) }
+                self.prepared = nil
+                return store.take(id, mint: mint)
             },
             onTransport: { [unowned self] in self.reports.append($0) },
             onEvent: { [unowned self] in self.events.append($0) }
@@ -207,6 +235,15 @@ final class ConversationRig {
         conversation.hangUp()
         #expect(call.steps.last == "hangUp")
         #expect(rig.endings == [.local])
+    }
+
+    /// The module mints with the call's own id — the one its grant, if it holds one, was asked for.
+    @Test func theModuleMintsWithTheCallsOwnId() throws {
+        let rig = ConversationRig()
+        rig.make().start()
+        let request = try #require(rig.module.requests.first)
+        let body = try #require(JSON.object(from: request.mintBody("0123456789abcdef0123456789abcdef")))
+        #expect(JSON.string(body["callId"]) == "call_1")
     }
 
     @Test func theDashboardsSwitchAndTheAppsChoiceKeepTheSocket() {
@@ -384,6 +421,35 @@ final class ConversationRig {
         #expect(rig.takenFor == ["call_1"], "by the call's id")
         #expect(rig.module.calls.isEmpty, "nothing minted twice")
         #expect(prepared.steps == ["muted(false)", "begin"], "already prepared while it rang")
+
+        // Minted with exactly what the answer would mint with: taken.
+        let same = ConversationRig()
+        same.make().start()
+        let body = try #require(same.takenMints.first)
+        let again = ConversationRig()
+        let leg = FakeRtcCall()
+        again.prepared = leg
+        again.preparedMint = body
+        again.make().start()
+        #expect(again.module.calls.isEmpty)
+        #expect(leg.steps.contains("begin"))
+    }
+
+    /// The customer became known (or changed) while it rang — a push-woken app's session arrived: the leg is minted again, as Android does.
+    @Test func aLegPreparedForAnotherCustomerIsMintedAgainAtTheAnswer() throws {
+        let rig = ConversationRig()
+        let stale = FakeRtcCall()
+        rig.prepared = stale
+        rig.preparedMint = RtcMintBody.json(publishableKey: "pk_test_rig", sessionId: "", callVariables: [], variables: [],
+                                            identity: IdentityWire.Fields(value: nil, installId: "install-1", memory: true, timezone: "Asia/Kolkata", callId: "call_1"))
+        rig.make().start()
+        #expect(stale.steps == ["hangUp"], "the leg minted for nobody is let go — no INVITE ever left it")
+        let fresh = try #require(rig.module.call)
+        #expect(fresh.steps.contains("prepare"), "and the call minted again")
+        let request = try #require(rig.module.requests.first)
+        let body = try #require(JSON.object(from: request.mintBody("")))
+        #expect((body["identity"] as? [String: Any])?["value"] as? String == "customer-1", "as who the customer is now")
+        #expect(JSON.string(body["callId"]) == "call_1", "still the ring's own id")
     }
 
     @Test func endedBeforeMediaIsAFailureNotARemoteEnd() throws {
@@ -419,5 +485,19 @@ final class ConversationRig {
         #expect(second.steps.isEmpty, "only the one asked for")
         #expect(store.take(nil) == nil)
         #expect(store.take("") == nil)
+    }
+
+    @Test func aLegMintedWithSomethingElseIsHungUpNotTaken() {
+        let store = RingPreparation()
+        let leg = FakeRtcCall()
+        store.put("call_12", leg, mint: Data("anonymous".utf8))
+        #expect(store.take("call_12", mint: Data("customer-1".utf8)) == nil)
+        #expect(leg.steps == ["hangUp"])
+        #expect(store.count == 0)
+
+        let kept = FakeRtcCall()
+        store.put("call_13", kept, mint: Data("customer-1".utf8))
+        #expect(store.take("call_13", mint: Data("customer-1".utf8)) === kept)
+        #expect(kept.steps.isEmpty)
     }
 }

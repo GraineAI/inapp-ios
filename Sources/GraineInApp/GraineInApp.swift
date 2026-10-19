@@ -250,6 +250,22 @@ public final class GraineInApp {
     private(set) var foreground = true
     private var foregroundWatchers: [UUID: (Bool) -> Void] = [:]
     private var lifecycleTokens: [NSObjectProtocol] = []
+    /// The opt-in WebRTC module, when the app includes it (`warmCalls`). Handed in so tests can stand one in.
+    var rtcModule: () -> GraineRtcModule? = { GraineRtcRegistry.module }
+    /// The call ringing for this agent now, if one is: a change of customer asks for its grant again. Handed in so tests can ring.
+    var ringingCallId: (GraineInApp) -> String? = GraineInApp.callRinging(for:)
+    /// A call ringing or live in the app now: nothing is prepared meanwhile (`prepareNextCall`). Handed in so tests can ring.
+    var callInProgress: (GraineInApp) -> Bool = GraineInApp.callLive(for:)
+    /// The device's IANA time zone, as every request carries it. Handed in so tests can travel.
+    var deviceTimezone: () -> String = IdentityWire.deviceTimezone
+    /// The clock a prepared call's age is read on, and how its four minutes are kept. Handed in so tests can move them.
+    var uptime: () -> Double = { ProcessInfo.processInfo.systemUptime }
+    var afterDelay: (TimeInterval, @escaping () -> Void) -> Void = { seconds, block in
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: block)
+    }
+    /// The call `prepareCall` got ready for this agent, if any: at most one. Under `preparedLock` (a call takes it from its own queue).
+    private var preparedCall: PreparedCall?
+    private let preparedLock = NSLock()
     /// The device's light or dark, as the window last reported it; nil until it has. Main thread.
     private var deviceDark: Bool?
     /**
@@ -488,7 +504,15 @@ public final class GraineInApp {
         #if os(iOS)
         onMain { self.watchLifecycle() }
         #endif
+        onMain { self.watchTimeZone() }
         loadSession { _ in }
+    }
+
+    /// Every request carries the device's time zone: a change lets a call prepared under the old one go.
+    private func watchTimeZone() {
+        lifecycleTokens.append(NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.timeZoneChanged() })
     }
 
     // MARK: - Listeners
@@ -647,7 +671,7 @@ public final class GraineInApp {
             value: now.value,
             installId: installId,
             memory: now.memory,
-            timezone: IdentityWire.deviceTimezone(),
+            timezone: deviceTimezone(),
             callId: callId
         )
     }
@@ -669,6 +693,10 @@ public final class GraineInApp {
             if previous != nil && previous != current { self.chat.forgetTranscript() }
             for watch in Array(self.identityWatchers.values) { watch() }
             self.sendSignOuts()
+            // Nothing prepared for the last customer's calls is theirs: a call prepared for who was calling is let go,
+            // and the next call's grant asked for this one.
+            self.releasePreparedCallForAnotherCaller()
+            self.warmCalls()
         }
     }
 
@@ -1255,6 +1283,10 @@ public final class GraineInApp {
             friction.configure(Friction.resolve([session.friction, appFriction?.json]))
             armStall()
             notifyListeners { $0.onSessionReady(session) }
+            // The first tap's credential, prepared now that who the customer is can be read (warmCalls).
+            warmCalls()
+            // The dashboard turned this agent's calls off WebRTC: a call prepared for it is let go.
+            if rtcGrantRequest(callId: nil, session: session) == nil { releasePreparedCall() }
             let check = checkActions()
             if !check.unhandled.isEmpty {
                 GraineLog.warning("The agent declares actions this build does not implement: \(check.unhandled). They will be refused mid-sentence.")
@@ -1287,6 +1319,297 @@ public final class GraineInApp {
         await withCheckedContinuation { continuation in
             loadSession { continuation.resume(returning: $0) }
         }
+    }
+
+    // MARK: - The calls' first credential, ahead of the tap
+
+    /**
+     * A GRANT FOR THE NEXT TAP, FETCHED BEFORE IT. With the WebRTC module in
+     * the app, a call takes its credential straight from the telephony
+     * gateway, with a grant the web route signed: 0.2 s rather than 1.3 from
+     * India, measured on production. A grant names exactly one call — its id
+     * becomes the conversation's `graine_call_id`, Call History's link — so
+     * the one kept ready is asked for the NEXT call the customer places, its
+     * id chosen ahead (`nextCallId` hands it to that call). The module is
+     * asked to prepare it when the session arrives (the first moment who the
+     * customer is can be read), when the customer or their memory choice
+     * changes, and when the app comes back to the foreground; after each call
+     * it fetches the one for the call after. It asks the web route only when
+     * it holds no usable grant for this customer, or the one it holds is half
+     * spent or within 30 s of lapsing — a big app coming back to the
+     * foreground sends nothing. The gateway is asked whether it takes grants
+     * when one arrives, and again after any ten-minute rest.
+     *
+     * Every way in arrives here: `GraineInApp.configure` and `identify` from
+     * Swift, and the Objective-C facade Kotlin Multiplatform and Objective-C
+     * apps drive (`configureWithBaseUrl:…` is `configure`; `identify:`,
+     * `identifyJSON:` and `setMemory:` are `identify` and `setMemory`; the
+     * calls' `startCall…` is `startCall`, which takes `nextCallId`).
+     *
+     * In the background — never the microphone, never waited on, never a
+     * failure: a call without a grant mints the old way. Main thread.
+     */
+    func warmCalls() {
+        guard let (module, request) = rtcGrantRequest(callId: nil, session: session) else { return }
+        module.warmUp(request, log: rtcLog)
+        // A call ringing now was asked for under whoever the customer was when it arrived — nobody, perhaps, in an
+        // app its push woke before the session said: asked for again under who they are now (asks nothing if unchanged).
+        if let ringing = ringingCallId(self) { warmCalls(ringing: ringing, session: session) }
+    }
+
+    // MARK: - A call prepared before the tap
+
+    /**
+     * THE TAP COSTS ONLY THE DIAL. Measured on production through the KMP
+     * demo, tap to the agent's voice took 2.1–3.9 s: the mint 0.19–0.98 s, the
+     * registration 0.93–1.92 s, the INVITE to its answer 0.15 s, the answer to
+     * the voice 0.65 s. When the app asks (`GraineCalls.prepareCall`, from a
+     * screen that offers a call), the next outgoing call is made ready here
+     * ahead of the tap — minted (at the gateway with the warm grant, which
+     * hands it its id), its candidates gathered, its socket registered — so
+     * the tap costs the INVITE onward, about a second. Nothing is dialled, no
+     * conversation starts and nothing is billed until the tap.
+     *
+     * A prepared call carries who is calling, everything the mint does — the
+     * customer, the install, the memory choice, the time zone — with the
+     * reason and the variables. The tap dials it only when the call it places
+     * would mint exactly the same, byte for byte; anything else is let go and
+     * prepared at the tap, as before. It is let go, sending nothing more, when
+     * the app goes to the background, who is calling changes (identify, sign
+     * out, the memory choice, the time zone), four minutes pass, calls go off
+     * WebRTC, a call rings, or its socket or registration drops.
+     */
+    private struct PreparedCall {
+        let callId: String
+        /// What it was minted with: its mint body for an empty session id.
+        let mint: Data
+        /// Who was calling when it was prepared, field by field.
+        let identity: IdentityWire.Fields
+        let leg: GraineRtcCall
+        /// When it was prepared, on the uptime clock.
+        let at: Double
+        let token: UUID
+    }
+
+    /// Older than this, a prepared call is let go: what it holds ages (the credential, the registration).
+    static let preparedCallLife: TimeInterval = 240
+
+    /// A new id for a call this app places: `call_` and a lowercase UUID, the same shape on every platform.
+    static func newCallId() -> String {
+        "call_" + UUID().uuidString.lowercased()
+    }
+
+    /**
+     * Get this agent's next outgoing call ready (`GraineCalls.prepareCall`):
+     * cheap to ask on every screen. A prepared call younger than four minutes
+     * that would mint exactly what this one would is kept, and nothing is
+     * sent; otherwise it is let go and the call prepared afresh. Nothing while
+     * a call rings or is live; without the WebRTC module, on the WebSocket or
+     * before the session, nothing — and a call prepared earlier is let go.
+     * Main thread.
+     */
+    func prepareNextCall(reason: String?, own: [String: String]) {
+        guard !callInProgress(self) else { return }
+        guard let session = session, let (module, _) = rtcGrantRequest(callId: nil, session: session) else {
+            return releasePreparedCall()
+        }
+        let now = uptime()
+        preparedLock.lock()
+        let held = preparedCall
+        preparedLock.unlock()
+        if let held = held, now - held.at < Self.preparedCallLife,
+           outgoingMint(reason: reason, own: own, callId: held.callId) == held.mint {
+            return
+        }
+        releasePreparedCall()
+        // The warm grant's id, when there is one: the prepared call then mints at the gateway.
+        let id = nextCallId() ?? Self.newCallId()
+        let identity = identityFields(callId: id)
+        let request = outgoingRtcRequest(reason: reason, own: own, identity: identity, session: session)
+        let leg = module.makeCall(request)
+        let token = UUID()
+        preparedLock.lock()
+        preparedCall = PreparedCall(callId: id, mint: request.mintBody(""), identity: identity, leg: leg, at: now, token: token)
+        preparedLock.unlock()
+        leg.onPrepared = { [weak self] state in self?.preparedCallReported(state, token: token) }
+        leg.prepare()
+        afterDelay(Self.preparedCallLife) { [weak self] in self?.releasePreparedCall(token: token) }
+    }
+
+    /**
+     * The id of the call being placed, when it is the prepared one: younger
+     * than four minutes, still able to carry a call, and minting exactly what
+     * this call mints — the agent, who is calling (every field), the reason,
+     * the variables. Otherwise nil, and the prepared call is let go: the call
+     * is prepared at the tap, as before. Main thread.
+     */
+    func preparedCallId(reason: String?, own: [String: String]) -> String? {
+        preparedLock.lock()
+        let held = preparedCall
+        preparedLock.unlock()
+        guard let call = held else { return nil }
+        if uptime() - call.at < Self.preparedCallLife, outgoingMint(reason: reason, own: own, callId: call.callId) == call.mint {
+            return call.callId
+        }
+        releasePreparedCall(token: call.token)
+        return nil
+    }
+
+    /// The prepared leg, for the call dialling it now (its id, minting exactly `mint`): from here it is that call's. Else nil. Any thread.
+    func takePreparedCall(id: String?, mint: Data) -> GraineRtcCall? {
+        preparedLock.lock()
+        guard let call = preparedCall, let id = id, call.callId == id else {
+            preparedLock.unlock()
+            return nil
+        }
+        preparedCall = nil
+        preparedLock.unlock()
+        call.leg.onPrepared = nil
+        let age = uptime() - call.at
+        guard call.mint == mint, age < Self.preparedCallLife else {
+            call.leg.hangUp()
+            return nil
+        }
+        if config.debug { GraineLog.trace("webrtc dial: prepared \(Int(age))s ago") }
+        return call.leg
+    }
+
+    /// Let the prepared call go — the one `token` names, or whichever is held — sending nothing more: nothing was ever dialled. Any thread.
+    func releasePreparedCall(token: UUID? = nil) {
+        preparedLock.lock()
+        guard let call = preparedCall, token == nil || call.token == token else {
+            preparedLock.unlock()
+            return
+        }
+        preparedCall = nil
+        preparedLock.unlock()
+        call.leg.onPrepared = nil
+        call.leg.hangUp()
+    }
+
+    /// Who is calling changed in any field the mint carries (the customer, the install, the memory choice, the time zone): a call prepared for who it was is let go.
+    private func releasePreparedCallForAnotherCaller() {
+        preparedLock.lock()
+        let held = preparedCall
+        preparedLock.unlock()
+        guard let call = held, identityFields(callId: call.callId) != call.identity else { return }
+        releasePreparedCall(token: call.token)
+    }
+
+    private func preparedCallReported(_ state: GraineRtcPreparedState, token: UUID) {
+        switch state {
+        case let .ready(milliseconds, direct):
+            if config.debug { GraineLog.trace("webrtc prepared: \(milliseconds) ms (\(direct ? "direct" : "web"))") }
+        case .lost:
+            // Its socket or registration dropped, or its mint was refused: let go without a word; the tap prepares afresh.
+            releasePreparedCall(token: token)
+        }
+    }
+
+    /// What an outgoing call carries besides who is calling (GraineCalls' rule): who called, the reason, the call's own variables, then the app's.
+    private func outgoingVariables(reason: String?, own: [String: String]) -> (all: [(String, String)], call: [(String, String)]) {
+        (CallEngine.variables(sdk: currentVariables(), whoCalled: "customer", reason: reason, own: own),
+         CallEngine.variables(sdk: [:], whoCalled: "customer", reason: reason, own: own))
+    }
+
+    /// The mint body (for an empty session id) of an outgoing call with this id, as GraineCalls would place it now.
+    func outgoingMint(reason: String?, own: [String: String], callId: String) -> Data {
+        let variables = outgoingVariables(reason: reason, own: own)
+        return RtcMintBody.json(publishableKey: config.publishableKey, sessionId: "", callVariables: variables.call, variables: variables.all,
+                                identity: identityFields(callId: callId))
+    }
+
+    private func outgoingRtcRequest(reason: String?, own: [String: String], identity: IdentityWire.Fields, session: GraineSessionConfig) -> GraineRtcRequest {
+        let variables = outgoingVariables(reason: reason, own: own)
+        let setup = CallEngine.Setup(
+            publishableKey: config.publishableKey,
+            baseUrl: config.baseUrl,
+            variables: variables.all,
+            contextFrame: { nil },
+            session: { $0(session) },
+            runAction: { _, _, answer in answer(.refused("")) },
+            callVariables: variables.call,
+            identity: identity
+        )
+        return CallConversation.rtcRequest(setup: setup, session: session, debug: config.debug)
+    }
+
+    /// GraineCalls' call is ringing or live (whichever agent's). Main thread.
+    static func callLive(for agent: GraineInApp) -> Bool {
+        #if os(iOS)
+        return GraineCalls.existing?.state.isLive ?? false
+        #else
+        return false
+        #endif
+    }
+
+    /// GraineCalls' call while it rings for this agent. Main thread.
+    static func callRinging(for agent: GraineInApp) -> String? {
+        #if os(iOS)
+        guard let calls = GraineCalls.existing, calls.state == .ringing, calls.callAgent === agent else { return nil }
+        return calls.callId
+        #else
+        return nil
+        #endif
+    }
+
+    /**
+     * A call Graine (or the app's server) rang: a grant for exactly its id,
+     * asked for while it rings — and again, by `warmCalls`, when who the
+     * customer is changes while it rings — so that a mint made for it once it
+     * is answered (the leg made again for the new customer, a redial) goes to
+     * the gateway. Not ready by then, and that mint takes the web route, as
+     * before. `session`: the one the ring was prepared with (perhaps the kept
+     * one, on a cold start). Main thread.
+     */
+    func warmCalls(ringing callId: String, session: GraineSessionConfig?) {
+        guard let (module, request) = rtcGrantRequest(callId: callId, session: session ?? self.session) else { return }
+        module.warmUp(request, log: rtcLog)
+    }
+
+    /**
+     * The id the call about to be placed with this agent carries: the one its
+     * warm grant was asked for, while that grant is usable — so the call
+     * mints at the gateway and names itself exactly as a web-route mint
+     * would. Nil: the call takes an id of its own. Main thread.
+     */
+    func nextCallId() -> String? {
+        guard let (module, request) = rtcGrantRequest(callId: nil, session: session) else { return nil }
+        return module.nextCallId(request)
+    }
+
+    /**
+     * The WebRTC module and what a grant is asked for with — the key and who
+     * the customer is, and `callId` when the grant is for a call that rang —
+     * or nil where a call would not try WebRTC: the module missing or unable
+     * to run, no session yet, the dashboard's switch on the WebSocket, the app
+     * asking for it.
+     */
+    private func rtcGrantRequest(callId: String?, session: GraineSessionConfig?) -> (GraineRtcModule, GraineRtcRequest)? {
+        guard let module = rtcModule(), module.isSupported, let session = session,
+              !(session.webcallAgentId.isEmpty && session.agentId.isEmpty) else { return nil }
+        var requested = GraineCallTransport.auto
+        #if os(iOS)
+        if let calls = GraineCalls.existing { requested = calls.config.callTransport }
+        #endif
+        guard CallTransportChoice.decide(requested: requested, dashboard: session.calls?.audioTransport, rtcAvailable: true) == .webrtc else { return nil }
+        let key = config.publishableKey
+        let identity = identityFields(callId: callId)
+        let request = GraineRtcRequest(
+            baseUrl: config.baseUrl,
+            controlHost: CallConversation.controlHost(session),
+            mintBody: { sessionId in
+                RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: [], variables: [], identity: identity)
+            },
+            sdkVersion: GraineVersion.name,
+            debug: config.debug
+        )
+        return (module, request)
+    }
+
+    /// The module's warm-up lines, to the debug log when the app runs with debug on.
+    private var rtcLog: ((String) -> Void)? {
+        config.debug ? { GraineLog.trace("rtc: " + $0) } : nil
     }
 
     // MARK: - The device, for the calls Graine rings
@@ -1520,10 +1843,24 @@ public final class GraineInApp {
         }
     }
 
-    private func setForeground(_ value: Bool) {
+    /// Main thread. Internal so tests can send the app away and back.
+    func setForeground(_ value: Bool) {
         if foreground == value { return }
         foreground = value
         for watch in Array(foregroundWatchers.values) { watch(value) }
+        if value {
+            // Back after a while: the grant for the next tap may be half spent (warmCalls asks only then).
+            warmCalls()
+        } else {
+            // Away: nobody taps a call in the background. The call prepared for the tap is let go.
+            releasePreparedCall()
+        }
+    }
+
+    /// The device's time zone changed (every request carries it): a call prepared under the old one is let go, and the next call's grant asked for the new.
+    func timeZoneChanged() {
+        releasePreparedCallForAnotherCaller()
+        warmCalls()
     }
 
     #if os(iOS)

@@ -295,10 +295,24 @@ final class FakeNetwork: CallNetwork {
     private(set) var sockets: [FakeSocket] = []
     /// What the ticket endpoint answers: status and body.
     var ticketReply: (Int, Data?) = (200, Data(#"{"ticket":"tkt-1","wsUrl":"wss://ws.graine.ai/v1/embed"}"#.utf8))
+    /// Hold the answers until the test releases them (`releasePosts`), so a test can say how long one took.
+    var holdPosts = false
+    private var heldPosts: [() -> Void] = []
 
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void) {
         posts.append((url, body))
-        completion(ticketReply.0, ticketReply.1)
+        let reply = ticketReply
+        if holdPosts {
+            heldPosts.append { completion(reply.0, reply.1) }
+        } else {
+            completion(reply.0, reply.1)
+        }
+    }
+
+    func releasePosts() {
+        let held = heldPosts
+        heldPosts = []
+        for answer in held { answer() }
     }
 
     func openSocket(_ url: URL, protocols: [String], events: CallSocketEvents) -> CallSocket {

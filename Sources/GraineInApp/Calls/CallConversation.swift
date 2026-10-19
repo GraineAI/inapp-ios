@@ -30,7 +30,8 @@ final class CallConversation {
     private let scheduler: CallScheduler
     private let requested: GraineCallTransport
     private let rtcModule: () -> GraineRtcModule?
-    private let takePrepared: (String?) -> GraineRtcCall?
+    /// The leg prepared while the call rang (by its id), when it was minted with what this call carries (its mint body).
+    private let takePrepared: (String?, Data) -> GraineRtcCall?
     private let onTransport: (CallTransportReport) -> Void
     private let onEvent: (CallEngine.Event) -> Void
     private let debug: Bool
@@ -56,6 +57,8 @@ final class CallConversation {
     private var speaking = false
     private var timers: [Int: CallTimer] = [:]
     private var nextTimerId = 0
+    /// When the customer tapped (or answered), on the scheduler's clock: the analytics rows count from it.
+    private var tapAt: Double?
 
     init(
         setup: CallEngine.Setup,
@@ -65,7 +68,7 @@ final class CallConversation {
         transport: GraineCallTransport = .auto,
         debug: Bool = false,
         rtcModule: @escaping () -> GraineRtcModule? = { GraineRtcRegistry.module },
-        takePrepared: @escaping (String?) -> GraineRtcCall? = { RingPreparation.shared.take($0) },
+        takePrepared: @escaping (String?, Data) -> GraineRtcCall? = { RingPreparation.shared.take($0, mint: $1) },
         onTransport: @escaping (CallTransportReport) -> Void = { _ in },
         onEvent: @escaping (CallEngine.Event) -> Void
     ) {
@@ -81,23 +84,28 @@ final class CallConversation {
         self.onEvent = onEvent
     }
 
-    /// What the module needs to place this call: where to mint, the control host, the mint's body.
+    /// What the module needs to place this call: where to mint, the control host, the mint's body (its id among the rest).
     static func rtcRequest(setup: CallEngine.Setup, session: GraineSessionConfig, debug: Bool) -> GraineRtcRequest {
-        var host = session.wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? CallWire.defaultWsHost
-        while host.hasSuffix("/") { host.removeLast() }
         let key = setup.publishableKey
         let callVariables = setup.callVariables
         let variables = setup.variables
         let identity = setup.identity
         return GraineRtcRequest(
             baseUrl: setup.baseUrl,
-            controlHost: host,
+            controlHost: controlHost(session),
             mintBody: { sessionId in
                 RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: callVariables, variables: variables, identity: identity)
             },
             sdkVersion: GraineVersion.name,
             debug: debug
         )
+    }
+
+    /// The control channel's host: the agent's socket host, without a trailing slash.
+    static func controlHost(_ session: GraineSessionConfig) -> String {
+        var host = session.wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? CallWire.defaultWsHost
+        while host.hasSuffix("/") { host.removeLast() }
+        return host
     }
 
     // MARK: - Driving it (CallEngine's surface)
@@ -107,6 +115,7 @@ final class CallConversation {
         scheduler.run { [self] in
             guard phase == .idle else { return }
             phase = .choosing
+            tapAt = scheduler.now
             setup.session { [weak self] session in
                 self?.scheduler.run { self?.chose(session) }
             }
@@ -207,15 +216,33 @@ final class CallConversation {
         }
         guard choice == .webrtc, let module = module, let session = session,
               !(session.webcallAgentId.isEmpty && session.agentId.isEmpty) else {
-            startSocket(CallTransportReport(transport: .websocket))
+            startSocket(CallTransportReport(transport: .websocket), skipped: Self.skippedReason(requested: requested, session: session, rtcAvailable: module != nil))
             return
         }
         startRtc(module, session: session)
     }
 
-    private func startSocket(_ report: CallTransportReport) {
+    /**
+     * Why a call the app wanted on WebRTC (`auto` or `webrtc`) starts on the
+     * WebSocket without trying it — for its transport row only; the call
+     * screen shows no fallback for it. The dashboard's switch is Standard, or
+     * this build or device cannot run WebRTC. Asked for the WebSocket: no
+     * reason, nothing fell back.
+     */
+    static func skippedReason(requested: GraineCallTransport, session: GraineSessionConfig?, rtcAvailable: Bool) -> String? {
+        guard requested != .websocket else { return nil }
+        if session?.calls?.audioTransport == .websocket { return "dashboard" }
+        return rtcAvailable ? nil : "unavailable"
+    }
+
+    private func startSocket(_ report: CallTransportReport, skipped: String? = nil) {
         phase = .socket
-        let engine = CallEngine(setup: setup, audio: audio, network: network, scheduler: scheduler) { [weak self] event in
+        // Its analytics rows count from the tap, a WebRTC attempt's included, and say why it is not WebRTC, if it could have been.
+        let telemetry = CallEngine.Telemetry(
+            tapAt: tapAt ?? scheduler.now,
+            transportFrame: GraineCallTelemetry.transportFrame(carried: .websocket, requested: requested, fallbackReason: report.reason ?? skipped)
+        )
+        let engine = CallEngine(setup: setup, audio: audio, network: network, scheduler: scheduler, telemetry: telemetry) { [weak self] event in
             self?.socketEvent(event)
         }
         socketEngine = engine
@@ -235,8 +262,14 @@ final class CallConversation {
 
     private func startRtc(_ module: GraineRtcModule, session: GraineSessionConfig) {
         phase = .rtc
-        let prepared = takePrepared(setup.identity?.callId)
-        let call = prepared ?? module.makeCall(Self.rtcRequest(setup: setup, session: session, debug: debug))
+        let request = Self.rtcRequest(setup: setup, session: session, debug: debug)
+        // Prepared while it rang with exactly what this call carries; otherwise (the customer became known meanwhile) minted again.
+        let prepared = takePrepared(setup.identity?.callId, request.mintBody(""))
+        let call = prepared ?? module.makeCall(request)
+        // Its analytics rows: how it was made — ahead of the tap (prepareCall, or as it rang), or at it — and
+        // the transport row it sends at media, which only this side can write (what the app asked for).
+        if prepared != nil { call.preparedAhead = true }
+        call.transportRow = GraineCallTelemetry.transportFrame(carried: .webrtc, requested: requested, fallbackReason: nil)
         rtc = call
         call.onEvent = { [weak self, weak call] event in
             self?.scheduler.run {

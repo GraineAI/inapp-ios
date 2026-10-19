@@ -94,6 +94,16 @@ public final class GraineCallsHost: NSObject {
         onMainSync { core.startCall(options) }
     }
 
+    /**
+     * Get the agent's next call ready before the customer taps:
+     * `{reason?, variables?, agent?}`, as `startCall` takes them. Cheap to ask
+     * whenever a screen that offers a call appears; nothing is dialled or
+     * billed until `startCall`. Nothing when not configured or a call is live.
+     */
+    public func prepareCall(_ options: [String: Any]?) {
+        onMain { self.core.prepareCall(options) }
+    }
+
     public func answer() {
         onMain { self.core.answer() }
     }
@@ -306,6 +316,10 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
 
     func startCall(reason: String?, variables: [String: Any], agent: String?) -> String? {
         calls?.startCall(reason: reason, variables: variables, agent: agent)
+    }
+
+    func prepareCall(reason: String?, variables: [String: Any], agent: String?) {
+        calls?.prepareCall(reason: reason, variables: variables, agent: agent)
     }
 
     func answer() {

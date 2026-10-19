@@ -163,10 +163,22 @@ final class CallEngine {
      */
     static let connectDeadlineSeconds = 20.0
 
+    /**
+     * What the call's analytics rows (GraineCallTelemetry) need from whoever
+     * opened it — the conversation: when the customer tapped or answered, on
+     * this engine's clock, and the call's `transport` row (the road, what the
+     * app asked for, why it fell back). Without it, no rows.
+     */
+    struct Telemetry {
+        var tapAt: Double
+        var transportFrame: String
+    }
+
     private let setup: Setup
     private let audio: CallAudioIO
     private let network: CallNetwork
     private let scheduler: CallScheduler
+    private let telemetry: Telemetry?
     private let onEvent: (Event) -> Void
 
     // Everything below is touched on the scheduler's context only.
@@ -190,12 +202,20 @@ final class CallEngine {
     private var muted = false
     /// The spoken turn's words so far, for joining its phrases.
     private var spokenTurn = ""
+    /// When each step began, for the analytics rows: the ticket asked for and back (and whether it came), the socket asked for and open.
+    private var ticketAskedAt: Double?
+    private var ticketAt: Double?
+    private var ticketCame = false
+    private var connectAt: Double?
+    private var openedAt: Double?
+    private var voiceRowSent = false
 
-    init(setup: Setup, audio: CallAudioIO, network: CallNetwork, scheduler: CallScheduler, onEvent: @escaping (Event) -> Void) {
+    init(setup: Setup, audio: CallAudioIO, network: CallNetwork, scheduler: CallScheduler, telemetry: Telemetry? = nil, onEvent: @escaping (Event) -> Void) {
         self.setup = setup
         self.audio = audio
         self.network = network
         self.scheduler = scheduler
+        self.telemetry = telemetry
         self.onEvent = onEvent
     }
 
@@ -400,6 +420,7 @@ final class CallEngine {
             connect(session: session, ticket: nil)
             return
         }
+        ticketAskedAt = scheduler.now
         network.post(url, body: body) { [weak self] status, data in
             self?.scheduler.run { self?.ticketArrived(session: session, status: status, data: data) }
         }
@@ -407,12 +428,14 @@ final class CallEngine {
 
     private func ticketArrived(session: GraineSessionConfig, status: Int, data: Data?) {
         guard phase == .preparing else { return }
+        ticketAt = scheduler.now
         // Any non-2xx — 503 is "no gateway here" — or a network error: the direct socket.
         var ticket: (ticket: String, wsUrl: String)?
         if (200...299).contains(status), let body = JSON.object(from: data),
            let t = JSON.nonEmpty(body["ticket"]), let ws = JSON.nonEmpty(body["wsUrl"]) {
             ticket = (t, ws)
         }
+        ticketCame = ticket != nil
         connect(session: session, ticket: ticket)
     }
 
@@ -442,6 +465,7 @@ final class CallEngine {
             received: { [weak self] text in self?.scheduler.run { self?.received(text) } },
             closed: { [weak self] byServer, detail in self?.scheduler.run { self?.socketClosed(byServer: byServer, detail: detail) } }
         )
+        connectAt = scheduler.now
         socket = network.openSocket(url, protocols: protocols, events: events)
         openTimer = scheduler.after(CallWire.socketOpenTimeoutSeconds) { [weak self] in
             guard let self = self, self.phase == .preparing else { return }
@@ -459,8 +483,55 @@ final class CallEngine {
         send(CallWire.initFrame(variables: setup.variables))
         // The screen the customer is on: the whole context for the agent's first line.
         if let frame = setup.contextFrame(), let text = CallWire.appContextFrame(frame) { send(text) }
+        sendOpenRows()
         schedulePing()
         onEvent(.opened(transport))
+    }
+
+    /**
+     * The analytics rows once the conversation starts — the contract's
+     * "media" on this road: the road it took, then where the tap's wait went.
+     * A socket's call is never prepared. Setup is the tap to the socket asked
+     * for (a WebRTC attempt that fell back, the ticket), the dial the socket's
+     * own opening; the mint is the ticket, when one came back from the web app.
+     */
+    private func sendOpenRows() {
+        guard let telemetry = telemetry else { return }
+        let now = scheduler.now
+        openedAt = now
+        send(telemetry.transportFrame)
+        let setup = GraineCallTelemetry.milliseconds(from: telemetry.tapAt, to: connectAt)
+        let dial = GraineCallTelemetry.milliseconds(from: connectAt, to: now)
+        let row = GraineCallTelemetry.frame("connect", [
+            "mode": "cold",
+            "warm": false,
+            "total_ms": Self.sum(setup, dial) ?? GraineCallTelemetry.milliseconds(from: telemetry.tapAt, to: now),
+            "setup_ms": setup,
+            "dial_ms": dial,
+            "mint_ms": ticketCame ? GraineCallTelemetry.milliseconds(from: ticketAskedAt, to: ticketAt) : nil,
+            "mint_route": ticketCame ? "web" : nil,
+        ])
+        if let row = row { send(row) }
+    }
+
+    /// The analytics row for the agent's first audio on the socket — its voice, heard: once.
+    private func sendVoiceRow(_ format: AgentAudioFormat) {
+        guard let telemetry = telemetry, !voiceRowSent, let opened = openedAt else { return }
+        voiceRowSent = true
+        let now = scheduler.now
+        let row = GraineCallTelemetry.frame("voice", [
+            "tap_to_voice_ms": GraineCallTelemetry.milliseconds(from: telemetry.tapAt, to: now),
+            "answer_to_voice_ms": GraineCallTelemetry.milliseconds(from: opened, to: now),
+            "first_audio_ms": GraineCallTelemetry.milliseconds(from: opened, to: now),
+            "codec": format.kind == .mulaw ? "PCMU/\(format.sampleRate)" : "L16/\(format.sampleRate)",
+        ])
+        if let row = row { send(row) }
+    }
+
+    /// Two whole durations added, so a total is exactly its parts; nil unless both are known.
+    static func sum(_ a: Int?, _ b: Int?) -> Int? {
+        guard let a = a, let b = b else { return nil }
+        return a + b
     }
 
     private func schedulePing() {
@@ -545,6 +616,7 @@ final class CallEngine {
             onEvent(.format(latch))
         }
         audio.play(decoded.pcm16, sampleRate: decoded.sampleRate)
+        sendVoiceRow(AgentAudioFormat(kind: decoded.kind, sampleRate: decoded.sampleRate))
         audibleUntil = scheduler.now + audio.bufferedSeconds()
     }
 

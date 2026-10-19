@@ -43,7 +43,7 @@ import Testing
             ], []),
             "GraineObjCCalls": ([
                 "configureWithDisplayName:ringtoneSound:ringTimeout:includesCallsInRecents:", "enableVoIPPushes",
-                "startCallWithReason:variables:", "startCallJSONWithReason:variablesJSON:", "answer", "decline", "end",
+                "startCallWithReason:variables:", "startCallJSONWithReason:variablesJSON:", "prepareCallJSONWithReason:variablesJSON:", "answer", "decline", "end",
                 "setMuted:", "setSpeaker:", "callBack", "dismissMissedCall", "state", "endReason", "callId", "callerName",
                 "direction", "muted", "speakerOn", "agentSpeaking", "hosted", "agent", "showsCallScreen", "snapshotJSON",
                 "addListener:", "removeListener:", "observe:", "observeOutcomes:", "observeIncoming:",

@@ -779,6 +779,8 @@ protocol CallsHostPlatform: AnyObject {
     func configureCalls(_ options: CallsHostOptions)
     func enableVoIPPushes(onToken: @escaping (String?) -> Void)
     func startCall(reason: String?, variables: [String: Any], agent: String?) -> String?
+    /// The agent's next call made ready before the tap (`GraineCalls.prepareCall`).
+    func prepareCall(reason: String?, variables: [String: Any], agent: String?)
     func answer()
     func end()
     func setMuted(_ muted: Bool)
@@ -962,6 +964,13 @@ final class CallsHostCore {
         }
         changed()
         return id
+    }
+
+    /// The agent's next call made ready before the tap: `{reason?, variables?, agent?}`, as startCall takes them. Nothing when the calls are not configured or a call is live.
+    func prepareCall(_ raw: Any?) {
+        guard options != nil, !platform.callFields().state.isLive else { return }
+        let request = CallsHostValues.callRequest(raw)
+        platform.prepareCall(reason: request.reason, variables: request.variables, agent: request.agent)
     }
 
     func answer() {

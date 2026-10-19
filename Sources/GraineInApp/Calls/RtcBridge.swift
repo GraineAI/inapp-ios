@@ -46,15 +46,31 @@ import Foundation
     public var budgetSeconds: Double
     /// Trace each step to the debug log.
     public var debug: Bool
+    /**
+     * This call rang (Graine or the app's server rang it). The answer to its
+     * mint brings a grant for its id, kept for a later mint of the same call —
+     * a redial, a leg made again at the answer; only when it brings none is
+     * one asked for on its own, so a ring costs the web route one request.
+     */
+    public var rang: Bool
 
-    public init(baseUrl: String, controlHost: String, mintBody: @escaping (String) -> Data, sdkVersion: String, budgetSeconds: Double = 12, debug: Bool = false) {
+    public init(baseUrl: String, controlHost: String, mintBody: @escaping (String) -> Data, sdkVersion: String, budgetSeconds: Double = 12, debug: Bool = false, rang: Bool = false) {
         self.baseUrl = baseUrl
         self.controlHost = controlHost
         self.mintBody = mintBody
         self.sdkVersion = sdkVersion
         self.budgetSeconds = budgetSeconds
         self.debug = debug
+        self.rang = rang
     }
+}
+
+/// What a call prepared ahead of its dial reports while nobody listens to it (`GraineRtcCall.onPrepared`).
+@_spi(GraineRTC) public enum GraineRtcPreparedState: Equatable {
+    /// Minted, registered and its offer gathered: how long that took, and whether its credential came from the telephony gateway.
+    case ready(milliseconds: Int, direct: Bool)
+    /// It can no longer carry a call: its mint refused, its registration or its socket lost.
+    case lost
 }
 
 /// What the module reports about a call, on its own queue.
@@ -116,6 +132,45 @@ import Foundation
     func sendControl(_ frame: String, kind: String?)
     /// Hang up and release everything. Nothing is reported after it.
     func hangUp()
+    /**
+     * While the call is prepared ahead of its dial and nobody listens: told
+     * when it is ready and when it is lost, without taking the events kept for
+     * whoever listens later. Any thread.
+     */
+    var onPrepared: ((GraineRtcPreparedState) -> Void)? { get set }
+    /**
+     * The call being dialled was prepared ahead of the tap — by `prepareCall`,
+     * or as it rang — rather than at it: its `connect` row says `prepared`
+     * when it was also ready by then. Set before `begin()`.
+     */
+    var preparedAhead: Bool { get set }
+    /**
+     * The call's `transport` row (GraineCallTelemetry), written by whoever
+     * dials it — only it knows what the app asked for. Sent on the control
+     * channel at media, just before the `connect` row; never if the call
+     * does not get there. Set before `begin()`.
+     */
+    var transportRow: String? { get set }
+}
+
+@_spi(GraineRTC) public extension GraineRtcCall {
+    /// A call that reports nothing ahead of its listener.
+    var onPrepared: ((GraineRtcPreparedState) -> Void)? {
+        get { nil }
+        set {}
+    }
+
+    /// A call that does not tell prepared from cold.
+    var preparedAhead: Bool {
+        get { false }
+        set {}
+    }
+
+    /// A call that sends no analytics rows.
+    var transportRow: String? {
+        get { nil }
+        set {}
+    }
 }
 
 /// The module itself.
@@ -123,6 +178,34 @@ import Foundation
     /// Whether this device can carry a call on it.
     var isSupported: Bool { get }
     func makeCall(_ request: GraineRtcRequest) -> GraineRtcCall
+    /**
+     * Ahead of a call: whatever lets it start sooner — a grant for the direct
+     * mint, the gateway asked whether it takes one. `request.mintBody` carries
+     * who the customer is and, for a call that is ringing, its id: a grant
+     * names exactly one call. Without an id, it is for the next call the
+     * customer places (`nextCallId` hands that call its id); the session
+     * arrived, the customer changed, the app came back. In the background; it
+     * never touches the microphone, never waits and never fails anything, and
+     * sends nothing while what it prepared still holds. `log` hears what
+     * happened when the app runs with debug on.
+     */
+    func warmUp(_ request: GraineRtcRequest, log: ((String) -> Void)?)
+    /**
+     * The id for the call the customer is placing now: the one the next
+     * call's grant was asked for, while that grant is usable for who
+     * `request.mintBody` names — so the call mints at the telephony gateway
+     * and carries its own id there. Taken once; the next call's grant follows
+     * this call's mint. Nil: the call takes an id of its own and mints on the
+     * web route. Answers at once.
+     */
+    func nextCallId(_ request: GraineRtcRequest) -> String?
+}
+
+@_spi(GraineRTC) public extension GraineRtcModule {
+    /// A module with nothing to prepare ahead of a call.
+    func warmUp(_ request: GraineRtcRequest, log: ((String) -> Void)?) {}
+    /// A module without grants: every call takes an id of its own.
+    func nextCallId(_ request: GraineRtcRequest) -> String? { nil }
 }
 
 /// Where the core finds the module: installed explicitly, or looked up once by its class name.

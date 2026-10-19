@@ -141,6 +141,21 @@ public final class GraineObjCCalls: NSObject {
         startCall(reason: reason, variables: ObjCBridge.object(variablesJSON))
     }
 
+    /**
+     * Get this facade's agent's next call ready before the user taps, so that
+     * `startCallJSONWithReason:variablesJSON:` with the same reason and
+     * variables connects in about a second. Cheap to call whenever a screen
+     * that offers a call appears: nothing is sent while a call prepared the
+     * same way is less than four minutes old, and nothing is dialled or billed
+     * until the call starts. `variablesJSON` is a JSON object.
+     */
+    @objc(prepareCallJSONWithReason:variablesJSON:)
+    public func prepareCallJSON(reason: String?, variablesJSON: String?) {
+        #if os(iOS)
+        graine.calls.prepareCall(reason: reason, variables: ObjCBridge.object(variablesJSON) ?? [:], agent: graine.name)
+        #endif
+    }
+
     @objc(answer)
     public func answer() {
         #if os(iOS)

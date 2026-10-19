@@ -114,6 +114,12 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
         return nextCallId
     }
 
+    private(set) var preparedCalls: [(reason: String?, variables: [String: Any], agent: String?)] = []
+
+    func prepareCall(reason: String?, variables: [String: Any], agent: String?) {
+        preparedCalls.append((reason, variables, agent))
+    }
+
     func answer() { answers += 1 }
     func end() { ends += 1 }
     func setMuted(_ value: Bool) { muted.append(value) }
@@ -1137,6 +1143,26 @@ private final class HostRig {
         #expect(state["state"] as? String == "connecting")
         #expect(state["reason"] as? String == "card_blocked")
         #expect(state["error"] is NSNull)
+    }
+
+    /// Flutter's and React Native's prepareCall: startCall's options, for the call the app expects next — nothing placed.
+    @Test func prepareCallTakesStartCallsOptionsAndPlacesNothing() throws {
+        let rig = HostRig()
+        rig.core.prepareCall(["reason": "support"])
+        #expect(rig.platform.preparedCalls.isEmpty, "not configured")
+        try rig.configure()
+        rig.core.prepareCall(["reason": " card_blocked ", "variables": ["order": "A-1043"], "agent": " sales "] as [String: Any])
+        let asked = try #require(rig.platform.preparedCalls.first)
+        #expect(asked.reason == "card_blocked", "read as startCall reads it")
+        #expect(asked.variables["order"] as? String == "A-1043")
+        #expect(asked.agent == "sales")
+        #expect(rig.platform.placed.isEmpty, "nothing placed")
+        #expect(rig.core.reason == nil, "and no call's reason")
+        rig.core.prepareCall(nil)
+        #expect(rig.platform.preparedCalls.count == 2, "no options: the default agent's call, no reason")
+        _ = rig.core.startCall(["reason": "first"])
+        rig.core.prepareCall(["reason": "second"])
+        #expect(rig.platform.preparedCalls.count == 2, "nothing while a call is live")
     }
 
     @Test func noSecondCallWhileOneIsLive() throws {
