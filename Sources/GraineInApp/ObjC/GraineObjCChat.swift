@@ -34,6 +34,56 @@ public final class GraineObjCChatTurn: NSObject {
     }
 }
 
+/// One reply the agent suggests for its latest turn: the words on the chip (`label`), and what a tap sends (`text`).
+@objc(GraineObjCQuickReply)
+public final class GraineObjCQuickReply: NSObject {
+    @objc public let label: String
+    @objc public let text: String
+
+    @objc public init(label: String, text: String) {
+        self.label = label
+        self.text = text
+    }
+
+    convenience init(_ r: GraineQuickReply) {
+        self.init(label: r.label, text: r.text)
+    }
+}
+
+/// The user's end-of-chat rating: `thumbs` 1 up / 0 down out of 1, `stars` and `emoji` 1–5 out of 5.
+@objc(GraineObjCChatRating)
+public final class GraineObjCChatRating: NSObject {
+    /// `thumbs`, `stars` or `emoji`.
+    @objc public let style: String
+    @objc public let value: Int
+    @objc public let scale: Int
+
+    init(_ r: GraineChatRating) {
+        style = r.style.rawValue
+        value = r.value
+        scale = r.scale
+    }
+
+    /// `{value, scale, style}`, for a bridge.
+    @objc public var json: String { ObjCBridge.text(["value": value, "scale": scale, "style": style] as [String: Any]) }
+}
+
+/// What the conversation is about, as the app pinned it (`GraineChatPin`).
+@objc(GraineObjCChatPin)
+public final class GraineObjCChatPin: NSObject {
+    @objc public let title: String
+    @objc public let subtitle: String?
+    @objc public let imageUrl: String?
+    @objc public let badge: String?
+
+    init(_ p: GraineChatPin) {
+        title = p.title
+        subtitle = p.subtitle
+        imageUrl = p.imageUrl?.absoluteString
+        badge = p.badge
+    }
+}
+
 /// Hears the chat change — its turns, its status, the typing indicator or the upcoming calls. Main thread. Held weakly.
 @objc(GraineObjCChatListener)
 public protocol GraineObjCChatListener: AnyObject {
@@ -63,8 +113,18 @@ public final class GraineObjCChat: NSObject {
             chat.$status.sink { [weak self] _ in self?.changed() },
             chat.$typing.sink { [weak self] _ in self?.changed() },
             chat.$upcomingCalls.sink { [weak self] _ in self?.changed() },
+            chat.$quickReplies.sink { [weak self] _ in self?.changed() },
+            chat.$ended.sink { [weak self] _ in self?.changed() },
+            chat.$rating.sink { [weak self] _ in self?.changed() },
+            chat.$pinned.sink { [weak self] _ in self?.changed() },
+            // A rating given (in the window or through `rate`), once: its observers hear it.
+            chat.$rating.dropFirst().compactMap { $0 }.sink { [weak self] rating in
+                self?.rated.notify { $0(GraineObjCChatRating(rating)) }
+            },
         ]
     }
+
+    private let rated = ObjCBlocks<(GraineObjCChatRating) -> Void>()
 
     private func changed() {
         if pending { return }
@@ -99,9 +159,24 @@ public final class GraineObjCChat: NSObject {
         objcOnMainSync { self.graine.chat.upcomingCalls.map { GraineObjCScheduledCall($0) } }
     }
 
+    /// The replies the agent suggests for its latest turn (`GraineChat.quickReplies`). Main thread.
+    @objc public var quickReplies: [GraineObjCQuickReply] {
+        objcOnMainSync { self.graine.chat.quickReplies.map { GraineObjCQuickReply($0) } }
+    }
+
+    /// The agent ended the conversation (`GraineChat.ended`): a rating may be asked for.
+    @objc public var ended: Bool { objcOnMainSync { self.graine.chat.ended } }
+
+    /// The user's end-of-chat rating, once given; nil before.
+    @objc public var rating: GraineObjCChatRating? { objcOnMainSync { self.graine.chat.rating.map { GraineObjCChatRating($0) } } }
+
+    /// What the conversation is about, as the app pinned it; nil when nothing is pinned.
+    @objc public var pinned: GraineObjCChatPin? { objcOnMainSync { self.graine.chat.pinned.map { GraineObjCChatPin($0) } } }
+
     /**
      * The whole chat as JSON, for a bridge: `{turns: [{id, role, text, live, delivery, at, proactive, restored, channel}],
-     * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}]}`.
+     * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}], quickReplies: [{label, text}],
+     * ended, rating: {value, scale, style} | null, pin: {title, subtitle, imageUrl, badge} | null}`.
      */
     @objc public var snapshotJSON: String {
         objcOnMainSync {
@@ -114,6 +189,17 @@ public final class GraineObjCChat: NSObject {
                 "typing": chat.typing,
                 "open": chat.isOpen,
                 "upcomingCalls": chat.upcomingCalls.map { ObjCBridge.scheduledCall($0) },
+                "quickReplies": chat.quickReplies.map { ["label": $0.label, "text": $0.text] },
+                "ended": chat.ended,
+                "rating": chat.rating.map { ["value": $0.value, "scale": $0.scale, "style": $0.style.rawValue] as Any } ?? NSNull(),
+                "pin": chat.pinned.map { p -> Any in
+                    [
+                        "title": p.title,
+                        "subtitle": p.subtitle.map { $0 as Any } ?? NSNull(),
+                        "imageUrl": p.imageUrl.map { $0.absoluteString as Any } ?? NSNull(),
+                        "badge": p.badge.map { $0 as Any } ?? NSNull(),
+                    ] as [String: Any]
+                } ?? NSNull(),
             ] as [String: Any])
         }
     }
@@ -153,6 +239,49 @@ public final class GraineObjCChat: NSObject {
     /// Connect now, and send what could not be sent.
     @objc(retry)
     public func retry() { graine.chat.retry() }
+
+    /// Send one of the agent's quick replies: its text, as the user's own message.
+    @objc(sendQuickReply:)
+    public func sendQuickReply(_ reply: GraineObjCQuickReply) {
+        graine.chat.sendQuickReply(GraineQuickReply(label: reply.label, text: reply.text))
+    }
+
+    /**
+     * Rate the conversation the agent ended, from a UI of your own: `style`
+     * `thumbs` (value 1 up, 0 down), `stars` or `emoji` (1–5); another word is
+     * thumbs. Taken once, only after the conversation ended.
+     */
+    @objc(rateWithStyle:value:)
+    public func rate(style: String, value: Int) {
+        let r = ChatRatings.make(style: style, value: value)
+        graine.chat.rate(style: r.style, value: r.value)
+    }
+
+    /**
+     * Pin what the conversation is about, drawn under the chat's header or atop
+     * its thread where the design puts it (`GraineChatPin`); never sent to the
+     * agent. An empty title takes it away.
+     */
+    @objc(pinWithTitle:subtitle:imageUrl:badge:)
+    public func pin(title: String, subtitle: String?, imageUrl: String?, badge: String?) {
+        graine.chat.pin(GraineChatPin(title: title, subtitle: subtitle, imageUrl: imageUrl.flatMap { URL(string: $0) }, badge: badge))
+    }
+
+    /// Take the pinned context card away.
+    @objc(clearPin)
+    public func clearPin() { graine.chat.pin(nil) }
+
+    /// The app handles attachments: the chat window draws the paperclip where the design asks for one, and a tap runs this. Nil: none.
+    @objc(setAttachHandler:)
+    public func setAttachHandler(_ handler: (() -> Void)?) {
+        onMain { self.graine.chat.onAttach = handler }
+    }
+
+    /// For a bridge: `observer` runs on the main thread each time the user rates the chat, until the registration is stopped.
+    @objc(observeRatings:)
+    public func observeRatings(_ observer: @escaping (GraineObjCChatRating) -> Void) -> GraineObjCRegistration {
+        objcOnMainSync { self.rated.add(observer) }
+    }
 
     /// Empty the chat on screen; the conversation goes on (`GraineChat.clear()`).
     @objc(clear)
@@ -195,6 +324,24 @@ public final class GraineObjCChat: NSObject {
 
     private func onMain(_ block: @escaping () -> Void) {
         if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
+    }
+}
+
+/// Blocks a bridge registered, each until its registration is stopped. Main thread.
+final class ObjCBlocks<Block> {
+    private var blocks: [(id: UUID, block: Block)] = []
+
+    func add(_ block: Block) -> GraineObjCRegistration {
+        let id = UUID()
+        blocks.append((id, block))
+        return GraineObjCRegistration { [weak self] in
+            let remove: () -> Void = { self?.blocks.removeAll { $0.id == id } }
+            if Thread.isMainThread { remove() } else { DispatchQueue.main.async(execute: remove) }
+        }
+    }
+
+    func notify(_ call: (Block) -> Void) {
+        for entry in blocks { call(entry.block) }
     }
 }
 

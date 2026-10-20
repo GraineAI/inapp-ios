@@ -23,7 +23,14 @@ import Foundation
  * hangs up (when `GraineConfig.endOnBackground`), and comes back with the app.
  *
  * `ObservableObject`: `GraineChatView` draws it whole; draw your own from
- * `turns`, `status` and `typing`. Main thread.
+ * `turns`, `status` and `typing` — and `quickReplies`, `ended` and `rating`.
+ * Main thread.
+ *
+ * What the chat window draws beside the conversation is yours to give:
+ *
+ *     chat.pin(GraineChatPin(title: "Your plan", subtitle: "Renews on 14 Nov"))  // what it is about
+ *     chat.onAttach = { presentPicker() }       // the paperclip, where the design draws one
+ *     chat.onRated = { rating in log(rating) }  // the end-of-chat rating
  */
 public final class GraineChat: ObservableObject {
     /// What has been said, oldest first: the customer's messages and the agent's replies, one bubble each.
@@ -31,6 +38,44 @@ public final class GraineChat: ObservableObject {
     @Published public private(set) var status: GraineChatStatus = .idle
     /// The agent is working on a reply: from the customer's message until its first words.
     @Published public private(set) var typing = false
+
+    /**
+     * The replies the agent suggests for its latest turn, drawn as chips by
+     * `GraineChatView` — for a chat of your own, draw them and send one with
+     * `sendQuickReply(_:)`. Gone once the customer sends anything, the agent
+     * starts another turn, or the conversation ends.
+     */
+    @Published public private(set) var quickReplies: [GraineQuickReply] = []
+
+    /**
+     * The agent ended the conversation. The chat window asks for a rating
+     * where the design does; your own UI can call `rate(style:value:)`. The
+     * customer sending another message starts the conversation over (and
+     * this goes back to false).
+     */
+    @Published public private(set) var ended = false
+
+    /// The customer's end-of-chat rating, once given (one per conversation). `onRated` hears it as it happens.
+    @Published public private(set) var rating: GraineChatRating?
+
+    /// What the conversation is about, as your app pinned it (`pin(_:)`); nil when nothing is pinned.
+    @Published public private(set) var pinned: GraineChatPin?
+
+    /// The customer rated the chat (in the window, or through `rate(style:value:)`). Main thread.
+    public var onRated: ((GraineChatRating) -> Void)?
+
+    /**
+     * Your app handles attachments: set this and the chat window draws the
+     * paperclip where the design asks for one; a tap calls it. The SDK sends
+     * nothing itself — upload what the customer picks and describe it to the
+     * agent as you would anything else. Nil (the default): no paperclip. Main thread.
+     */
+    public var onAttach: (() -> Void)? {
+        didSet { objectWillChange.send() }
+    }
+
+    /// The chat lost a connection it had and is making it again (the window's calm "Reconnecting…" banner).
+    @Published private(set) var wasOnline = false
 
     /**
      * This customer's calls still to come (`scheduledCalls()`), soonest first,
@@ -145,6 +190,33 @@ public final class GraineChat: ObservableObject {
             self.graine.noteInteraction()
             self.connection.send(text)
         }
+    }
+
+    /**
+     * Send one of the agent's quick replies: its `text`, as the customer's own
+     * message — a real turn, exactly as if typed.
+     */
+    public func sendQuickReply(_ reply: GraineQuickReply) {
+        send(reply.text)
+    }
+
+    /**
+     * Rate the conversation the agent ended, from a UI of your own (the chat
+     * window draws its own rating card): thumbs `1` up or `0` down, stars and
+     * emoji `1`–`5`. Taken once, only after the conversation ended; it goes
+     * on the conversation and to `onRated`.
+     */
+    public func rate(style: GraineChatRating.Style, value: Int) {
+        graine.onMain { self.connection.rate(style: style, value: value) }
+    }
+
+    /**
+     * Pin what the conversation is about — drawn under the chat's header or
+     * atop its thread, where the design puts it — or `nil` to take it away.
+     * Never sent to the agent.
+     */
+    public func pin(_ pin: GraineChatPin?) {
+        graine.onMain { self.pinned = pin.flatMap { $0.title.isEmpty ? nil : $0 } }
     }
 
     /// Connect now, and send what could not be sent.
@@ -307,6 +379,12 @@ public final class GraineChat: ObservableObject {
             if turns != connection.transcript.turns { turns = connection.transcript.turns }
             if status != connection.status { status = connection.status }
             if typing != connection.typing { typing = connection.typing }
+            if quickReplies != connection.quickReplies { quickReplies = connection.quickReplies }
+            if ended != connection.ended { ended = connection.ended }
+            if rating != connection.rating { rating = connection.rating }
+            if wasOnline != connection.wasOnline { wasOnline = connection.wasOnline }
+        case .rated(let answer):
+            onRated?(answer)
         case .opened:
             graine.conversationLive(chat: true)
         case .closed:

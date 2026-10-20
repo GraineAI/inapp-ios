@@ -70,6 +70,10 @@ enum ChatInbound {
     case appAction(id: String, name: String, arguments: [String: Any])
     /// The earlier conversation, restored (contract §2.6): the turns, oldest first — possibly none.
     case history([GraineChatTurn])
+    /// Replies the agent suggests for the turn it just sent, cleaned (DESIGN.md "Chat window v2"); none takes them away.
+    case quickReplies([GraineQuickReply])
+    /// The agent ended the conversation: the open turn closes, typing stops, the replies go, the rating may be asked for.
+    case conversationEnd
     case ignored(String)
 
     static func parse(_ raw: String) -> ChatInbound? {
@@ -85,6 +89,12 @@ enum ChatInbound {
             // A history whose turns are not a list is not one: ignored, never an error.
             guard let turns = ChatHistory.read(o) else { return .ignored(type) }
             return .history(turns)
+        case "quick_replies":
+            // Replies that are not a list are not a frame this build can draw: ignored.
+            guard let replies = QuickReplies.read(o) else { return .ignored(type) }
+            return .quickReplies(replies)
+        case "conversation_end":
+            return .conversationEnd
         default:
             break
         }

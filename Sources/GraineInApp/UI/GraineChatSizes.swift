@@ -66,7 +66,7 @@ struct GraineBigChat<Content: View>: View {
                     .padding(.bottom, bottomPad)
             }
             .frame(width: screen.width, height: max(0, screen.height - top))
-            .background(Color.graineHex(tokens.chat?.background ?? tokens.colors.background))
+            .background(Color.graineHex(tokens.chatOrClassic.bottomFill))
             .clipShape(GraineTopRounded(radius: radius))
             .modifier(SheetShadow(tokens: tokens))
             .offset(y: pull)
@@ -93,13 +93,17 @@ struct GraineBigChat<Content: View>: View {
         .frame(width: screen.width, height: screen.height)
     }
 
-    /// The grab handle: a strip in the header's fill, a short bar in it.
+    /// The grab handle: a strip in the header's fill (a plain header's is the wallpaper's), a short bar in it.
     private var handle: some View {
         let windowed = tokens.chrome == .window
-        let fill = windowed ? tokens.colors.surfaceRaised : (tokens.chat?.headerBackground ?? tokens.colors.surface)
-        let bar = windowed ? tokens.colors.textMuted : (tokens.chat?.headerSubtext ?? tokens.colors.textMuted)
+        let header = tokens.chatOrClassic.header
+        let bar = windowed ? tokens.colors.textMuted : header.fill.textMuted
         return ZStack {
-            Color.graineHex(fill)
+            if windowed {
+                Color.graineHex(tokens.colors.surfaceRaised)
+            } else {
+                headerFill
+            }
             Capsule()
                 .fill(Color.graineHex(bar).opacity(0.5))
                 .frame(width: CGFloat(Self.handleWidth), height: CGFloat(Self.handleHeight))
@@ -123,19 +127,31 @@ struct GraineBigChat<Content: View>: View {
 
     // MARK: Screen
 
+    /// The header's fill, carried behind the status bar and into the grab handle — solid where a plain header's wallpaper would show through.
+    private var headerFill: some View {
+        let chat = tokens.chatOrClassic
+        let frost = chat.header.style == "surface" ? (chat.glass?.surface ?? tokens.glass) : chat.glass?.surface
+        return ZStack {
+            if chat.header.style == "plain" { Color.graineHex(chat.header.fill.color) }
+            GraineChatHeaderFill(header: chat.header, frost: frost, scheme: tokens.scheme)
+        }
+    }
+
     private var fullScreen: some View {
         let windowed = tokens.chrome == .window
-        let headerFill = windowed ? tokens.colors.surfaceRaised : (tokens.chat?.headerBackground ?? tokens.colors.surface)
         return VStack(spacing: 0) {
             // The header's fill behind the status bar.
-            Color.graineHex(headerFill).frame(height: safe.top)
+            Group {
+                if windowed { Color.graineHex(tokens.colors.surfaceRaised) } else { headerFill }
+            }
+            .frame(height: safe.top)
             content()
                 .padding(.bottom, bottomPad)
                 .padding(.leading, safe.left)
                 .padding(.trailing, safe.right)
         }
         .frame(width: screen.width, height: screen.height)
-        .background(Color.graineHex(tokens.chat?.background ?? tokens.colors.background))
+        .background(Color.graineHex(tokens.chatOrClassic.bottomFill))
         .accessibilityAddTraits(.isModal)
     }
 

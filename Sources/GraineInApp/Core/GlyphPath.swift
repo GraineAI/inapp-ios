@@ -42,8 +42,9 @@ enum GlyphPath {
         defer { cacheLock.unlock() }
         if let hit = cache[data] { return hit }
         if unreadable.contains(data) { return nil }
-        // Bounded: a long-lived process meeting many designs keeps only the latest.
-        if cache.count + unreadable.count >= 32 {
+        // Bounded: a long-lived process meeting many designs keeps only the latest. Room for every one of the SDK's
+        // own icons (nineteen, most with two paths) and a few launcher glyphs, so drawing them never starts over.
+        if cache.count + unreadable.count >= 64 {
             cache.removeAll()
             unreadable.removeAll()
         }

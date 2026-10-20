@@ -317,6 +317,30 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         return max(0, screenSize.height - kb.minY)
     }
 
+    /**
+     * The chat window's call button and microphone (DESIGN.md "Chat window
+     * v2" → Header, Composer): only where the agent takes calls as well as
+     * chats, and a call can be placed. A tap is exactly the bar's own call —
+     * the switch to the call, then the microphone's start.
+     */
+    private var chatCall: (() -> Void)? {
+        guard canSwitch, model.fault == nil else { return nil }
+        return {
+            chosen = .voice
+            if !voice.isAttached { voice.attach() }
+            voice.start()
+        }
+    }
+
+    /// The height the composer takes at the window's bottom: its strip, or a floating capsule and its margins.
+    static func composerRoom(_ composer: GraineChatTokens.Composer) -> Double {
+        switch composer.style {
+        case "pill": return 60
+        case "floating": return composer.height + 20
+        default: return VoiceBar.Chat.composer
+        }
+    }
+
     /// What the chevron does, and closing a sheet, a panel or a screen: back to the call, or the bar closes.
     private func closeChat() {
         switch ChatWindowLayout.close(canSwitch: canSwitch) {
@@ -337,18 +361,23 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
             callName: graine.sessionOrCached?.calls?.callName,
             bookable: graine.bookingAvailable,
+            quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
+            wasOnline: chat.wasOnline, loader: loader,
             onSend: { chat.send($0) },
             onRetry: { chat.retry() },
             onCancelCall: { chat.cancelUpcomingCall(id: $0) },
             onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
             // A sheet, a panel and a screen offer New conversation like the compact window.
             onNewConversation: { Task { try? await chat.newConversation() } },
+            onRate: { chat.rate(style: $0, value: $1) },
+            onAttach: chat.onAttach,
+            onCall: chatCall,
             onCollapse: closeChat
         )
         .overlay(alignment: .bottom) {
             GraineWidgetView(graine: graine, inBar: true)
                 .padding(.horizontal, 12)
-                .padding(.bottom, CGFloat(VoiceBar.Chat.composer) + 8)
+                .padding(.bottom, CGFloat(Self.composerRoom(t.chatOrClassic.composer)) + 8)
         }
     }
 
@@ -518,11 +547,16 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
                 callName: graine.sessionOrCached?.calls?.callName,
                 bookable: graine.bookingAvailable,
+                quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
+                wasOnline: chat.wasOnline, loader: loader,
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },
                 onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
                 onNewConversation: { Task { try? await chat.newConversation() } },
+                onRate: { chat.rate(style: $0, value: $1) },
+                onAttach: chat.onAttach,
+                onCall: chatCall,
                 // Back to the call where there is one; a chat-only agent's chevron closes the bar.
                 onCollapse: closeChat
             )

@@ -50,6 +50,29 @@ public struct GraineChatTokens: Equatable, Sendable {
     public let showHistory: Bool
     /// The header's compose control (New conversation button). Off, `GraineChat.newConversation()` still works.
     public let newConversation: Bool
+
+    // v2 — every piece of the window (contract/DESIGN.md "Chat window v2", Core/ChatStyle.swift). Always
+    // complete: from an older server they are classic, derived from the words above.
+
+    /// The chat style the pieces came from (informational: they are resolved). `classic` from an older server.
+    public var preset: String { style.preset }
+    public var header: Header { style.header }
+    public var bubbles: Bubbles { style.bubbles }
+    public var timestamps: Timestamps { style.timestamps }
+    /// Behind the thread; `background` above is its base colour.
+    public var wallpaper: Wallpaper { style.wallpaper }
+    public var chips: Chips { style.chips }
+    public var cards: Cards { style.cards }
+    public var composer: Composer { style.composer }
+    public var typing: Typing { style.typing }
+    public var density: Density { style.density }
+    public var welcome: Welcome { style.welcome }
+    public var rating: Rating { style.rating }
+    public var escalation: Escalation { style.escalation }
+    /// Frosted header, composer, chips and agent bubbles; nil is solid.
+    public var glass: Glass? { style.glass }
+
+    let style: ChatStyle
 }
 
 /// How the call screen is drawn while the app is open (the system's call screen is the system's).
@@ -271,7 +294,8 @@ enum SurfaceTokens {
     /// Classic's call screen with its look derived — exactly what the server sends for it.
     static let legacyCall: GraineCallTokens = call(legacyFields, font: DesignTokens.Fallback.font)!
 
-    static func chat(_ raw: Any?, colors c: GraineThemeTokens.Colors) -> GraineChatTokens? {
+    /// `base`: what the classic pieces need of the design beyond the colours (Graine Classic's when read on its own).
+    static func chat(_ raw: Any?, colors c: GraineThemeTokens.Colors, base: ChatStyleBase = .classicFallback) -> GraineChatTokens? {
         guard let o = JSON.unwrap(raw) as? [String: Any] else { return nil }
         let suggestions = ((JSON.unwrap(o["suggestions"]) as? [Any]) ?? [])
             .compactMap { JSON.unwrap($0) as? String }
@@ -279,30 +303,44 @@ enum SurfaceTokens {
             .filter { !$0.isEmpty }
             .prefix(4)
             .map { CallWire.utf16Prefix($0, 40) }
-        return GraineChatTokens(
-            title: text(o["title"]) ?? "",
-            subtitle: text(o["subtitle"]) ?? "",
-            avatar: word(o["avatar"], in: ["logo", "glyph", "none"]) ?? "logo",
-            placeholder: text(o["placeholder"]) ?? "Message…",
-            showTimestamps: flag(o["showTimestamps"]) ?? false,
-            suggestions: Array(suggestions),
+        let v1 = ChatV1Words(
             background: DesignTokens.hex(o["background"]) ?? c.background,
             pattern: word(o["pattern"], in: ["none", "dots"]) ?? "none",
             patternColor: DesignTokens.hex(o["patternColor"]) ?? c.border,
+            showTimestamps: flag(o["showTimestamps"]) ?? false,
             headerBackground: DesignTokens.hex(o["headerBackground"]) ?? c.surface,
             headerText: DesignTokens.hex(o["headerText"]) ?? c.text,
             headerSubtext: DesignTokens.hex(o["headerSubtext"]) ?? c.textMuted,
             composerBackground: DesignTokens.hex(o["composerBackground"]) ?? c.surfaceRaised,
             composerText: DesignTokens.hex(o["composerText"]) ?? c.text,
             composerPlaceholder: DesignTokens.hex(o["composerPlaceholder"]) ?? c.textMuted,
-            composerBorder: DesignTokens.hex(o["composerBorder"]) ?? c.border,
+            composerBorder: DesignTokens.hex(o["composerBorder"]) ?? c.border
+        )
+        return GraineChatTokens(
+            title: text(o["title"]) ?? "",
+            subtitle: text(o["subtitle"]) ?? "",
+            avatar: word(o["avatar"], in: ["logo", "glyph", "none"]) ?? "logo",
+            placeholder: text(o["placeholder"]) ?? "Message…",
+            showTimestamps: v1.showTimestamps,
+            suggestions: Array(suggestions),
+            background: v1.background,
+            pattern: v1.pattern,
+            patternColor: v1.patternColor,
+            headerBackground: v1.headerBackground,
+            headerText: v1.headerText,
+            headerSubtext: v1.headerSubtext,
+            composerBackground: v1.composerBackground,
+            composerText: v1.composerText,
+            composerPlaceholder: v1.composerPlaceholder,
+            composerBorder: v1.composerBorder,
             // Absent (an older server) or a word this build does not know: the compact window.
             size: GraineChatSize(wire: o["size"]) ?? .compact,
             // The pieces the brand can leave out: absent, or anything but a boolean, is on.
             showUpcomingCalls: flag(o["showUpcomingCalls"]) ?? true,
             upcomingTitle: text(o["upcomingTitle"]) ?? "",
             showHistory: flag(o["showHistory"]) ?? true,
-            newConversation: flag(o["newConversation"]) ?? true
+            newConversation: flag(o["newConversation"]) ?? true,
+            style: ChatStyles.read(o, over: ChatStyles.classic(v1, colors: c, base: base))
         )
     }
 

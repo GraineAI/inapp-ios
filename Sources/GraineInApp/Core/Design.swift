@@ -513,21 +513,30 @@ enum DesignTokens {
         guard let t = JSON.unwrap(raw) as? [String: Any] else { return nil }
         guard let colors = self.colors(t["colors"]) else { return nil }
         let typography = font(t["font"])
+        let shape = self.shape(t["shape"])
+        let spacing = self.spacing(t["spacing"])
+        let elevation = self.elevation(t["elevation"])
+        let bubbles = GraineBubbleStyle(rawValue: word(t["bubbles"])) ?? .filled
+        // The chat's classic pieces (DESIGN.md "Chat window v2") are derived from these, as the resolver derives them.
+        let chatBase = ChatStyleBase(
+            radius: shape.radius, spacing: spacing, cardShadow: elevation.card, hardOffset: elevation.hardOffset,
+            borderWidth: shape.borderWidth, bubbles: bubbles
+        )
         return GraineThemeTokens(
             preset: JSON.nonEmpty(t["preset"]) ?? "",
             scheme: scheme,
             colors: colors,
             font: typography,
-            shape: shape(t["shape"]),
-            spacing: spacing(t["spacing"]),
-            elevation: elevation(t["elevation"]),
+            shape: shape,
+            spacing: spacing,
+            elevation: elevation,
             motion: motion(t["motion"]),
             icons: icons(t["icons"]),
             glass: glass(t["glass"]),
-            bubbles: GraineBubbleStyle(rawValue: word(t["bubbles"])) ?? .filled,
+            bubbles: bubbles,
             // Absent (an older server) or a kind of frame this build does not know: a plain surface.
             chrome: GraineDesignChrome(rawValue: word(t["chrome"])) ?? .none,
-            chat: SurfaceTokens.chat(t["chat"], colors: colors),
+            chat: SurfaceTokens.chat(t["chat"], colors: colors, base: chatBase),
             // The call screen's look leaves the name's and status line's weights to the scheme's type when a server predates it.
             call: SurfaceTokens.call(t["call"], font: typography)
         )

@@ -49,6 +49,8 @@ final class ChatConnection {
         case widgetPending([String: Any])
         /// An agent turn finished (settled), with its words.
         case agentTurnEnded(GraineChatTurn)
+        /// The customer rated the conversation the agent ended (taken once: one answer per conversation).
+        case rated(GraineChatRating)
         /// The connection went, with why (nil for a close we asked for).
         case closed(String?)
     }
@@ -72,6 +74,19 @@ final class ChatConnection {
     /// The agent opened a turn (its start marker) and no words have arrived yet.
     private(set) var agentTyping = false
     private(set) var transport: CallEngine.Transport?
+    /**
+     * The replies the agent suggests for its latest turn (a `quick_replies`
+     * frame). Gone once the customer sends anything, the agent starts another
+     * turn, an earlier conversation is restored, or the conversation ends —
+     * protocol.ts `foldChat`, pinned by chat-window.json → `fold`.
+     */
+    private(set) var quickReplies: [GraineQuickReply] = []
+    /// The agent ended the conversation (`conversation_end`): the window may ask for a rating. The customer speaking again starts over.
+    private(set) var ended = false
+    /// The customer's answer to that rating: one per conversation, only after the end.
+    private(set) var rating: GraineChatRating?
+    /// The socket opened at least once since the customer came into the chat: a drop now is a reconnect, not a first connect.
+    private(set) var wasOnline = false
 
     private var phase: Phase = .idle
     private var wanted = false
@@ -118,6 +133,7 @@ final class ChatConnection {
         scheduler.run { [self] in
             wanted = false
             teardown(sendStop: true, reason: nil)
+            wasOnline = false
             setStatus(.idle)
         }
     }
@@ -206,6 +222,7 @@ final class ChatConnection {
         scheduler.run { [self] in
             transcript.clear()
             queue = []
+            freshConversation()
             onEvent(.changed)
         }
     }
@@ -220,8 +237,34 @@ final class ChatConnection {
             transcript.clear()
             stopAwaiting()
             agentTyping = false
+            freshConversation()
             onEvent(.changed)
         }
+    }
+
+    /**
+     * The customer's end-of-chat rating. Taken once, and only for a
+     * conversation the agent ended: then it goes on the conversation as a
+     * quiet app event (recorded, never a nudge) while the socket is still open
+     * — the server keeps it a short while for this — and the app hears it.
+     */
+    func rate(style: GraineChatRating.Style, value: Int) {
+        scheduler.run { [self] in
+            guard ended, rating == nil else { return }
+            let answer = ChatRatings.make(style: style.rawValue, value: value)
+            rating = answer
+            write(ChatRatings.frame(answer))
+            // The state first, so an app reading `chat.rating` from its `onRated` sees the answer.
+            onEvent(.changed)
+            onEvent(.rated(answer))
+        }
+    }
+
+    /// What belongs to one conversation on screen: the replies offered, its end, its rating.
+    private func freshConversation() {
+        quickReplies = []
+        ended = false
+        rating = nil
     }
 
     // MARK: - Opening
@@ -313,6 +356,7 @@ final class ChatConnection {
         openTimer = nil
         attempt = 0
         transport = via
+        wasOnline = true
         write(CallWire.initFrame(variables: variables))
         // A screen set before the chat opened is the whole context for the agent's first words.
         if let frame = setup.contextFrame(), let text = CallWire.appContextFrame(frame) { write(text) }
@@ -415,8 +459,11 @@ final class ChatConnection {
         switch frame {
         case .text(let data):
             let chunk = CallWire.readAgentChunk(data)
+            // A start marker begins the agent's next turn: one still open without its end marker is over, and the
+            // replies suggested for the turn before are spent.
+            if chunk.startsTurn { agentTurnStarts() }
             if !chunk.text.isEmpty {
-                transcript.agentChunk(chunk.text, now: setup.now())
+                if transcript.agentChunk(chunk.text, now: setup.now()).began { quickReplies = [] }
                 agentTyping = false
                 stopAwaiting()
             } else if chunk.startsTurn {
@@ -425,6 +472,7 @@ final class ChatConnection {
             if chunk.endsTurn { endAgentTurn() }
             onEvent(.changed)
         case .beginningOfStream:
+            agentTurnStarts()
             agentTyping = true
             onEvent(.changed)
         case .endOfStream:
@@ -440,10 +488,37 @@ final class ChatConnection {
             runAction(id: id, name: name, arguments: arguments)
         case .history(let turns):
             // The conversation continues: the earlier turns, before any agent message. Never announced as new ones.
-            if transcript.restore(turns) { onEvent(.changed) }
+            if transcript.restore(turns) {
+                quickReplies = []
+                onEvent(.changed)
+            }
+        case .quickReplies(let replies):
+            // An empty list takes them away; offered after the conversation ended, they are nobody's to tap.
+            if replies.isEmpty {
+                guard !quickReplies.isEmpty else { return }
+                quickReplies = []
+            } else {
+                guard !ended else { return }
+                quickReplies = replies
+            }
+            onEvent(.changed)
+        case .conversationEnd:
+            // The open turn closes, typing stops, the replies go. The socket stays open a short while for a rating.
+            if let done = transcript.agentTurnEnded() { onEvent(.agentTurnEnded(done)) }
+            agentTyping = false
+            stopAwaiting()
+            quickReplies = []
+            ended = true
+            onEvent(.changed)
         case .ignored:
             break
         }
+    }
+
+    /// The agent's next turn begins: the one still open is over, and the replies offered for it go.
+    private func agentTurnStarts() {
+        quickReplies = []
+        if let done = transcript.agentTurnEnded() { onEvent(.agentTurnEnded(done)) }
     }
 
     private func endAgentTurn() {
@@ -476,6 +551,8 @@ final class ChatConnection {
     // MARK: - What the customer says
 
     private func say(_ words: String) {
+        // The customer has moved on — past the replies the agent suggested, and past a conversation that had ended.
+        freshConversation()
         if phase == .open {
             _ = transcript.customerSaid(words, delivery: .sent, now: setup.now())
             write(ChatWire.textFrame(words))

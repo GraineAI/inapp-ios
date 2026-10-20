@@ -49,6 +49,33 @@ import Testing
         guard case .ignored? = ChatInbound.parse(#"{"type":"widget"}"#) else { Issue.record("widget with no body"); return }
         #expect(ChatInbound.parse("nope") == nil)
     }
+
+    /// Chat window v2's two frames, on the chat socket only: a voice socket never reads them.
+    @Test func quickRepliesAndTheEndAreTypedOnTheChatAndIgnoredOnACall() {
+        guard case .quickReplies(let replies)? = ChatInbound.parse(#"{"type":"quick_replies","replies":["Yes",{"label":"No","text":"No, thanks"}]}"#) else {
+            Issue.record("quick replies"); return
+        }
+        #expect(replies == [GraineQuickReply(label: "Yes", text: "Yes"), GraineQuickReply(label: "No", text: "No, thanks")])
+        guard case .quickReplies(let none)? = ChatInbound.parse(#"{"type":"quick_replies","replies":[]}"#), none.isEmpty else {
+            Issue.record("an empty list takes them away"); return
+        }
+        guard case .ignored? = ChatInbound.parse(#"{"type":"quick_replies","replies":"Yes, No"}"#) else { Issue.record("not a list"); return }
+        guard case .conversationEnd? = ChatInbound.parse(#"{"type":"conversation_end"}"#) else { Issue.record("end"); return }
+        for frame in [#"{"type":"quick_replies","replies":["Yes"]}"#, #"{"type":"conversation_end"}"#] {
+            var ignored = false
+            if case .ignored? = CallInbound.parse(frame) { ignored = true }
+            #expect(ignored, "a call does not read \(frame)")
+        }
+    }
+
+    @Test func aRatingIsAQuietAppEvent() throws {
+        let frame = try #require(JSON.object(from: ChatRatings.frame(GraineChatRating(style: .thumbs, value: 1))))
+        #expect(frame["type"] as? String == "app_event")
+        let event = try #require(frame["event"] as? [String: Any])
+        #expect(event["name"] as? String == "chat_rating" && event["quiet"] as? Bool == true)
+        #expect(event["detail"] as? String == "The customer gave this chat a thumbs up.")
+        #expect((event["data"] as? [String: Any])?["scale"] as? Int == 1)
+    }
 }
 
 @Suite struct ChatTranscriptTests {
@@ -229,6 +256,20 @@ private final class ChatRig {
         #expect(rig.ended.map { $0.text } == ["Hello Asha!"])
         socket.frame(["type": "text", "data": "Anything else?"])
         #expect(rig.chat.transcript.turns.count == 3, "a second reply is its own bubble")
+    }
+
+    @Test func aStartMarkerEndsATurnWhoseEndNeverCame() throws {
+        let rig = ChatRig()
+        let socket = rig.online()
+        socket.frame(["type": "text", "data": "<beginning_of_stream>First"])
+        socket.frame(["type": "text", "data": "<beginning_of_stream>Second<end_of_stream>"])
+        #expect(rig.chat.transcript.turns.map { $0.text } == ["First", "Second"])
+        #expect(rig.chat.transcript.turns.allSatisfy { !$0.live })
+        #expect(rig.ended.map { $0.text } == ["First", "Second"])
+        socket.frame(["type": "beginning_of_stream"])
+        socket.frame(["type": "text", "data": "Third"])
+        socket.frame(["type": "beginning_of_stream"])
+        #expect(rig.chat.transcript.turns.last?.live == false, "a marker frame of its own closes the open turn too")
     }
 
     @Test func aMessageTypedOfflineWaitsAndGoesWhenTheChatIsUp() throws {

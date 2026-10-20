@@ -40,7 +40,12 @@ import Testing
                 "open", "openWithSize:", "newConversationWithCompletion:", "close", "send:", "retry", "clear",
                 "upcomingCalls", "answerWidgetWithId:dataJSON:summary:", "refreshUpcomingCalls", "cancelUpcomingCall:",
                 "addListener:", "removeListener:", "observe:",
+                "quickReplies", "sendQuickReply:", "ended", "rating", "rateWithStyle:value:", "observeRatings:",
+                "pinned", "pinWithTitle:subtitle:imageUrl:badge:", "clearPin", "setAttachHandler:",
             ], []),
+            "GraineObjCQuickReply": (["label", "text", "initWithLabel:text:"], []),
+            "GraineObjCChatRating": (["style", "value", "scale", "json"], []),
+            "GraineObjCChatPin": (["title", "subtitle", "imageUrl", "badge"], []),
             "GraineObjCCalls": ([
                 "configureWithDisplayName:ringtoneSound:ringTimeout:includesCallsInRecents:", "enableVoIPPushes",
                 "startCallWithReason:variables:", "startCallJSONWithReason:variablesJSON:", "prepareCallJSONWithReason:variablesJSON:", "answer", "decline", "end",
@@ -378,6 +383,55 @@ import Testing
         try await Task.sleep(nanoseconds: 80_000_000)
         #expect(rig.network.bodies("/api/embed/calls/list").count >= 2, "asked again")
         registration.unregister()
+        graine.chat.close()
+    }
+
+    /// Chat window v2 for a bridge: the agent's quick replies, the end of the conversation and its rating, the pin, the paperclip.
+    @Test func quickRepliesTheRatingThePinAndTheAttachHandlerCrossTheBridge() async throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session()
+        let graine = GraineObjC(graine: rig.graine)
+        graine.chat.open()
+        let socket = try #require(rig.network.socket)
+        socket.open()
+        socket.frame(["type": "text", "data": "<beginning_of_stream>Shall I go ahead?<end_of_stream>"])
+        socket.frame(["type": "quick_replies", "replies": ["Yes", ["label": "Later", "text": "Maybe later"]]])
+        #expect(graine.chat.quickReplies.map { "\($0.label)|\($0.text)" } == ["Yes|Yes", "Later|Maybe later"])
+        var snapshot = try #require(parse(graine.chat.snapshotJSON) as? [String: Any])
+        #expect((snapshot["quickReplies"] as? [[String: String]])?.last == ["label": "Later", "text": "Maybe later"])
+        #expect(snapshot["ended"] as? Bool == false && snapshot["rating"] is NSNull && snapshot["pin"] is NSNull)
+        socket.clearSent()
+        graine.chat.sendQuickReply(GraineObjCQuickReply(label: "Later", text: "Maybe later"))
+        #expect(socket.sent == [ChatWire.textFrame("Maybe later")])
+        #expect(graine.chat.quickReplies.isEmpty)
+
+        var heard: [String] = []
+        let registration = graine.chat.observeRatings { heard.append("\($0.style):\($0.value)/\($0.scale)") }
+        socket.frame(["type": "conversation_end"])
+        #expect(graine.chat.ended)
+        graine.chat.rate(style: "emoji", value: 5)
+        graine.chat.rate(style: "emoji", value: 1)
+        #expect(heard == ["emoji:5/5"], "one answer per conversation")
+        #expect(graine.chat.rating?.style == "emoji" && graine.chat.rating?.value == 5)
+        #expect((parse(graine.chat.rating?.json) as? [String: Any])?["scale"] as? Int == 5)
+        snapshot = try #require(parse(graine.chat.snapshotJSON) as? [String: Any])
+        #expect((snapshot["rating"] as? [String: Any])?["style"] as? String == "emoji")
+        registration.unregister()
+
+        graine.chat.pin(title: "Your plan", subtitle: "Renews on 14 Nov", imageUrl: "https://cdn.example.com/p.png", badge: nil)
+        #expect(graine.chat.pinned?.title == "Your plan" && graine.chat.pinned?.imageUrl == "https://cdn.example.com/p.png")
+        snapshot = try #require(parse(graine.chat.snapshotJSON) as? [String: Any])
+        #expect((snapshot["pin"] as? [String: Any])?["badge"] is NSNull)
+        graine.chat.clearPin()
+        #expect(graine.chat.pinned == nil)
+
+        var attached = 0
+        graine.chat.setAttachHandler { attached += 1 }
+        rig.graine.chat.onAttach?()
+        #expect(attached == 1)
+        graine.chat.setAttachHandler(nil)
+        #expect(rig.graine.chat.onAttach == nil)
         graine.chat.close()
     }
 

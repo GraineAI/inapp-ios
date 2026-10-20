@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.12.0")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.13.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -230,6 +230,38 @@ the agent remembers about the customer stays. `forgetMemory()` clears the chat
 on screen too. Anonymous customers, and those with memory off, start fresh
 every time; each agent in your app keeps its own conversation.
 
+### The chat window's style
+
+How the chat window looks — its header, bubbles, times, wallpaper, chips,
+cards, composer, typing indicator, welcome and end-of-chat rating — is chosen
+in the dashboard (**Chat window → Style**: Classic, Soft, Bold, Glass, Minimal,
+Crisp, Cozy, Calm, Compact, Lively, each tunable piece by piece) and drawn by
+`GraineChatView` and the bar's chat with no code. A few pieces are yours to give:
+
+```swift
+let chat = GraineInApp.shared.chat
+
+// What the conversation is about, under the header or atop the thread (never sent to the agent).
+chat.pin(GraineChatPin(title: "Your plan", subtitle: "Renews on 14 Nov", badge: "Active"))
+chat.pin(nil)
+
+// Your app handles attachments: the paperclip shows where the style draws one.
+chat.onAttach = { presentPicker() }
+
+// The end-of-chat rating, once the customer gives it.
+chat.onRated = { rating in print(rating.style, rating.value, rating.scale) }
+```
+
+The agent can suggest replies for its message — chips the customer taps to
+answer — and end the conversation, after which the window asks for a rating
+where the style does. Drawing your own chat? `chat.quickReplies` and
+`chat.sendQuickReply(_:)` (a tap is the customer's own message),
+`chat.ended`, `chat.rating` and `chat.rate(style:value:)` (thumbs `1`/`0`,
+stars and emoji `1`–`5`). The agent's words may carry light formatting
+(bold, italics, lists, links, code); the window draws it, and a long press
+copies a message's words. The call button and the microphone in the chat
+show where the agent takes calls and the bar can place one.
+
 ## A bigger chat window
 
 How big the bar's chat opens is set per agent in the dashboard — **Embed &
@@ -427,7 +459,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.12.0")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.13.0")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

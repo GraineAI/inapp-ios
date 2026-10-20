@@ -21,6 +21,8 @@ public struct GraineChatView: View {
     private let graine: GraineInApp?
     private let accent: Color?
     private let onClose: (() -> Void)?
+    /// Graine's own previews only: where the call button and the microphone would go (this screen places no call itself).
+    private var previewCall: (() -> Void)? = nil
 
     /// - Parameters:
     ///   - graine: defaults to the instance `GraineInApp.configure` made. Nothing draws before that.
@@ -32,9 +34,16 @@ public struct GraineChatView: View {
         self.onClose = onClose
     }
 
+    init(graine: GraineInApp, previewCall: (() -> Void)?) {
+        self.graine = graine
+        self.accent = nil
+        self.onClose = nil
+        self.previewCall = previewCall
+    }
+
     public var body: some View {
         if let graine = graine ?? GraineInApp.current {
-            GraineChatScreen(graine: graine, chat: graine.chat, fonts: graine.fonts, accentOverride: accent, onClose: onClose)
+            GraineChatScreen(graine: graine, chat: graine.chat, fonts: graine.fonts, accentOverride: accent, onClose: onClose, onCall: previewCall)
         }
     }
 }
@@ -45,17 +54,19 @@ struct GraineChatScreen: View {
     @ObservedObject var fonts: GraineFontStore
     let accentOverride: Color?
     let onClose: (() -> Void)?
+    var onCall: (() -> Void)? = nil
 
     @StateObject private var model: GraineAppearanceModel
     @StateObject private var keyboard = GraineKeyboardObserver()
     @Environment(\.colorScheme) private var colorScheme
 
-    init(graine: GraineInApp, chat: GraineChat, fonts: GraineFontStore, accentOverride: Color?, onClose: (() -> Void)?) {
+    init(graine: GraineInApp, chat: GraineChat, fonts: GraineFontStore, accentOverride: Color?, onClose: (() -> Void)?, onCall: (() -> Void)? = nil) {
         self.graine = graine
         _chat = ObservedObject(wrappedValue: chat)
         _fonts = ObservedObject(wrappedValue: fonts)
         self.accentOverride = accentOverride
         self.onClose = onClose
+        self.onCall = onCall
         _model = StateObject(wrappedValue: GraineAppearanceModel(graine: graine))
     }
 
@@ -84,6 +95,8 @@ struct GraineChatScreen: View {
                 upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
                 callName: graine.sessionOrCached?.calls?.callName,
                 bookable: graine.bookingAvailable,
+                quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
+                wasOnline: chat.wasOnline, loader: Loaders.resolve(model.appearance["loader"]),
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },
@@ -91,6 +104,10 @@ struct GraineChatScreen: View {
                 onBook: { Task { @MainActor in _ = await graine.presentBooking() } },
                 // A refusal leaves the conversation as it was; nothing to say over it.
                 onNewConversation: { Task { try? await chat.newConversation() } },
+                onRate: { chat.rate(style: $0, value: $1) },
+                onAttach: chat.onAttach,
+                // No call from this screen: it has no bar to carry one (GraineAgentBar's chat offers it).
+                onCall: onCall,
                 onCollapse: { onClose?() }
             )
         }

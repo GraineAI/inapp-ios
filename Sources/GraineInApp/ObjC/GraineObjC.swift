@@ -223,7 +223,7 @@ enum ObjCBridge {
         ]
         // Only what the server sent: a design from before these tokens writes without them, as Android's does.
         if let chat = t.chat {
-            o["chat"] = [
+            var words: [String: Any] = [
                 "title": chat.title, "subtitle": chat.subtitle, "avatar": chat.avatar, "placeholder": chat.placeholder,
                 "showTimestamps": chat.showTimestamps, "suggestions": chat.suggestions,
                 "background": chat.background, "pattern": chat.pattern, "patternColor": chat.patternColor,
@@ -233,7 +233,10 @@ enum ObjCBridge {
                 "size": chat.size.rawValue,
                 "showUpcomingCalls": chat.showUpcomingCalls, "upcomingTitle": chat.upcomingTitle,
                 "showHistory": chat.showHistory, "newConversation": chat.newConversation,
-            ] as [String: Any]
+            ]
+            // The chat window v2's pieces (`header`, `bubbles`, … `glass`), always complete: classic from an older server.
+            for (key, value) in ChatStyles.json(chat.style, number: n) { words[key] = value }
+            o["chat"] = words
         }
         if let call = t.call {
             o["call"] = [

@@ -2,7 +2,8 @@ import Foundation
 
 /*
  * THE SDK'S OWN ICONS — microphone, hang up, send, chat, call, chevron,
- * close — as 24×24 path data: the same strings the dashboard's Garage draws
+ * close, and the chat window's paperclip, thumbs, star, arrow and message
+ * marks — as 24×24 path data: the same strings the dashboard's Garage draws
  * and every SDK draws (contract/design.json → `icons`, which the tests
  * compare against). contract/DESIGN.md "Icons".
  *
@@ -25,6 +26,16 @@ enum GraineIconName: String, CaseIterable {
     case compose
     /// The call screen's loudspeaker.
     case speaker
+    // The chat window (DESIGN.md "Chat window v2"): the paperclip, the rating, scroll-to-latest and a message's status.
+    case attach
+    case thumbUp
+    case thumbDown
+    case star
+    case arrowDown
+    case check
+    case clock
+    case alert
+    case retry
 }
 
 /**
@@ -49,6 +60,15 @@ enum GraineIcons {
         .close: GraineIconPaths(body: nil, lines: "M6 6l12 12M18 6 6 18"),
         .compose: GraineIconPaths(body: nil, lines: "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"),
         .speaker: GraineIconPaths(body: "M4 9.5h3.5L12 5.5v13l-4.5-4H4z", lines: "M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"),
+        .attach: GraineIconPaths(body: nil, lines: "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"),
+        .thumbUp: GraineIconPaths(body: "M15 5.88L14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88z", lines: "M7 10v12"),
+        .thumbDown: GraineIconPaths(body: "M9 18.12L10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88z", lines: "M17 14V2"),
+        .star: GraineIconPaths(body: "M11.525 2.295a0.53 0.53 0 0 1 0.95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166 0.756a0.53 0.53 0 0 1 0.294 0.904l-3.736 3.638a2.123 2.123 0 0 0 -0.611 1.878l0.882 5.14a0.53 0.53 0 0 1 -0.771 0.56l-4.618 -2.428a2.122 2.122 0 0 0 -1.973 0L6.396 21.01a0.53 0.53 0 0 1 -0.77 -0.56l0.881 -5.139a2.122 2.122 0 0 0 -0.611 -1.879L2.16 9.795a0.53 0.53 0 0 1 0.294 -0.906l5.165 -0.755a2.122 2.122 0 0 0 1.597 -1.16z", lines: nil),
+        .arrowDown: GraineIconPaths(body: nil, lines: "M12 5v14M19 12l-7 7-7-7"),
+        .check: GraineIconPaths(body: nil, lines: "M20 6L9 17l-5-5"),
+        .clock: GraineIconPaths(body: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", lines: "M12 7.5V12l3 2"),
+        .alert: GraineIconPaths(body: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", lines: "M12 7.5v5M12 16.25v0.01"),
+        .retry: GraineIconPaths(body: nil, lines: "M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16M3 21v-5h5"),
     ]
 
     static func paths(_ name: GraineIconName) -> GraineIconPaths {

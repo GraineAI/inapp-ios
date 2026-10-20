@@ -334,8 +334,18 @@ struct GraineWidgetTheme {
     let borderWidth: CGFloat
     let padding: CGFloat
     let gap: CGFloat
+    /**
+     * The chat's card tokens (DESIGN.md "Chat window v2" → Cards): corners,
+     * shadow or hard offset, outline, the large image's shape and the main
+     * button's treatment. Nil without a design; classic, they are exactly the
+     * card as it was.
+     */
+    var cards: GraineChatTokens.Cards? = nil
 
     var designed: Bool { tokens != nil }
+
+    /// The card's outline: always without a design; with one, where `cards.border` keeps it.
+    var outlined: Bool { cards?.border ?? true }
 
     /// A title's CSS weight as a SwiftUI weight.
     var titleWeight: Font.Weight {
@@ -355,11 +365,29 @@ struct GraineWidgetTheme {
     @ViewBuilder
     func cardShadow<S: Shape>(_ shape: S) -> some View {
         if let t = tokens {
+            let hard = cards?.hard ?? (t.elevation.hardOffset != nil)
             GraineShadowLayer(
-                shape: shape, shadow: t.elevation.card,
-                hardOffset: t.elevation.hardOffset, hardColor: .graineHex(t.colors.text)
+                shape: shape, shadow: hard ? nil : (cards.map { $0.shadow } ?? t.elevation.card),
+                hardOffset: hard ? t.elevation.hardOffset : nil, hardColor: .graineHex(t.colors.text)
             )
         }
+    }
+
+    /// How a main ("filled") button is drawn: the card tokens' treatment, or the accent as before.
+    struct MainButton {
+        let fill: Color?
+        let text: Color
+        let border: Color?
+        let strong: Bool
+    }
+
+    /// The design's main-button treatment — unless the component chose its own accent, which still wins.
+    func mainButton(ownAccent: Bool) -> MainButton {
+        guard let c = cards, let t = tokens, !ownAccent else { return MainButton(fill: accent, text: onAccent, border: nil, strong: false) }
+        func paint(_ hex: String) -> Color { hex == t.colors.accent ? accent : (hex == t.colors.onAccent ? onAccent : .graineHex(hex)) }
+        return MainButton(
+            fill: c.buttonFill.map(paint), text: paint(c.buttonText), border: c.buttonBorder.map(paint), strong: c.button == "text"
+        )
     }
 }
 
@@ -409,7 +437,10 @@ struct GraineWidgetHost: View {
         let loader = Loaders.resolve(model.appearance["loader"])
         let tokens = model.design?.tokens(deviceDark: colorScheme == .dark)
         let grammar = DesignRules.widgetGrammar(look, tokens: tokens)
-        let radius = DesignRules.widgetRadius(look, tokens: tokens, appearanceRadius: dash.radius)
+        let cards = tokens?.chatOrClassic.cards
+        // The component's own radius wins, then a platform it chose; otherwise the design's card corners.
+        let radius = look.radius == nil && look.platform == .auto && cards != nil
+            ? cards!.radius : DesignRules.widgetRadius(look, tokens: tokens, appearanceRadius: dash.radius)
 
         guard let t = tokens else {
             let accentHex = look.accent ?? dash.accent
@@ -461,7 +492,8 @@ struct GraineWidgetHost: View {
             animation: t.motion.animation(reduceMotion: reduceMotion),
             borderWidth: CGFloat(t.shape.borderWidth),
             padding: CGFloat(t.spacing.cardPadding),
-            gap: CGFloat(t.spacing.gap)
+            gap: CGFloat(t.spacing.gap),
+            cards: cards
         )
     }
 
@@ -583,13 +615,17 @@ struct GraineWidgetCard: View {
         }
     }
 
-    /// A choice is a primary button: a capsule before designs; with one, `radius.md` (or the chosen platform's pill).
+    /// A choice is a primary button: a capsule before designs; with one, `radius.md` (or the chosen platform's pill), drawn as the design's main button.
     @ViewBuilder
     private var choiceFill: some View {
+        let main = theme.mainButton(ownAccent: content.look.accent != nil)
         if theme.designed && !theme.grammar.pillButtons {
-            RoundedRectangle(cornerRadius: CGFloat(theme.grammar.buttonRadius), style: .continuous).fill(theme.accent)
+            let shape = RoundedRectangle(cornerRadius: CGFloat(theme.grammar.buttonRadius), style: .continuous)
+            shape.fill(main.fill ?? .clear)
+                .overlay { if let border = main.border { shape.strokeBorder(border, lineWidth: max(1, theme.borderWidth)) } }
         } else {
-            Capsule().fill(theme.accent)
+            Capsule().fill(main.fill ?? .clear)
+                .overlay { if let border = main.border { Capsule().strokeBorder(border, lineWidth: max(1, theme.borderWidth)) } }
         }
     }
 
@@ -613,7 +649,9 @@ struct GraineWidgetCard: View {
         .modifier(GraineWindowed(bar: windowBar, spoken: true))
         .background(theme.cardFill, in: RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
+            if theme.outlined {
+                RoundedRectangle(cornerRadius: theme.radius, style: .continuous).stroke(theme.border, lineWidth: theme.borderWidth)
+            }
         }
         .modifier(GraineCardDepth(theme: theme))
     }
@@ -766,7 +804,7 @@ struct GraineWidgetCard: View {
                 }) {
                     Text(chips[i].label)
                         .font(theme.font(.strong, .system(size: 13.5, weight: .bold)))
-                        .foregroundColor(theme.onAccent)
+                        .foregroundColor(theme.mainButton(ownAccent: content.look.accent != nil).text)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 14)
@@ -885,6 +923,8 @@ struct GraineWidgetRowView: View {
     /// nil when choosing one; true/false when choosing several.
     let picked: Bool?
     let onPick: () -> Void
+    /// The large image's width, for a shape that follows it (`cards.image`).
+    @State private var heroWidth: CGFloat = 0
 
     private var many: Bool { picked != nil }
     /// Choosing several: the ROW toggles, always — a per-row button beside a tick is two controls for one decision.
@@ -920,8 +960,11 @@ struct GraineWidgetRowView: View {
             if !row.image.isEmpty {
                 picture
                     .frame(maxWidth: .infinity)
-                    .frame(height: heroHeight)
+                    .frame(height: imageHeight)
                     .clipShape(RoundedRectangle(cornerRadius: max(8, theme.radius - 8), style: .continuous))
+                    .background(GeometryReader { g in
+                        Color.clear.onAppear { heroWidth = g.size.width }.onChange(of: g.size.width) { heroWidth = $0 }
+                    })
             }
             badge
             titleLine(big: true)
@@ -1016,6 +1059,12 @@ struct GraineWidgetRowView: View {
         case .medium: return 140
         case .large: return 180
         }
+    }
+
+    /// The large image: its own height (`auto`), or the design's shape for its width — always 100–260.
+    private var imageHeight: CGFloat {
+        guard let image = theme.cards?.image, image != "auto", heroWidth > 0 else { return heroHeight }
+        return CGFloat(ChatWindowRules.imageHeight(image, width: Double(heroWidth), auto: Double(heroHeight)))
     }
 
     private var thumbSize: CGFloat {
@@ -1123,12 +1172,14 @@ struct GraineWidgetRowView: View {
 
     private func actionButton(wide: Bool) -> some View {
         let outlined = look.button == .outline
-        let hollow = row.unavailable || outlined
+        // A filled button (the component's own look) is drawn as the design's main button.
+        let main = theme.mainButton(ownAccent: look.accent != nil)
+        let hollow = row.unavailable || outlined || main.fill == nil
         let label = row.unavailable ? "Unavailable" : row.selectLabel
         let maxWidth: CGFloat? = wide ? CGFloat.infinity : nil
-        let textColor: Color = row.unavailable ? theme.muted : (outlined ? theme.accent : theme.onAccent)
-        let fill: Color = hollow ? Color.clear : theme.accent
-        let stroke: Color = row.unavailable ? theme.border : theme.accent
+        let textColor: Color = row.unavailable ? theme.muted : (outlined ? theme.accent : main.text)
+        let fill: Color = row.unavailable || outlined ? Color.clear : (main.fill ?? .clear)
+        let stroke: Color = row.unavailable ? theme.border : (outlined ? theme.accent : (main.border ?? .clear))
         let grammar = theme.grammar
         let corner = min(22, CGFloat(wide ? grammar.buttonRadius : (grammar.pillButtons ? 999 : grammar.buttonRadius)))
         return Button(action: onPick) {

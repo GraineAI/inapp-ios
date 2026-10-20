@@ -36,6 +36,15 @@ struct GraineType {
     let names: [String: String]
     /// GraineFontStore.faces: `family|weight` → the PostScript name of a face the SDK registered.
     var faces: [String: String] = [:]
+    /// The system's text size, as a multiple of the default (Dynamic Type); 1 where a surface keeps its sizes fixed.
+    var scale: Double = 1
+
+    /// The same type at the system's text size (the chat window follows Dynamic Type).
+    func scaled(_ factor: Double) -> GraineType {
+        var copy = self
+        copy.scale = factor
+        return copy
+    }
 
     func callAsFunction(_ role: GraineTextRole) -> Font {
         let spec = self.spec(role)
@@ -60,23 +69,28 @@ struct GraineType {
 
     /// The body family at `size` points and `weight`.
     func body(_ size: Double, _ weight: Int) -> Font {
-        GraineTypeface.font(family: font.body, size: size, weight: weight, names: names, faces: faces)
+        GraineTypeface.font(family: font.body, size: size * scale, weight: weight, names: names, faces: faces)
     }
 
     /// The heading family at `size` points and `weight`.
     func heading(_ size: Double, _ weight: Int) -> Font {
-        GraineTypeface.font(family: font.heading, size: size, weight: weight, names: names, faces: faces)
+        GraineTypeface.font(family: font.heading, size: size * scale, weight: weight, names: names, faces: faces)
+    }
+
+    /// The platform's monospace at `size` points (code in the agent's words).
+    func mono(_ size: Double, _ weight: Int) -> Font {
+        .system(size: CGFloat(size * scale), weight: GraineTypeface.swiftUIWeight(weight), design: .monospaced)
     }
 
     /// `letterSpacing.body` (em) as points at `size`.
-    func bodyTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.body * size) }
+    func bodyTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.body * size * scale) }
 
     /// `letterSpacing.title` (em) as points at `size`.
-    func titleTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.title * size) }
+    func titleTracking(_ size: Double) -> CGFloat { CGFloat(font.letterSpacing.title * size * scale) }
 
     /// The gap that makes a body-family line `lineHeight` points tall, in the face it actually resolves to.
     func bodyLineSpacing(size: Double, weight: Int, lineHeight: Double) -> CGFloat {
-        GraineTypeface.lineSpacing(family: font.body, size: size, weight: weight, lineHeight: lineHeight, names: names, faces: faces)
+        GraineTypeface.lineSpacing(family: font.body, size: size * scale, weight: weight, lineHeight: lineHeight * scale, names: names, faces: faces)
     }
 
     private func spec(_ role: GraineTextRole) -> (family: String, size: Double, weight: Int) {
