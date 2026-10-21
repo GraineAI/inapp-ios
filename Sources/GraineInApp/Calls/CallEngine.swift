@@ -47,8 +47,12 @@ protocol CallSocket: AnyObject {
 struct CallSocketEvents {
     var opened: () -> Void
     var received: (String) -> Void
-    /// The socket is gone: `byServer` for a close frame from the other end, false for an error (`detail` says what).
-    var closed: (_ byServer: Bool, _ detail: String?) -> Void
+    /**
+     * The socket is gone: `byServer` for a close frame from the other end,
+     * false for an error (`detail` says what). `code` is the close frame's
+     * code whenever one arrived — an error can follow it — else nil.
+     */
+    var closed: (_ byServer: Bool, _ detail: String?, _ code: Int?) -> Void
 }
 
 /// The network a call needs: one POST and one socket.
@@ -159,6 +163,10 @@ final class CallEngine {
         case caption(GraineCaption)
         /// What the agent's audio turned out to be, once known.
         case format(AgentAudioFormat)
+        /// An analytics row the call sent (GraineCallTelemetry's frame): its connection report is read from these (CallConnectionFold).
+        case row(String)
+        /// The audio as received so far, on WebRTC (GraineRtcEvent.audio): the report's audio until the quality row.
+        case audio(lossPct: Double?, jitterAvgMs: Double?, jitterMaxMs: Double?, rttAvgMs: Double?)
         case ended(Ending)
     }
 
@@ -228,6 +236,8 @@ final class CallEngine {
     private var connectAt: Double?
     private var openedAt: Double?
     private var voiceRowSent = false
+    /// The `ended` row went: once per call.
+    private var endedSent = false
 
     init(setup: Setup, audio: CallAudioIO, network: CallNetwork, scheduler: CallScheduler, telemetry: Telemetry? = nil, onEvent: @escaping (Event) -> Void) {
         self.setup = setup
@@ -400,6 +410,27 @@ final class CallEngine {
         }
     }
 
+    /**
+     * The call's `ended` row (GraineCallTelemetry.endedFrame), once, on the
+     * socket while it is open — just before a hang-up: who or what ended it,
+     * how long the conversation had been open, and whether the agent's voice
+     * was heard.
+     */
+    func sendEnded(cause: String) {
+        scheduler.run { [self] in
+            guard phase == .open, !endedSent else { return }
+            let frame = GraineCallTelemetry.endedFrame(
+                cause: cause,
+                transport: "ws",
+                afterMs: GraineCallTelemetry.milliseconds(from: openedAt, to: scheduler.now),
+                voiceHeard: voiceRowSent
+            )
+            guard let row = frame else { return }
+            endedSent = true
+            send(row)
+        }
+    }
+
     /// Hang up: the stop frame, then the socket ~200 ms later.
     func hangUp() {
         scheduler.run { [self] in
@@ -482,7 +513,7 @@ final class CallEngine {
         let events = CallSocketEvents(
             opened: { [weak self] in self?.scheduler.run { self?.socketOpened(transport) } },
             received: { [weak self] text in self?.scheduler.run { self?.received(text) } },
-            closed: { [weak self] byServer, detail in self?.scheduler.run { self?.socketClosed(byServer: byServer, detail: detail) } }
+            closed: { [weak self] byServer, detail, _ in self?.scheduler.run { self?.socketClosed(byServer: byServer, detail: detail) } }
         )
         connectAt = scheduler.now
         socket = network.openSocket(url, protocols: protocols, events: events)
@@ -518,7 +549,7 @@ final class CallEngine {
         guard let telemetry = telemetry else { return }
         let now = scheduler.now
         openedAt = now
-        send(telemetry.transportFrame)
+        sendRow(telemetry.transportFrame)
         let setup = GraineCallTelemetry.milliseconds(from: telemetry.tapAt, to: connectAt)
         let dial = GraineCallTelemetry.milliseconds(from: connectAt, to: now)
         let row = GraineCallTelemetry.frame("connect", [
@@ -530,7 +561,13 @@ final class CallEngine {
             "mint_ms": ticketCame ? GraineCallTelemetry.milliseconds(from: ticketAskedAt, to: ticketAt) : nil,
             "mint_route": ticketCame ? "web" : nil,
         ])
-        if let row = row { send(row) }
+        if let row = row { sendRow(row) }
+    }
+
+    /// An analytics row: on the socket, and to whoever reads the call's connection report.
+    private func sendRow(_ row: String) {
+        send(row)
+        onEvent(.row(row))
     }
 
     /// The analytics row for the agent's first audio on the socket — its voice, heard: once.
@@ -544,7 +581,7 @@ final class CallEngine {
             "first_audio_ms": GraineCallTelemetry.milliseconds(from: opened, to: now),
             "codec": format.kind == .mulaw ? "PCMU/\(format.sampleRate)" : "L16/\(format.sampleRate)",
         ])
-        if let row = row { send(row) }
+        if let row = row { sendRow(row) }
     }
 
     /// Two whole durations added, so a total is exactly its parts; nil unless both are known.

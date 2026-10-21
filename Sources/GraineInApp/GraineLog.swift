@@ -10,6 +10,11 @@ enum GraineLog {
         os_log("%{public}@", log: log, type: .default, message)
     }
 
+    /// A fact worth having in a device's log whatever `debug` says — one line per call at most (CallKit handing a call's audio over).
+    static func info(_ message: String) {
+        os_log("%{public}@", log: log, type: .default, message)
+    }
+
     static func warning(_ message: String) {
         os_log("%{public}@", log: log, type: .error, "warning: " + message)
     }

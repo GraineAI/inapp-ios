@@ -17,6 +17,18 @@ public final class GraineObjCCallOutcome: NSObject {
     @objc public let hosted: Bool
     /// The agent the call was with, by name (`default` for the default agent); nil when it is not known.
     @objc public let agent: String?
+    /**
+     * How the call connected, as it stood at this outcome — final for `ended` —
+     * as JSON (`GraineObjCCalls.connectionJSON`'s shape); nil when nothing of
+     * it was known.
+     */
+    @objc public let connectionJSON: String?
+    /**
+     * Who or what ended the call (`GraineCalls.endCause`) on an outcome that
+     * ends it: `local_end`, `remote_bye`, `media_drop`, `audio_watch`,
+     * `provider_reset` or `failed`; nil otherwise.
+     */
+    @objc public let cause: String?
     /// The same, as JSON.
     @objc public let json: String
 
@@ -27,6 +39,8 @@ public final class GraineObjCCallOutcome: NSObject {
         durationSeconds = ObjCBridge.int(o["durationSeconds"]).map { NSNumber(value: $0) }
         hosted = JSON.flag(o["hosted"])
         agent = JSON.nonEmpty(o["agent"])
+        connectionJSON = (o["connection"] as? [String: Any]).map { ObjCBridge.text($0) }
+        cause = JSON.nonEmpty(o["cause"])
         json = ObjCBridge.text(o)
     }
 }
@@ -115,6 +129,26 @@ public final class GraineObjCCalls: NSObject {
         }
     }
 
+    /**
+     * Calls start on the loudspeaker (YES, the default) unless a headset, a car
+     * or AirPlay is the route (`GraineCalls.speakerByDefault`); NO starts them
+     * on the earpiece. `setSpeaker:` still moves a call either way.
+     */
+    @objc public var speakerByDefault: Bool {
+        get {
+            #if os(iOS)
+            return objcOnMainSync { graine.calls.speakerByDefault }
+            #else
+            return true
+            #endif
+        }
+        set {
+            #if os(iOS)
+            onMain { self.graine.calls.speakerByDefault = newValue }
+            #endif
+        }
+    }
+
     /// Receive the agent's calls as VoIP pushes. Call at every launch.
     @objc(enableVoIPPushes)
     public func enableVoIPPushes() {
@@ -167,7 +201,7 @@ public final class GraineObjCCalls: NSObject {
     @objc(decline)
     public func decline() {
         #if os(iOS)
-        if graine.calls.state == .ringing { graine.calls.end() }
+        graine.calls.decline()
         #endif
     }
 
@@ -275,8 +309,36 @@ public final class GraineObjCCalls: NSObject {
     @objc public var transport: String? { snapshot()["transport"] as? String }
     /// Why a call that tried WebRTC runs on the WebSocket ("no_answer", "ice_timeout", …); nil otherwise.
     @objc public var transportFallbackReason: String? { snapshot()["transportFallbackReason"] as? String }
+    /// Why the call was made: the ring's reason, or the one the call was placed with (`GraineCalls.reason`); nil without one.
+    @objc public var reason: String? { snapshot()["reason"] as? String }
+    /**
+     * Who or what ended the call, while `state` is `ended` (`GraineCalls.endCause`):
+     * `local_end`, `remote_bye`, `media_drop`, `audio_watch`,
+     * `provider_reset` or `failed`; nil otherwise.
+     */
+    @objc public var endCause: String? { snapshot()["endCause"] as? String }
+    /// How loud the agent's voice is as it is heard, 0–1 (`GraineCalls.agentLevel`): for a visualiser.
+    @objc public var agentLevel: Double { (snapshot()["agentLevel"] as? NSNumber)?.doubleValue ?? 0 }
+    /// Whether `agentLevel` has been measured on this call; until it has, move a visualiser with `agentSpeaking`.
+    @objc public var agentLevelHeard: Bool { snapshot()["agentLevelHeard"] as? Bool ?? false }
+    /// When the conversation opened, for the call's duration; nil before.
+    @objc public var connectedAt: Date? {
+        (snapshot()["connectedAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1_000) }
+    }
+    /**
+     * How the call connected and how its audio holds up (`GraineCalls.connection`),
+     * as JSON — `{transport, prepared, preparedAgeSeconds, credential, setupMs,
+     * loginMs, answerMs, firstWordsMs, tapToVoiceMs, audio: {lossPct,
+     * jitterAvgMs, jitterPeakMs, rttMs, quality} | null, recoveries}`, every key
+     * present, null until known; nil until the call reaches its conversation.
+     */
+    @objc public var connectionJSON: String? { (snapshot()["connection"] as? [String: Any]).map { ObjCBridge.text($0) } }
 
-    /// The call as JSON, for a bridge: every field above, plus `caption` and `missedCall`.
+    /**
+     * The call as JSON, for a bridge: every field above, plus `caption`,
+     * `transcript` (`[{role, text, live}]`, the call's lines so far),
+     * `connection` (as `connectionJSON`, or null) and `missedCall`.
+     */
     @objc public var snapshotJSON: String { ObjCBridge.text(snapshot()) }
 
     func snapshot() -> [String: Any] {
@@ -285,6 +347,8 @@ public final class GraineObjCCalls: NSObject {
                 "state": "idle", "endReason": NSNull(), "callId": NSNull(), "callerName": "", "direction": NSNull(),
                 "hosted": false, "muted": false, "speakerOn": false, "agentSpeaking": false, "reconnecting": false, "showsCallScreen": false,
                 "agent": NSNull(), "transport": NSNull(), "transportFallbackReason": NSNull(),
+                "reason": NSNull(), "agentLevel": 0.0, "agentLevelHeard": false, "connectedAt": NSNull(),
+                "transcript": [Any](), "connection": NSNull(), "endCause": NSNull(), "speakerByDefault": true,
             ]
             #if os(iOS)
             let c = graine.calls
@@ -303,6 +367,14 @@ public final class GraineObjCCalls: NSObject {
             o["agent"] = c.agent ?? NSNull()
             o["transport"] = c.transport?.rawValue ?? NSNull()
             o["transportFallbackReason"] = c.transportFallbackReason ?? NSNull()
+            o["reason"] = c.reason ?? NSNull()
+            o["agentLevel"] = c.agentLevel
+            o["agentLevelHeard"] = c.agentLevelHeard
+            o["connectedAt"] = ObjCBridge.millis(c.connectedAt)
+            o["transcript"] = c.transcript.map { ["role": $0.role == .agent ? "agent" : "user", "text": $0.text, "live": $0.live] as [String: Any] }
+            o["connection"] = c.connection.map { $0.json as Any } ?? NSNull()
+            o["endCause"] = c.endCause?.rawValue ?? NSNull()
+            o["speakerByDefault"] = c.speakerByDefault
             if let caption = c.caption {
                 o["caption"] = ["role": caption.role == .agent ? "agent" : "user", "text": caption.text, "live": caption.live] as [String: Any]
             }
@@ -335,7 +407,7 @@ public final class GraineObjCCalls: NSObject {
         objcOnMainSync { observers.add(observer) }
     }
 
-    /// For a bridge: each outcome as JSON `{callId, outcome, reason, durationSeconds, hosted, agent}` (`agent` when known).
+    /// For a bridge: each outcome as JSON `{callId, outcome, reason, durationSeconds, hosted, agent, connection, cause}` (`agent`, `connection` and `cause` when known).
     @objc(observeOutcomes:)
     public func observeOutcomes(_ observer: @escaping (String) -> Void) -> GraineObjCRegistration {
         let id = UUID()
@@ -411,7 +483,7 @@ final class ObjCCallsRelay: GraineCallsListener {
         if f.activeSince?.id != id { f.activeSince = (id, Date()) }
     }
 
-    func onCallOutcome(_ outcome: GraineCallOutcome, callId: String) {
+    func onCallOutcome(_ outcome: GraineCallOutcome, callId: String, connection: GraineCallConnection?) {
         guard let f = facade else { return }
         let calls = f.graine.calls
         // A miss for a call that is not the one in progress is a ring refused because another call was live.
@@ -419,7 +491,8 @@ final class ObjCCallsRelay: GraineCallsListener {
         let seconds = f.activeSince?.id == callId ? f.activeSince.map { Date().timeIntervalSince($0.at) } : nil
         let hosted = f.hostedIds.contains(callId) || (calls.callId == callId && calls.hosted)
         f.report(outcome: ObjCBridge.outcome(
-            outcome, callId: callId, busy: busy, connectedSeconds: seconds, hosted: hosted, agent: calls.agentName(forCall: callId)
+            outcome, callId: callId, busy: busy, connectedSeconds: seconds, hosted: hosted, agent: calls.agentName(forCall: callId),
+            connection: connection, cause: calls.callId == callId ? calls.endCause?.rawValue : nil
         ))
         if outcome != .answered {
             // The last word on this call.
@@ -504,8 +577,31 @@ public final class GraineObjCVoice: NSObject {
     @objc public var muted: Bool { snapshot()["muted"] as? Bool ?? false }
     /// The captions switch; on until it is turned off.
     @objc public var captionsOn: Bool { snapshot()["captionsOn"] as? Bool ?? true }
+    /**
+     * What the call is doing, in one word (`GraineVoice.status`): `idle`,
+     * `connecting`, `listening`, `thinking`, `speaking`, `reconnecting`,
+     * `muted`, `failed` (`error` says why) or `ended`.
+     */
+    @objc public var status: String { snapshot()["status"] as? String ?? GraineVoiceStatus.idle.rawValue }
+    /// Why the call failed, in a sentence, while `status` is `failed`; nil otherwise.
+    @objc public var error: String? { snapshot()["error"] as? String }
+    /// How loud the agent's voice is as it plays, 0–1, as the call page measures it; 0 off a call, or when the page does not measure it.
+    @objc public var agentLevel: Double { (snapshot()["agentLevel"] as? NSNumber)?.doubleValue ?? 0 }
+    /// How loud the user's microphone is, 0–1, as `agentLevel`.
+    @objc public var micLevel: Double { (snapshot()["micLevel"] as? NSNumber)?.doubleValue ?? 0 }
+    /// The road the call's audio runs on: "webrtc" or "websocket"; nil before the page has said.
+    @objc public var transport: String? { snapshot()["transport"] as? String }
+    /// Why a call that could have run on WebRTC runs on the WebSocket, in the page's words; nil otherwise.
+    @objc public var transportFallbackReason: String? { snapshot()["transportFallbackReason"] as? String }
+    /// The microphone was refused for the last start.
+    @objc public var micDenied: Bool { snapshot()["micDenied"] as? Bool ?? false }
 
-    /// `{connected, connecting, muted, captionsOn, captions: [{role, text, live}]}` as JSON, for a bridge.
+    /**
+     * The call as JSON, for a bridge: `{connected, connecting, muted, captionsOn,
+     * captions: [{role, text, live}], status, error, agentLevel, micLevel,
+     * transport, transportFallbackReason, micDenied}` — `error` and the
+     * transports null when there are none.
+     */
     @objc public var snapshotJSON: String { ObjCBridge.text(snapshot()) }
 
     func snapshot() -> [String: Any] {
@@ -515,9 +611,16 @@ public final class GraineObjCVoice: NSObject {
             return [
                 "connected": v.connected, "connecting": v.connecting, "muted": v.muted, "captionsOn": v.captionsOn,
                 "captions": v.captions.map { ["role": $0.role == .agent ? "agent" : "user", "text": $0.text, "live": $0.live] as [String: Any] },
+                "status": v.status.rawValue, "error": v.error ?? NSNull(), "agentLevel": v.agentLevel, "micLevel": v.micLevel,
+                "transport": v.transport.map { ObjCBridge.transportWord($0) as Any } ?? NSNull(),
+                "transportFallbackReason": v.transportFallbackReason ?? NSNull(), "micDenied": v.micDenied,
             ]
             #else
-            return ["connected": false, "connecting": false, "muted": false, "captionsOn": true, "captions": [Any]()]
+            return [
+                "connected": false, "connecting": false, "muted": false, "captionsOn": true, "captions": [Any](),
+                "status": GraineVoiceStatus.idle.rawValue, "error": NSNull(), "agentLevel": 0.0, "micLevel": 0.0,
+                "transport": NSNull(), "transportFallbackReason": NSNull(), "micDenied": false,
+            ]
             #endif
         }
     }

@@ -125,6 +125,17 @@ public final class GraineCallsHost: NSObject {
         onMain { self.core.setSpeaker(on) }
     }
 
+    /**
+     * Calls start on the loudspeaker (true, the default) unless a headset, a
+     * car or AirPlay is the route, or on the earpiece (false) —
+     * `GraineCalls.speakerByDefault`. Applied now and kept with the options
+     * for the next cold start, as `configure`'s `speakerByDefault` is; before
+     * `configure`, held until it runs. For the call in progress, `setSpeaker`.
+     */
+    public func setSpeakerByDefault(_ on: Bool) {
+        onMain { self.core.setSpeakerByDefault(on) }
+    }
+
     // MARK: - Permissions and setup
 
     /// The call permissions: `{microphone, notifications, fullScreen}`, each `granted`, `denied`, `blocked` or `notNeeded`. Readable before `configure`.
@@ -308,6 +319,7 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             ringTimeout: options.ringTimeout,
             callTransport: options.callTransport
         ))
+        calls?.speakerByDefault = options.speakerByDefault
     }
 
     func enableVoIPPushes(onToken: @escaping (String?) -> Void) {
@@ -336,6 +348,10 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
 
     func setSpeaker(_ on: Bool) {
         calls?.setSpeaker(on)
+    }
+
+    func setSpeakerByDefault(_ on: Bool) {
+        calls?.speakerByDefault = on
     }
 
     func identify(_ traits: [String: Any]?) {
@@ -394,7 +410,9 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
             connectedAt: calls.connectedAt,
             agent: calls.agent,
             transport: calls.transport?.rawValue,
-            transportFallbackReason: calls.transportFallbackReason
+            transportFallbackReason: calls.transportFallbackReason,
+            connection: calls.connection,
+            agentLevel: CallsHostSnapshot.level(calls.agentLevel)
         )
     }
 
@@ -457,8 +475,8 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
         core?.callStateChanged(state)
     }
 
-    func onCallOutcome(_ outcome: GraineCallOutcome, callId: String) {
-        core?.outcome(outcome, callId: callId)
+    func onCallOutcome(_ outcome: GraineCallOutcome, callId: String, connection: GraineCallConnection?) {
+        core?.outcome(outcome, callId: callId, connection: connection, cause: calls?.callId == callId ? calls?.endCause : nil)
     }
 
     // MARK: The SDK's call screen

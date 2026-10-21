@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.13.1")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -208,7 +208,12 @@ Or draw your own from `graine.chat` (`GraineChat`, an `ObservableObject`):
 leave, `clear()` to empty the screen (the conversation goes on), and `turns`
 (one per message, each reply its own), `status` and `typing`. A message typed while offline is shown at once and sent when the
 chat is back; a dropped connection is made again on its own, then waits for
-the customer (or `retry()`). One conversation at a time: the chat ends a call
+the customer (or `retry()`). `GraineChatView` leaving the screen (or a bar
+showing the chat) does not end the conversation: with no window showing it,
+the chat stays connected until nothing has been said either way for 5 minutes,
+so opening it again continues where it was, with no new welcome. When Graine ends a conversation
+itself (idle, or the session's time limit) the lines stay, the header says
+"Disconnected", and the next open or message connects again. One conversation at a time: the chat ends a call
 and a call closes the chat. `GraineListener.onChatMessage(_:)` hears each
 reply (`proactive` when the agent spoke up unasked). Where Graine rings your
 customers, the chat window shows their booked calls on an **Upcoming calls**
@@ -228,7 +233,17 @@ conversation and `turn.channel` (`.chat`, `.voice`) where it was said;
 `GraineChatView` offers it while an earlier conversation is on screen); what
 the agent remembers about the customer stays. `forgetMemory()` clears the chat
 on screen too. Anonymous customers, and those with memory off, start fresh
-every time; each agent in your app keeps its own conversation.
+every time; each agent in your app keeps its own conversation. When a
+reconnect starts a new conversation under earlier lines, the chat window says
+"Disconnected · new conversation" rather than greeting a second time (a
+welcome nobody answered is replaced instead). The marker is the window's own
+row, never one of `chat.turns`: a chat of your own reads it from
+`chat.newConversationBefore` (or builds its rows with
+`GraineChatRows.build(chat.turns, newConversationBefore:)`), and calls
+`chat.shown(_:)` as its screen appears and goes. Each turn carries the
+session it was said in (`turn.session`, the id Execution Logs shows), and
+`chat.sessions` lists them, oldest first, with `chat.sessionId` the current
+one — for a "past conversations" list of your own.
 
 ### The chat window's style
 
@@ -375,11 +390,13 @@ func onIncomingCall(_ call: GraineIncomingCall) {}
 func onCallState(_ state: GraineCallState, callId: String?) {}
 ```
 
-In the call: `calls.end()`, `setMuted(_:)`, `setSpeaker(_:)` (earpiece by
-default) and `answer()`. `GraineCalls` is an `ObservableObject` — `state`,
+In the call: `calls.end()`, `setMuted(_:)`, `setSpeaker(_:)` (the loudspeaker
+by default — `speakerByDefault` — unless a headset, a car or AirPlay is the
+route) and `answer()`. `GraineCalls` is an `ObservableObject` — `state`,
 `callId`, `callerName`, `muted`, `speakerOn`, `agentSpeaking`, `agentLevel`
 (the agent's voice level, 0–1), `isReconnecting` (a WebRTC call getting its
-connection back), `caption`, `transcript`, `connectedAt`, `hosted` — and
+connection back), `caption`, `transcript`, `connectedAt`, `hosted`, `connection` (the call's
+connection report), `endCause` (why it ended) — and
 `GraineCallView()` is a ready call screen for while your app is open, drawn in
 the brand's design (Web components → Design → Call screen): every state —
 ringing ("Scheduled call" for a call
@@ -400,7 +417,8 @@ setting; a native call keeps going in the background, as a phone call does.
 
 **The SDK does by itself:** the CallKit provider and the PushKit registry,
 every VoIP push reported to CallKit as iOS requires, the call's audio session
-(voice processing, Bluetooth, the earpiece), the microphone asked for when a
+(voice processing, Bluetooth, the loudspeaker by default; started by the SDK
+when CallKit has not within 3 s), the microphone asked for when a
 call starts without it, the VoIP token registered with Graine and every
 outcome reported — and a check of your setup at `configure`, each problem
 logged once as a warning (`Calls setup (code): …`, subsystem `ai.graine.inapp`)
@@ -459,7 +477,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.13.1")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.0")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

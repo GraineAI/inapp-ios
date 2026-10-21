@@ -19,6 +19,14 @@ enum ChatWire {
     static let reconnectDelays: [Double] = [1, 2, 4, 8, 15, 15]
     /// Messages typed while offline, kept to be sent; older ones beyond this are not sent.
     static let queueLimit = 20
+    /**
+     * With no window showing it, the chat stays connected until nothing has
+     * been said either way for this long — the idle window Graine's server
+     * applies — then hangs up (DESIGN.md "How long a conversation lasts").
+     */
+    static let idleSeconds = 300.0
+    /// The close codes with which Graine ends a conversation itself: idle (4408, `idle_timeout`) and the session's time limit (4410).
+    static let endedByGraine: Set<Int> = [4408, 4410]
 
     /// A customer turn.
     static func textFrame(_ text: String) -> String {
@@ -74,6 +82,8 @@ enum ChatInbound {
     case quickReplies([GraineQuickReply])
     /// The agent ended the conversation: the open turn closes, typing stops, the replies go, the rating may be asked for.
     case conversationEnd
+    /// `{"type":"session","id","at"}`, once as a connection starts: its session — nil for an id that is not a non-empty string.
+    case session(String?)
     case ignored(String)
 
     static func parse(_ raw: String) -> ChatInbound? {
@@ -86,15 +96,18 @@ enum ChatInbound {
             // The agent asked for a component and its content is loading: draw the loader, not nothing.
             return .widgetPending(o["widget"] as? [String: Any] ?? [:])
         case "history":
-            // A history whose turns are not a list is not one: ignored, never an error.
-            guard let turns = ChatHistory.read(o) else { return .ignored(type) }
-            return .history(turns)
+            // A history whose turns are not a list restores nothing, never an error — but it still says the
+            // server continued the conversation (no new-conversation marker for this connection).
+            return .history(ChatHistory.read(o) ?? [])
         case "quick_replies":
             // Replies that are not a list are not a frame this build can draw: ignored.
             guard let replies = QuickReplies.read(o) else { return .ignored(type) }
             return .quickReplies(replies)
         case "conversation_end":
             return .conversationEnd
+        case "session":
+            // history.json `sessionFrame`: an id that is not a non-empty string is no session.
+            return .session((o["id"] as? String).flatMap { $0.isEmpty ? nil : $0 })
         default:
             break
         }
@@ -113,13 +126,13 @@ enum ChatInbound {
 
 /// Where the chat's connection is.
 public enum GraineChatStatus: Equatable, Sendable {
-    /// Not in the chat: never opened, left, or the app is in the background.
+    /// Not in the chat: never opened, left, or the app is in the background — or the agent ended the conversation (`ended`); a message starts another.
     case idle
     case connecting
     case online
     /// The connection dropped and is being made again; `attempt` of six.
     case reconnecting(attempt: Int)
-    /// It could not reconnect, or the conversation was ended by the other side. A message, or `retry()`, connects again.
+    /// It could not reconnect, or the server closed the conversation (with `disconnected` when Graine ended it itself). A message, or `retry()`, connects again.
     case offline
 
     /// Connecting, or reconnecting: draw "Connecting…".
@@ -169,10 +182,18 @@ public struct GraineChatTurn: Identifiable, Equatable {
     public let restored: Bool
     /// Where it was said. A chat window draws a run of `.voice` turns as one "Voice call" row, never their words.
     public let channel: GraineChatChannel
+    /**
+     * The id of the session it was said in — a chat connection's run, or a
+     * call's id for a turn said on one — as Execution Logs shows it: a live
+     * turn carries the chat's `sessionId` of the connection that carried it.
+     * Nil for turns kept before sessions were recorded, with a server that
+     * sends none, and for a line still waiting for its connection.
+     */
+    public internal(set) var session: String?
 
     init(
         id: String, role: GraineRole, text: String, live: Bool, delivery: Delivery, at: Date, proactive: Bool,
-        restored: Bool = false, channel: GraineChatChannel = .chat
+        restored: Bool = false, channel: GraineChatChannel = .chat, session: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -183,6 +204,7 @@ public struct GraineChatTurn: Identifiable, Equatable {
         self.proactive = proactive
         self.restored = restored
         self.channel = channel
+        self.session = session
     }
 }
 
@@ -226,7 +248,9 @@ enum ChatHistory {
             used.insert(id)
             out.append(GraineChatTurn(
                 id: id, role: role, text: text, live: false, delivery: .sent, at: at, proactive: false,
-                restored: true, channel: (o["channel"] as? String) == "voice" ? .voice : .chat
+                restored: true, channel: (o["channel"] as? String) == "voice" ? .voice : .chat,
+                // The session it was said in, as Graine kept it: a string that is not empty, else none.
+                session: (o["session"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             ))
         }
         return out
@@ -250,6 +274,13 @@ enum ChatHistory {
  * when the connection goes. The next words then start a new bubble — the bug
  * this replaces merged every reply after the first into one bubble that never
  * settled. An agent turn that does not follow the customer's is proactive.
+ *
+ * A NEW CONVERSATION UNDER EARLIER LINES (DESIGN.md, history.json → `fresh`):
+ * a connection whose server could not continue the conversation sends no
+ * history, and its agent greets again. Instead of a second welcome stacked
+ * under the first, the earlier lines either give way (an opening nobody
+ * answered) or are closed by a "Disconnected · new conversation" marker —
+ * kept here as the ids of the turns a marker is drawn before, never as turns.
  */
 struct ChatTranscript: Equatable {
     static let cap = 200
@@ -258,6 +289,22 @@ struct ChatTranscript: Equatable {
     private var nextId = 1
     /// The ids that were settled when the connection last opened — what a history replaces. Nil before any open.
     private var settledAtOpen: Set<String>?
+    /// The turns a "Disconnected · new conversation" row is drawn before: the window's own rows, not turns.
+    private(set) var marks: Set<String> = []
+    /// A marker owed to the next turn: the new conversation began before anything was said in it.
+    private var markNext = false
+    /// The connection opened, and neither a history nor the agent has come since: the agent's first act says which conversation this is.
+    private var opening = false
+    /**
+     * The chat's current session: this connection's, from the server's
+     * session frame (`sessionStarted`); nil from a connection's open until the
+     * frame arrives, and with a server that sends none.
+     */
+    private(set) var session: String?
+    /// Between a connection's open and its session frame: the turns it carries meanwhile are stamped when the frame comes.
+    private var stamping = false
+    /// Those turns, by id: the lines waiting at the open, and every turn said before the frame.
+    private var unstamped = Set<String>()
 
     /// Agent words. Returns the turn they belong to, and whether they began it.
     @discardableResult
@@ -266,8 +313,9 @@ struct ChatTranscript: Equatable {
             turns[turns.count - 1].text += text
             return (turns[turns.count - 1], false)
         }
+        agentBegan()
         let proactive = turns.last?.role != .customer
-        let turn = GraineChatTurn(id: take(), role: .agent, text: text, live: true, delivery: .sent, at: now, proactive: proactive)
+        let turn = GraineChatTurn(id: take(), role: .agent, text: text, live: true, delivery: .sent, at: now, proactive: proactive, session: session)
         append(turn)
         return (turn, true)
     }
@@ -283,7 +331,11 @@ struct ChatTranscript: Equatable {
     /// The customer said something: whatever the agent was saying is over.
     mutating func customerSaid(_ text: String, delivery: GraineChatTurn.Delivery, now: Date) -> GraineChatTurn {
         closeLive()
-        let turn = GraineChatTurn(id: take(), role: .customer, text: text, live: false, delivery: delivery, at: now, proactive: false)
+        // Said on the connection: its session. Waiting for one: the session of the connection that sends it.
+        let turn = GraineChatTurn(
+            id: take(), role: .customer, text: text, live: false, delivery: delivery, at: now, proactive: false,
+            session: delivery == .sent ? session : nil
+        )
         append(turn)
         return turn
     }
@@ -298,9 +350,38 @@ struct ChatTranscript: Equatable {
         if let last = turns.last, last.live { turns[turns.count - 1].live = false }
     }
 
+    /// Empty: the turns, and the markers between them. The session is the connection's: it stays.
     mutating func clear() {
         turns = []
         settledAtOpen = nil
+        marks = []
+        markNext = false
+        opening = false
+        unstamped = []
+    }
+
+    /**
+     * WHO A CHAT BELONGS TO (DESIGN.md): the identity changed, and what was
+     * said belonged to the one before. Every turn goes — what a history
+     * restored, the marker rows — but the customer's lines that have not gone
+     * out, still sending or failed: they stay, in order, all waiting for the
+     * next connection. Returns them, oldest first.
+     */
+    mutating func keepUnsent() -> [(id: String, text: String)] {
+        turns = turns.filter { $0.role == .customer && $0.delivery != .sent }
+        for i in turns.indices {
+            turns[i].delivery = .sending
+            // Said in the session of the connection that sends them, not the identity before's.
+            turns[i].session = nil
+        }
+        settledAtOpen = nil
+        marks = []
+        markNext = false
+        opening = false
+        session = nil
+        stamping = false
+        unstamped = []
+        return turns.map { ($0.id, $0.text) }
     }
 
     /**
@@ -310,6 +391,66 @@ struct ChatTranscript: Equatable {
      */
     mutating func opened() {
         settledAtOpen = Set(turns.filter { $0.delivery == .sent && !$0.live }.map(\.id))
+        opening = true
+        // A new connection: its session is its own, unknown until its frame comes. What waited goes on it.
+        session = nil
+        stamping = true
+        unstamped = Set(turns.filter { $0.role == .customer && $0.delivery != .sent && $0.session == nil }.map(\.id))
+    }
+
+    /**
+     * THE SESSION FRAME (history.json `sessionFrame`): this connection's
+     * session — nil for an id that is not a non-empty string. Every turn the
+     * connection carried before it — the lines waiting at its open, and
+     * whatever was said meanwhile — takes it; never a stray session with no id.
+     */
+    mutating func sessionStarted(_ id: String?) {
+        session = id
+        stamping = false
+        if let id = id {
+            for i in turns.indices where unstamped.contains(turns[i].id) && turns[i].session == nil { turns[i].session = id }
+        }
+        unstamped = []
+    }
+
+    /**
+     * The agent began — a turn's start marker, words that begin a turn, or a
+     * component. Its first since the connection opened, with no history before
+     * it, means the server began a NEW conversation. The current one — the
+     * turns settled at that open after the last marker — then gives way when
+     * the customer said none of them (the new opening replaces the old; a
+     * marker before them moves on to what comes next), else is closed by a
+     * marker before what came after it: what went out once the connection
+     * opened belongs to the new conversation. True when the turns or markers
+     * changed.
+     */
+    @discardableResult
+    mutating func agentBegan() -> Bool {
+        guard opening else { return false }
+        opening = false
+        // A marker still owed is the last one, after every turn: nothing settled comes after it.
+        guard let settled = settledAtOpen, !markNext else { return false }
+        let start = turns.lastIndex(where: { marks.contains($0.id) }) ?? 0
+        let current = turns.indices.filter { $0 >= start && settled.contains(turns[$0].id) }
+        guard !current.isEmpty else { return false }
+        // The customer answered when any line of theirs follows the last marker — sent, or still to go.
+        if turns[start...].contains(where: { $0.role == .customer }) {
+            // A marker before the first turn after the last marker that was not settled at the open — or before
+            // the next turn, when none came yet.
+            if let first = turns.indices.first(where: { $0 >= start && !settled.contains(turns[$0].id) }) {
+                marks.insert(turns[first].id)
+            } else { markNext = true }
+            return true
+        }
+        // An opening nobody answered gives way; a marker before it now goes before what follows.
+        let gone = Set(current.map { turns[$0].id })
+        let first = turns[start].id
+        if marks.contains(first) && gone.contains(first) {
+            marks.remove(first)
+            if let next = turns[start...].first(where: { !gone.contains($0.id) }) { marks.insert(next.id) } else { markNext = true }
+        }
+        turns.removeAll { gone.contains($0.id) }
+        return true
     }
 
     /**
@@ -317,11 +458,13 @@ struct ChatTranscript: Equatable {
      * cannot hold yet — still sending or failed, or said since the connection
      * opened — in order. A reconnect's history holds what the last one did and
      * what was said since, so it replaces both, and nothing shows twice. With
-     * no open yet, only the turns still to go are kept. False when there was
-     * nothing to restore.
+     * no open yet, only the turns still to go are kept. A marker before a turn
+     * it replaced goes with that turn. False when there was nothing to restore.
      */
     @discardableResult
     mutating func restore(_ restored: [GraineChatTurn]) -> Bool {
+        // A history before the agent's first words: the conversation continues, whatever the agent says next.
+        opening = false
         guard !restored.isEmpty else { return false }
         let kept = turns.filter { turn in
             if turn.restored { return false }
@@ -329,7 +472,9 @@ struct ChatTranscript: Equatable {
             return turn.delivery != .sent
         }
         turns = restored + kept
-        if turns.count > ChatTranscript.cap { turns.removeFirst(turns.count - ChatTranscript.cap) }
+        marks.formIntersection(kept.map(\.id))
+        markNext = false
+        trim()
         return true
     }
 
@@ -340,7 +485,24 @@ struct ChatTranscript: Equatable {
 
     private mutating func append(_ turn: GraineChatTurn) {
         turns.append(turn)
-        if turns.count > ChatTranscript.cap { turns.removeFirst(turns.count - ChatTranscript.cap) }
+        if markNext {
+            marks.insert(turn.id)
+            markNext = false
+        }
+        // Said on this connection before its session frame: stamped when the frame comes.
+        if stamping && turn.session == nil && !turn.restored { unstamped.insert(turn.id) }
+        trim()
+    }
+
+    /// At most `cap` turns: the oldest go, and any marker before them.
+    private mutating func trim() {
+        guard turns.count > ChatTranscript.cap else { return }
+        let gone = turns.prefix(turns.count - ChatTranscript.cap)
+        for turn in gone {
+            marks.remove(turn.id)
+            unstamped.remove(turn.id)
+        }
+        turns.removeFirst(gone.count)
     }
 }
 

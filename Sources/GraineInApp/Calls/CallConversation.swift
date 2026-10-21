@@ -23,7 +23,9 @@ import Foundation
  * On WebRTC the audio is RTP; captions, the agent's actions and the screen
  * travel the control channel as the voice socket's own frames, and are
  * handled here the same way, so the call screen and the app cannot tell the
- * transports apart. Foundation only: a Mac proves it with a fake module.
+ * transports apart. Either road's analytics rows come up as `row` events, for
+ * the call's connection report. Foundation only: a Mac proves it with a fake
+ * module.
  */
 final class CallConversation {
     private let setup: CallEngine.Setup
@@ -166,6 +168,22 @@ final class CallConversation {
             switch phase {
             case .socket: socketEngine?.stopAudio()
             case .rtc: rtc?.audioDeactivated()
+            default: break
+            }
+        }
+    }
+
+    /**
+     * Who or what ended the call — its `ended` row, on the channel that is
+     * still up (the voice socket, or WebRTC's control channel), just before a
+     * hang-up. Nothing once the call is over: a channel already closed carries
+     * nothing.
+     */
+    func sendEnded(_ cause: GraineCallEndCause) {
+        scheduler.run { [self] in
+            switch phase {
+            case .socket: socketEngine?.sendEnded(cause: cause.rawValue)
+            case .rtc: rtc?.sendEnded(cause: cause.rawValue)
             default: break
             }
         }
@@ -320,6 +338,14 @@ final class CallConversation {
             guard rtcConnected else { return }
             onEvent(.level(value))
 
+        case .row(let frame):
+            // The leg's analytics rows — a media row before a fallback included: the socket's own rows replace it.
+            onEvent(.row(frame))
+
+        case let .audio(loss, jitterAvg, jitterMax, rtt):
+            guard rtcConnected else { return }
+            onEvent(.audio(lossPct: loss, jitterAvgMs: jitterAvg, jitterMaxMs: jitterMax, rttAvgMs: rtt))
+
         case .control(let text):
             control(text)
 
@@ -363,20 +389,22 @@ final class CallConversation {
         case .connect:
             break
         case .retry:
-            GraineLog.warning("CallKit has not activated the call's audio \(Int(CallAudioWatch.graceSeconds)) s after the call could start; starting it directly.")
+            GraineLog.warning("Calls: CallKit has not activated the call's audio \(Int(CallAudioWatch.graceSeconds)) s after the call could start; activating it directly.")
             call.startAudioDirectly { [weak self] started in
                 self?.scheduler.run {
                     guard let self = self, self.rtc === call else { return }
                     if started {
+                        GraineLog.info("Calls: the call's audio started directly (WebRTC): the call is dialled.")
                         self.audioActive = true
                         self.rtcAudioWatch?.audioStarted()
                     } else {
+                        GraineLog.warning("Calls: the call's audio could not be started directly (WebRTC) — the audio session's error is in the log above.")
                         self.rtcAudioWatch?.retryFailed()
                     }
                 }
             }
         case .fail:
-            GraineLog.warning(CallAudioWatch.failure)
+            GraineLog.warning("Calls: \(CallAudioWatch.failure) CallKit never activated it and the direct start did not run: the call ends (audio_watch).")
             finish(.couldNotOpen(CallAudioWatch.failure))
         }
     }

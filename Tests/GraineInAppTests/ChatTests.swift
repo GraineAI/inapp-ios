@@ -155,7 +155,7 @@ import Testing
 }
 
 /// One chat connection with every seam replaced.
-private final class ChatRig {
+final class ChatRig {
     let scheduler = ManualScheduler()
     let network = RoutedNetwork()
     var session: GraineSessionConfig? = GraineSessionConfig(agentId: "agent-1", webcallAgentId: "web-1")
@@ -562,15 +562,28 @@ private final class ChatRig {
         #expect(rig.network.sockets.count == 1, "no new conversation")
     }
 
+    /// 0.14.0 (DESIGN.md "Who a chat belongs to"): A's conversation leaves the screen; a line not yet sent stays, and goes next.
     @Test func anotherCustomerOnThisPhoneStartsWithAnEmptyChat() throws {
         let rig = PlatformRig()
         defer { rig.sandbox.clean() }
         rig.session()
         rig.graine.identify(["user_id": "A"])
+        rig.graine.chat.open()
+        let a = try #require(rig.network.socket)
+        a.open()
+        a.frame(["type": "text", "data": "<beginning_of_stream>Hi! How can I help?<end_of_stream>"])
         rig.graine.chat.send("my card number is …")
-        #expect(rig.graine.chat.turns.count == 1)
+        #expect(rig.graine.chat.turns.count == 2)
         rig.graine.identify(["user_id": "B"])
+        #expect(rig.graine.chat.turns.isEmpty, "A's conversation is not B's to read")
+        // Not connected: another customer's lines leave the screen all the same.
+        let b = try #require(rig.network.socket)
+        b.open()
+        b.frame(["type": "text", "data": "<beginning_of_stream>Hello!<end_of_stream>"])
+        rig.graine.chat.close()
+        rig.graine.identify(["user_id": "C"])
         #expect(rig.graine.chat.turns.isEmpty)
+        #expect(rig.network.sockets.count == 2, "and nothing connects until the next open")
     }
 }
 

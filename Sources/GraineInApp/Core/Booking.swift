@@ -88,6 +88,28 @@ enum Booking {
         return nil
     }
 
+    /// The agent's configuration has not loaded yet: no session, not even one kept from an earlier launch.
+    static let notLoaded = "not_loaded"
+    /// Graine does not ring this app's iPhones: no push credentials uploaded, or iOS is not among the platforms it rings.
+    static let ringsNotSetUp = "rings_not_set_up"
+    /// The agent does not let customers book calls (the booking's own refusal word, `scheduling_off`).
+    static let schedulingOff = "scheduling_off"
+    /// The customer is not identified with the trait the agent's Identity setting names.
+    static let notIdentified = "not_identified"
+
+    /**
+     * Why this agent cannot be booked now, as a code — `available`'s rule,
+     * first match wins: `not_loaded`, `rings_not_set_up`, `scheduling_off`,
+     * `not_identified`; the same words on every SDK. Nil when it can.
+     */
+    static func unavailableReason(calls: GraineHostedCallsSettings?, loaded: Bool, identified: Bool) -> String? {
+        guard loaded else { return notLoaded }
+        guard let calls = calls, calls.ringsThisPlatform else { return ringsNotSetUp }
+        guard calls.usersCanBook else { return schedulingOff }
+        guard identified else { return notIdentified }
+        return nil
+    }
+
     // MARK: What the sheet offers
 
     /// The first time offered: `earliest(now)` rounded up to the next 5 minutes.
@@ -140,6 +162,24 @@ enum Booking {
                 out.append(Day(start: start, first: dayFirst, last: dayLast, label: dayLabel(start, now: now, calendar: calendar, locale: locale)))
             }
             start = next
+        }
+        return out
+    }
+
+    /**
+     * Every time the sheet's picker offers on the day holding `day`, oldest
+     * first: each 5-minute mark from that day's first time to its last. None
+     * for a day the sheet does not offer.
+     */
+    static func slots(_ rules: GraineSchedulingRules, day: Date, now: Date, calendar: Calendar = .current) -> [Date] {
+        let start = calendar.startOfDay(for: day)
+        guard let offered = days(rules, now: now, calendar: calendar).first(where: { $0.start == start }) else { return [] }
+        var out: [Date] = []
+        var at = offered.first
+        // Bounded: a day has at most 25 hours (the night the clocks go back) of 5-minute marks.
+        while at <= offered.last, out.count <= 25 * 60 / minuteStep {
+            out.append(at)
+            at = at.addingTimeInterval(step)
         }
         return out
     }

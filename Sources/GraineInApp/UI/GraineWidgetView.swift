@@ -135,9 +135,21 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
             guard let self = self, let graine = graine, status == .idle, !graine.chat.isOpen else { return }
             if self.widget != nil || self.answered != nil || self.pendingKind != nil { self.reset() }
         }
+        // Answered or closed through the app's own UI (`answerComponent`, `dismissComponent`), or forgotten with its
+        // conversation: what this view draws of it goes too. Changes only.
+        componentWatch = graine.components.$current.dropFirst().sink { [weak self] current in
+            guard let self = self, current == nil else { return }
+            self.showTimer?.cancel()
+            self.showTimer = nil
+            guard self.widget != nil else { return }
+            self.widget = nil
+            self.content = nil
+            self.ticked = []
+        }
     }
 
     private var chatWatch: AnyCancellable?
+    private var componentWatch: AnyCancellable?
 
     // MARK: GraineListener
 
@@ -254,19 +266,7 @@ final class GraineWidgetModel: ObservableObject, GraineListener {
     func dismiss() {
         showTimer?.cancel()
         showTimer = nil
-        if let current = widget, let graine = graine {
-            let detail: [String: Any] = [
-                "tool_name": current.id.components(separatedBy: ":").first ?? "",
-                "kind": current.kind,
-                "title": JSON.string(current.data["title"]),
-                "answered": false,
-            ]
-            graine.reportEvent(
-                "component_dismissed",
-                detail: "The customer closed the component without choosing. Do not refer to options they cannot see; offer to show it again if they want it.",
-                data: ["quiet": true, "data": detail]
-            )
-        }
+        if let current = widget, let graine = graine { graine.tellComponentDismissed(current) }
         // Kept, so `reopenComponent()` can put it back exactly as it was.
         graine?.componentDismissed()
         widget = nil

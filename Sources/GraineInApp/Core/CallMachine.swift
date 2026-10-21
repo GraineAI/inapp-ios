@@ -35,6 +35,44 @@ public enum GraineCallEndReason: String, Sendable {
     case missed
 }
 
+/**
+ * WHO OR WHAT ENDED A CALL — `GraineCalls.endCause`, and the cause on the
+ * call's "ended" row in Execution Logs. Finer than `GraineCallEndReason`: it
+ * tells a hang-up from a lost line, and a call whose audio never started from
+ * one that could not connect. Raw values are the wire words; switch with a
+ * `default`, as more may come.
+ */
+public enum GraineCallEndCause: String, Sendable {
+    /// The customer or the app ended it: the call screen's End, `end()`, or the system's call screen.
+    case localEnd = "local_end"
+    /// The agent's side hung up.
+    case remoteBye = "remote_bye"
+    /// The connection was lost and could not be brought back.
+    case mediaDrop = "media_drop"
+    /// The call's audio never started: CallKit never activated it, and starting it directly did not work either.
+    case audioWatch = "audio_watch"
+    /// The system reset CallKit, which ends every call. iOS only: Android has no such reset.
+    case providerReset = "provider_reset"
+    /// Anything else that ended it: it could not be placed or connected, the microphone, the audio engine.
+    case failed
+
+    /**
+     * The cause of the end `event` brings about from `state`; nil for one that
+     * ends no conversation — a ring declined or unanswered — or ends nothing.
+     */
+    static func of(_ event: CallMachine.Event, from state: GraineCallState) -> GraineCallEndCause? {
+        switch (event, state) {
+        case (.hangUp, .connecting), (.hangUp, .active): return .localEnd
+        case (.remoteEnded, .connecting), (.remoteEnded, .active): return .remoteBye
+        case (.dropped, .connecting), (.dropped, .active): return .mediaDrop
+        case (.failed(let why), .ringing), (.failed(let why), .connecting), (.failed(let why), .active):
+            return why == CallAudioWatch.failure ? .audioWatch : .failed
+        case (.reset, .connecting), (.reset, .active): return .providerReset
+        default: return nil
+        }
+    }
+}
+
 /// Where the call is.
 public enum GraineCallState: Equatable, Sendable {
     case idle

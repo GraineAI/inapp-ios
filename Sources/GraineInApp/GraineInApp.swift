@@ -347,7 +347,15 @@ public final class GraineInApp {
      * their messages, draw `turns`. `GraineChatView` and the bar use it
      * themselves. Main thread.
      */
-    public private(set) lazy var chat: GraineChat = GraineChat(graine: self, network: network, scheduler: chatScheduler)
+    public private(set) lazy var chat: GraineChat = makeChat()
+
+    /// The chat was made (`chat` was read): only then has it a connection or lines that an identity change reaches.
+    private var chatMade = false
+
+    private func makeChat() -> GraineChat {
+        chatMade = true
+        return GraineChat(graine: self, network: network, scheduler: chatScheduler)
+    }
 
     /// Who the customer is for memory, and their memory choice (contract §1.2).
     let identity: IdentityState
@@ -361,10 +369,18 @@ public final class GraineInApp {
     private let chatScheduler: CallScheduler
     lazy var requests = EmbedRequests(baseUrl: config.baseUrl, publishableKey: config.publishableKey, network: network)
 
+    /**
+     * The component the agent draws, as state — the one on screen, and one on
+     * its way — for a component UI of your own (`GraineComponents`). Main thread.
+     */
+    public private(set) lazy var components = GraineComponents(baseUrl: config.baseUrl, scheduler: chatScheduler)
+
     // Main thread only.
     private var identityWatchers: [UUID: () -> Void] = [:]
-    /// The component the agent drew and nobody has answered, whichever conversation drew it.
-    private(set) var componentFrame: [String: Any]?
+    /// The component the agent drew and nobody has answered, whichever conversation drew it: `components.current`.
+    private(set) var componentFrame: [String: Any]? {
+        didSet { components.frameChanged(componentFrame) }
+    }
     /// The last component the customer closed without answering, for `reopenComponent()`.
     private(set) var closedComponentFrame: [String: Any]?
     private var voiceLive = false
@@ -555,9 +571,18 @@ public final class GraineInApp {
      *   remembered nor recalled. Kept on the device for them, so it need not be
      *   repeated; nil keeps their last choice (true until they make one).
      *
-     * Identity is fixed per conversation: a change reaches the next one.
-     * `identify(nil)` signs out — the device stops being this customer's, and
-     * later conversations are anonymous.
+     * A call reads the identity when it starts: a change reaches the next
+     * one. `identify(nil)` signs out — the device stops being this customer's,
+     * and later conversations are anonymous.
+     *
+     * A chat belongs to whoever was identified when it connected (DESIGN.md
+     * "Who a chat belongs to"). When the identity's value changes — signing in
+     * after the chat opened, another customer, signing out — its lines leave
+     * the screen (not the customer's still to send: they go next), and a chat
+     * connected or connecting is closed quietly and connects again at once as
+     * the new identity while the customer is in it; otherwise at the next open
+     * or message. The same identity with other traits, or another memory
+     * choice, changes nothing on the open chat.
      */
     public func identify(_ traits: [String: Any?]?, memory: Bool? = nil) {
         // One person for the whole app: every agent hears it (each reads the trait its own Identity setting names).
@@ -689,8 +714,9 @@ public final class GraineInApp {
     private func identityChanged(previous: String?) {
         let current = identity.snapshot().value
         onMain {
-            // Another customer on this phone: the last one's chat is not theirs to read.
-            if previous != nil && previous != current { self.chat.forgetTranscript() }
+            // Who a chat belongs to (DESIGN.md): connected for someone else, it is made again for this identity;
+            // not connected, another customer's lines leave the screen.
+            if self.chatMade { self.chat.identityChanged(from: previous, to: current) }
             for watch in Array(self.identityWatchers.values) { watch() }
             self.sendSignOuts()
             // Nothing prepared for the last customer's calls is theirs: a call prepared for who was calling is let go,
@@ -1083,6 +1109,45 @@ public final class GraineInApp {
         #endif
     }
 
+    /// A component is on its way, its content loading: the views draw their loader, and so can the app (`components.pending`). Main thread.
+    func componentPending(_ hint: [String: Any]) {
+        components.pendingStarted(hint)
+        notifyListeners { $0.onWidgetPending(hint) }
+    }
+
+    /**
+     * CLOSE A COMPONENT the agent drew without answering it, from a UI of your
+     * own — what the SDK's views do when the customer closes one. The agent is
+     * told, quietly, so it stops talking about options nobody can see (it does
+     * not speak up because someone closed a card), and the component is kept
+     * for `reopenComponent()`. Nothing for an id that is not the component the
+     * agent drew last (`components.current`).
+     */
+    public func dismissComponent(widgetId: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.dismissComponent(widgetId: widgetId) }
+            return
+        }
+        guard let frame = componentFrame, GraineInApp.componentId(frame) == widgetId else { return }
+        if let widget = GraineWidget(frame: frame, baseUrl: config.baseUrl) { tellComponentDismissed(widget) }
+        componentDismissed()
+    }
+
+    /// Closing is not answering — but the agent is told, quietly. Main thread.
+    func tellComponentDismissed(_ widget: GraineWidget) {
+        let detail: [String: Any] = [
+            "tool_name": widget.id.components(separatedBy: ":").first ?? "",
+            "kind": widget.kind,
+            "title": JSON.string(widget.data["title"]),
+            "answered": false,
+        ]
+        reportEvent(
+            "component_dismissed",
+            detail: "The customer closed the component without choosing. Do not refer to options they cannot see; offer to show it again if they want it.",
+            data: ["quiet": true, "data": detail]
+        )
+    }
+
     /// The customer closed it without answering: kept for `reopenComponent()`. Main thread.
     func componentDismissed() {
         if let shown = componentFrame { closedComponentFrame = shown }
@@ -1271,7 +1336,11 @@ public final class GraineInApp {
             let before = identity.snapshot()
             identity.setField(session.identitySettings.field)
             variables.setIdentityField(session.identitySettings.field)
-            if identity.snapshot() != before { for watch in Array(identityWatchers.values) { watch() } }
+            if identity.snapshot() != before {
+                // A chat connected before the customer could be read (on the kept session) is theirs from now on.
+                if chatMade { chat.identityChanged(from: before.value, to: identity.snapshot().value) }
+                for watch in Array(identityWatchers.values) { watch() }
+            }
             sendSignOuts()
             // The design first, so `theme` is already right when onSessionReady is heard.
             repickTheme()
@@ -1691,6 +1760,37 @@ public final class GraineInApp {
     /// Why the booking sheet cannot book now, as its line; nil when it can.
     var bookingBlocked: String? {
         Booking.blocked(calls: sessionOrCached?.calls, identified: identity.snapshot().value != nil)
+    }
+
+    /**
+     * Why this agent cannot be booked from the app now, as a code — nil while
+     * `bookingAvailable` is true. First match wins: `not_loaded` (the agent's
+     * configuration has not loaded yet: a first launch, before the session
+     * arrives), `rings_not_set_up` (Graine does not ring this app's iPhones —
+     * the workspace has not uploaded its push credentials, or iOS is not among
+     * the platforms it rings), `scheduling_off` (the agent does not let
+     * customers book calls), `not_identified` (the customer is not identified with the
+     * trait the agent's Identity setting names). Read it again after
+     * `identify` and once the session has loaded.
+     */
+    public var bookingUnavailableReason: String? {
+        let session = sessionOrCached
+        return Booking.unavailableReason(calls: session?.calls, loaded: session != nil, identified: identity.snapshot().value != nil)
+    }
+
+    /**
+     * The times the SDK's booking sheet would offer on the day holding `day`,
+     * oldest first — for a picker of your own: every 5 minutes, from the
+     * earliest the rules allow (`minLeadMinutes` from `now`, on the next
+     * 5-minute mark) to the latest (`maxDaysAhead` days from `now`), the day
+     * counted in `calendar`'s time zone (the device's). Empty for a day the
+     * sheet does not offer: before today, beyond `maxDaysAhead`, or today once
+     * its last time has passed. Graine checks the agent's calling hours when
+     * the call is booked (`outsideWindow`); whether the customer can book at
+     * all is `bookingAvailable`.
+     */
+    public func bookingSlots(day: Date, now: Date = Date(), calendar: Calendar = .current) -> [Date] {
+        Booking.slots(schedulingRules, day: day, now: now, calendar: calendar)
     }
 
     /**

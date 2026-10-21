@@ -91,7 +91,7 @@ private final class PreviewSocket: CallSocket {
     }
 
     func drop() {
-        events.closed(false, "The connection was lost.")
+        events.closed(false, "The connection was lost.", nil)
     }
 }
 #endif

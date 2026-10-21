@@ -46,6 +46,8 @@ enum CallsHostCallScreen: String {
  *   appVersion       string or null
  *   callScreen       "sdk" (the default) or "app"
  *   callTransport    "auto" (the default), "websocket" or "webrtc": the calls' audio (GraineCallsConfig.callTransport)
+ *   speakerByDefault bool; true by default: calls start on the loudspeaker unless a headset, a car or
+ *                    AirPlay is the route; false starts them on the earpiece (GraineCalls.speakerByDefault)
  *   debug            bool; false by default: the SDK's debug log (GraineConfig.debug)
  *   android          { smallIcon: string or null }
  *   ios              { iconTemplate: string or null, includesCallsInRecents: bool }
@@ -72,6 +74,8 @@ struct CallsHostOptions: Equatable {
     var appVersion: String?
     var callScreen = CallsHostCallScreen.sdk
     var callTransport = GraineCallTransport.auto
+    /// Calls start on the loudspeaker unless a headset, a car or AirPlay is the route (GraineCalls.speakerByDefault).
+    var speakerByDefault = true
     /// Read when the SDK instance is made, like the key and the base URL.
     var debug = false
     var androidSmallIcon: String?
@@ -125,6 +129,7 @@ struct CallsHostOptions: Equatable {
             }
             options.callTransport = transport
         }
+        options.speakerByDefault = try bool(map, "speakerByDefault", named: "speakerByDefault") ?? true
         options.debug = try bool(map, "debug", named: "debug") ?? false
         if let android = try object(map, "android") {
             options.androidSmallIcon = try string(android, "smallIcon", named: "android.smallIcon").flatMap(nonBlank)
@@ -160,6 +165,7 @@ struct CallsHostOptions: Equatable {
             "baseUrl": baseUrl,
             "ringTimeoutMs": ringTimeoutMs,
             "callScreen": callScreen.rawValue,
+            "speakerByDefault": speakerByDefault,
             "debug": debug,
         ]
         if let sound = ringtoneSound { out["ringtoneSound"] = sound }
@@ -388,6 +394,10 @@ struct CallsHostSnapshot: Equatable {
     var transport: String?
     /// Why a call that tried WebRTC runs on the WebSocket (`no_answer`, `ice_timeout`, …).
     var transportFallbackReason: String?
+    /// How the call connected and how its audio holds up (GraineCalls.connection): null until it reaches its conversation.
+    var connection: GraineCallConnection?
+    /// How loud the agent is as it is heard, 0–1 (GraineCalls.agentLevel): the call screen's visualiser. 0 at idle.
+    var agentLevel: Double = 0
 
     /// The idle rule applied and blanks made null: what is shown, and what is compared.
     var settled: CallsHostSnapshot {
@@ -430,7 +440,19 @@ struct CallsHostSnapshot: Equatable {
             "agent": CallsHostSnapshot.orNull(s.agent),
             "transport": CallsHostSnapshot.orNull(s.transport),
             "transportFallbackReason": CallsHostSnapshot.orNull(s.transportFallbackReason),
+            "connection": s.connection.map { $0.json as Any } ?? NSNull(),
+            "agentLevel": min(1, max(0, s.agentLevel.isFinite ? s.agentLevel : 0)),
         ]
+    }
+
+    /**
+     * The agent's level as the snapshot carries it: held to 0–1 and to two
+     * decimals — Android's host to the digit — so a change nobody could see
+     * is no `state` event. Not a number is silence.
+     */
+    static func level(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return (min(1, max(0, value)) * 100).rounded() / 100
     }
 
     static func word(_ state: GraineCallState) -> String {
@@ -497,13 +519,16 @@ enum CallsHostEvent {
     static let action = "action"
 
     /**
-     * `{callId, outcome, reason?, error?, durationSeconds?, hosted?, agent?}`: `reason` (local, remote, failed)
-     * only with `ended`, `error` only with `failed`, `durationSeconds` with an `ended` call whose length is known,
-     * `hosted: true` for a call Graine rang (its outcomes reach Graine too), and `agent` — the name of the agent
-     * the call was with — when it is known. The keys React Native's and Flutter's GraineCallOutcome read.
+     * `{callId, outcome, reason?, error?, durationSeconds?, hosted?, agent?, connection?}`: `reason` (local, remote,
+     * failed) only with `ended`, `error` only with `failed`, `durationSeconds` with an `ended` call whose length is
+     * known, `hosted: true` for a call Graine rang (its outcomes reach Graine too), `agent` — the name of the agent
+     * the call was with — when it is known, and `connection` — the call's connection report as it stood
+     * (GraineCallConnection's JSON) — when anything of it was known. The keys React Native's and Flutter's
+     * GraineCallOutcome read.
      */
     static func outcomePayload(
-        _ outcome: GraineCallOutcome, callId: String, agent: String? = nil, hosted: Bool = false, durationSeconds: Int? = nil
+        _ outcome: GraineCallOutcome, callId: String, agent: String? = nil, hosted: Bool = false, durationSeconds: Int? = nil,
+        connection: GraineCallConnection? = nil, cause: GraineCallEndCause? = nil
     ) -> [String: Any] {
         var out: [String: Any] = ["callId": callId, "outcome": outcome.wire]
         if let reason = outcome.endReason { out["reason"] = reason.rawValue }
@@ -511,6 +536,9 @@ enum CallsHostEvent {
         if outcome.endReason != nil, let seconds = durationSeconds { out["durationSeconds"] = max(0, seconds) }
         if hosted { out["hosted"] = true }
         if let agent = agent { out["agent"] = agent }
+        if let connection = connection { out["connection"] = connection.json }
+        // Who or what ended it, on the outcome that ends it.
+        if let cause = cause, outcome.endReason != nil || outcome.error != nil { out["cause"] = cause.rawValue }
         return out
     }
 
@@ -788,6 +816,8 @@ protocol CallsHostPlatform: AnyObject {
     func end()
     func setMuted(_ muted: Bool)
     func setSpeaker(_ on: Bool)
+    /// Calls start on the loudspeaker (true) unless a headset, a car or AirPlay is the route, or on the earpiece (`GraineCalls.speakerByDefault`).
+    func setSpeakerByDefault(_ on: Bool)
     func identify(_ traits: [String: Any]?)
     /// The current customer's memory choice (`GraineInApp.setMemory`).
     func setMemory(_ enabled: Bool)
@@ -825,6 +855,7 @@ protocol CallsHostPlatform: AnyObject {
 }
 
 extension CallsHostPlatform {
+    func setSpeakerByDefault(_ on: Bool) {}
     func agentName(forCall callId: String) -> String? { nil }
     var callHosted: Bool { false }
     func now() -> Date { Date() }
@@ -876,6 +907,8 @@ final class CallsHostCore {
     private var heldMemory: Bool?
     private var heldVariables: Held<[String: Any]?>?
     private var heldScreen: Held<GraineScreen?>?
+    /// `setSpeakerByDefault` before anything was configured: applied, and kept, by the first configure or restore.
+    private var heldSpeakerByDefault: Bool?
 
     /// Where the host's warnings go; the SDK's log unless a test listens.
     var log: (String) -> Void = { GraineLog.warning($0) }
@@ -911,7 +944,14 @@ final class CallsHostCore {
         return true
     }
 
-    private func apply(_ next: CallsHostOptions) {
+    private func apply(_ parsed: CallsHostOptions) {
+        // A speaker default set before there were options goes into them, and is kept with them.
+        var next = parsed
+        if let held = heldSpeakerByDefault {
+            heldSpeakerByDefault = nil
+            next.speakerByDefault = held
+            store.saveOptions(next.json)
+        }
         if instance == nil {
             let made = platform.makeInstance(next)
             instance = (made.publishableKey, GraineProtocol.trimTrailingSlashes(made.baseUrl), made.debug)
@@ -995,6 +1035,23 @@ final class CallsHostCore {
 
     func setSpeaker(_ on: Bool) {
         platform.setSpeaker(on)
+    }
+
+    /**
+     * Calls start on the loudspeaker (true) unless a headset, a car or
+     * AirPlay is the route, or on the earpiece (false): applied now and kept
+     * with the options for the next cold start, as `configure`'s
+     * `speakerByDefault` is. Before anything is configured, held until it is.
+     */
+    func setSpeakerByDefault(_ on: Bool) {
+        guard var current = options else {
+            heldSpeakerByDefault = on
+            return
+        }
+        current.speakerByDefault = on
+        options = current
+        store.saveOptions(current.json)
+        platform.setSpeakerByDefault(on)
     }
 
     // MARK: Who, what and where
@@ -1136,7 +1193,8 @@ final class CallsHostCore {
         changed()
     }
 
-    func outcome(_ outcome: GraineCallOutcome, callId: String) {
+    /// `connection` and `cause`: the call's connection report as the engine had it then, and who or what ended it (GraineCalls hands both).
+    func outcome(_ outcome: GraineCallOutcome, callId: String, connection: GraineCallConnection? = nil, cause: GraineCallEndCause? = nil) {
         let live = platform.callFields()
         if let why = outcome.error {
             // A push refused during a live call is another call's failure, not this one's.
@@ -1149,7 +1207,8 @@ final class CallsHostCore {
             seconds = max(0, Int(platform.now().timeIntervalSince(openedAt).rounded()))
         }
         sinks.emit(CallsHostEvent.outcome, CallsHostEvent.outcomePayload(
-            outcome, callId: callId, agent: platform.agentName(forCall: callId), hosted: current && platform.callHosted, durationSeconds: seconds
+            outcome, callId: callId, agent: platform.agentName(forCall: callId), hosted: current && platform.callHosted, durationSeconds: seconds,
+            connection: connection, cause: cause
         ))
         changed()
     }

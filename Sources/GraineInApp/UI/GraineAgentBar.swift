@@ -225,6 +225,8 @@ struct GraineAgentBarContainer<Accessory: View>: View {
     @State private var chosen: GraineSurface? = nil
     /// A logo that would not load: the avatar goes back to the letter on the accent until the logo changes.
     @State private var failedLogo: String? = nil
+    /// This bar shows the chat now — counted once by the chat, however the bar came to show it or stopped.
+    @State private var chatOnScreen = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -270,17 +272,21 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             // While a bar is on screen, a page still loading is the customer's wait (GraineVoice.slowConnect).
             voice.viewerAppeared()
             graine.tapCapture.attach(to: GraineVoice.keyWindow())
-            if showsChat { chat.connectOpen() }
+            if showsChat { showChat(true) }
         }
         .onDisappear {
             voice.viewerDisappeared()
-            // The bar is gone: so is an open's own size.
-            if showsChat { chat.close() }
+            // The bar is gone, and with it an open's own size. The conversation is kept for the next window, until idle.
+            if chatOnScreen {
+                showChat(false)
+                chat.forgetOpenedSize()
+            }
         }
-        // The chat's connection follows the surface: open while the customer is in it, down when they leave.
-        // Moving to the call and back keeps the size an open asked for.
+        // The chat's connection follows the surface: up while the customer is in it. Moving to the call ends it at once
+        // (one conversation at a time), and moving back keeps the size an open asked for.
         .onChange(of: showsChat) { inChat in
-            if inChat { chat.connectOpen() } else { chat.closeConnection() }
+            showChat(inChat)
+            if !inChat { chat.closeConnection() }
         }
         // The app opened the chat (`chat.open(size:)`): the bar moves to it, where the agent offers one.
         .onReceive(chat.$appOpens.dropFirst()) { _ in
@@ -341,6 +347,13 @@ struct GraineAgentBarContainer<Accessory: View>: View {
         }
     }
 
+    /// Tell the chat whether this bar shows it: on screen it connects; off every screen it is kept until idle.
+    private func showChat(_ on: Bool) {
+        guard on != chatOnScreen else { return }
+        chatOnScreen = on
+        chat.shown(on)
+    }
+
     /// What the chevron does, and closing a sheet, a panel or a screen: back to the call, or the bar closes.
     private func closeChat() {
         switch ChatWindowLayout.close(canSwitch: canSwitch) {
@@ -362,7 +375,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             callName: graine.sessionOrCached?.calls?.callName,
             bookable: graine.bookingAvailable,
             quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
-            wasOnline: chat.wasOnline, loader: loader,
+            wasOnline: chat.wasOnline, disconnected: chat.disconnected, marks: chat.marks, loader: loader,
             onSend: { chat.send($0) },
             onRetry: { chat.retry() },
             onCancelCall: { chat.cancelUpcomingCall(id: $0) },
@@ -516,6 +529,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
             error: model.fault != nil,
             inChat: showsChat,
             chatOnline: chat.online,
+            chatDisconnected: chat.disconnected,
             online: voice.online,
             reconnecting: voice.reconnecting,
             connectivity: voice.connectivity,
@@ -548,7 +562,7 @@ struct GraineAgentBarContainer<Accessory: View>: View {
                 callName: graine.sessionOrCached?.calls?.callName,
                 bookable: graine.bookingAvailable,
                 quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
-                wasOnline: chat.wasOnline, loader: loader,
+                wasOnline: chat.wasOnline, disconnected: chat.disconnected, marks: chat.marks, loader: loader,
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },

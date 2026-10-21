@@ -287,20 +287,23 @@ enum ChatWindowRules {
     }
 
     /**
-     * First match wins (DESIGN.md "Header"): connecting, reconnecting, the
+     * First match wins (DESIGN.md "Header"): connecting, reconnecting,
+     * "Disconnected" once Graine ended the conversation itself (idle, or the
+     * session's time limit) until the customer opens or writes again, the
      * agent typing (where the status says so), no line at all, then the dot
      * and the subtitle (or "Online"), or the words alone. A chat that is not
      * connected says so rather than "Online".
      */
     static func headerStatus(
         _ header: GraineChatTokens.Header, status: GraineChatStatus, typing: Bool,
-        subtitle: String, typingText: String, loader: GraineLoaderText = Loaders.defaultText
+        subtitle: String, typingText: String, loader: GraineLoaderText = Loaders.defaultText, disconnected: Bool = false
     ) -> HeaderStatus {
         switch status {
         case .connecting: return .waiting(loader.connecting ?? "Connecting…")
         case .reconnecting: return .waiting(loader.reconnecting ?? "Reconnecting…")
         default: break
         }
+        if disconnected { return .words("Disconnected", dot: false) }
         if typing && header.typingStatus { return .words(typingText.isEmpty ? "Typing…" : typingText, dot: false) }
         if header.status == "none" { return .none }
         guard status == .online else { return .words("Not connected", dot: false) }

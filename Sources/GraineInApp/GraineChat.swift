@@ -21,10 +21,16 @@ import Foundation
  * chat, starting a call closes it, and a native call (`calls`) holds every chat
  * down until it is over. With the app in the background the chat
  * hangs up (when `GraineConfig.endOnBackground`), and comes back with the app.
+ * A chat window closing does not end the conversation: with no window showing
+ * it, the chat stays connected until nothing has been said either way for five
+ * minutes, so the next window continues it. When Graine ends it itself (idle,
+ * or the session's time limit) it is not dialled again on its own: the lines
+ * stay, and the next open or message connects again.
  *
  * `ObservableObject`: `GraineChatView` draws it whole; draw your own from
- * `turns`, `status` and `typing` — and `quickReplies`, `ended` and `rating`.
- * Main thread.
+ * `turns`, `status` and `typing` — and `quickReplies`, `ended`, `rating`,
+ * `disconnected`, `wasOnline`, `newConversationBefore`, `sessionId` and `sessions` — and tell it when
+ * your screen appears and goes (`shown(_:)`). Main thread.
  *
  * What the chat window draws beside the conversation is yours to give:
  *
@@ -74,8 +80,51 @@ public final class GraineChat: ObservableObject {
         didSet { objectWillChange.send() }
     }
 
-    /// The chat lost a connection it had and is making it again (the window's calm "Reconnecting…" banner).
-    @Published private(set) var wasOnline = false
+    /**
+     * The chat was connected since the customer came into it: `reconnecting`
+     * now is a dropped connection being made again — the window's calm
+     * "Reconnecting…" banner — not a first connect still trying.
+     */
+    @Published public private(set) var wasOnline = false
+
+    /**
+     * Graine ended the conversation itself — idle (close 4408) or at the
+     * session's time limit (4410): the window's header says "Disconnected".
+     * The lines stay and nothing reconnects on its own; the next `open()`,
+     * `shown(true)` or message connects again, and this goes back to false.
+     */
+    @Published public private(set) var disconnected = false
+
+    /**
+     * The ids of the turns a "Disconnected · new conversation" row goes before,
+     * in the order of `turns` — Graine began a new conversation under earlier
+     * lines; empty when none. The window's own rows, never turns and never
+     * sent: `GraineChatRows.build(_:newConversationBefore:)` places them.
+     */
+    @Published public private(set) var newConversationBefore: [String] = []
+
+    /// `newConversationBefore`, for the SDK's own windows.
+    var marks: Set<String> { Set(newConversationBefore) }
+
+    /**
+     * The id of the chat's current session — this connection's run, the id
+     * Execution Logs shows for it — from the server's session frame. Nil until
+     * it arrives (each new connection starts without one), with a server that
+     * sends none, and after the identity changes. A turn said now carries it
+     * (`GraineChatTurn.session`).
+     */
+    @Published public private(set) var sessionId: String?
+
+    /**
+     * The sessions the conversation on screen holds, oldest first: each run of
+     * consecutive turns said in the same session (`GraineChatSession`) — a chat
+     * connection's, or a call's — with the current one marked. Turns kept
+     * before sessions were recorded make one with no id; with a server that
+     * sends none, the whole conversation is one session with no id. For a
+     * "past conversations" list, or session dividers of your own. Derived from
+     * `turns` and `sessionId`, so it changes when they do.
+     */
+    @Published public private(set) var sessions: [GraineChatSession] = []
 
     /**
      * This customer's calls still to come (`scheduledCalls()`), soonest first,
@@ -112,6 +161,8 @@ public final class GraineChat: ObservableObject {
     private unowned let graine: GraineInApp
     private var connection: ChatConnection!
     private var unwatch: [() -> Void] = []
+    /// The SDK's chat windows on screen now (the bar's, `GraineChatView`).
+    private var windows = 0
 
     static let holdBackground = "background"
     static let holdNativeCall = "native-call"
@@ -152,6 +203,8 @@ public final class GraineChat: ObservableObject {
         graine.onMain {
             self.openedSize = size
             self.appOpens += 1
+            // The app shows the chat (its own UI, or the bar it moves): it stays until the app closes it.
+            self.connection.shown(true)
             self.connectOpen()
         }
     }
@@ -177,6 +230,33 @@ public final class GraineChat: ObservableObject {
     func closeConnection() {
         isOpen = false
         connection.close()
+    }
+
+    /**
+     * A chat screen came on screen, or left it — the SDK's own windows say so
+     * themselves; a chat screen of your own calls this as it appears (true)
+     * and goes (false), in pairs (DESIGN.md "How long a conversation lasts").
+     * On screen, the chat connects. Once no screen shows it, it stays
+     * connected — the next screen continues the same conversation, nothing on
+     * screen changes, no new welcome — until nothing has been said either way
+     * for five minutes, and then closes as `close()` closes it. A chat no
+     * screen reports stays connected until Graine's own idle limit.
+     */
+    public func shown(_ visible: Bool) {
+        graine.onMain {
+            self.windows = max(0, self.windows + (visible ? 1 : -1))
+            if visible {
+                self.connection.shown(true)
+                self.connectOpen()
+            } else if self.windows == 0 && self.isOpen {
+                self.connection.shown(false)
+            }
+        }
+    }
+
+    /// The bar that drew this open's size is gone: the size goes with it, the conversation stays.
+    func forgetOpenedSize() {
+        openedSize = nil
     }
 
     /// Send a message. Shown at once; sent now, or as soon as the chat is connected (connecting it if it is not).
@@ -321,17 +401,21 @@ public final class GraineChat: ObservableObject {
         let now = Date()
         if !force, let last = lastUpcomingFetch, now.timeIntervalSince(last) < 10 { return }
         lastUpcomingFetch = now
+        let epoch = upcomingEpoch
         graine.listScheduledCalls { [weak self] result in
             guard case .success(let calls) = result else { return }
             let shown = UpcomingCalls.shown(calls)
             DispatchQueue.main.async {
-                guard let self = self, self.upcomingCalls != shown else { return }
+                // Asked for the customer before: not this one's calls.
+                guard let self = self, self.upcomingEpoch == epoch, self.upcomingCalls != shown else { return }
                 self.upcomingCalls = shown
             }
         }
     }
 
     private var lastUpcomingFetch: Date?
+    /// Moves on with every change of identity: a list fetched for the customer before is not shown.
+    private var upcomingEpoch = 0
 
     // MARK: - For the SDK's own views and routing
 
@@ -354,9 +438,28 @@ public final class GraineChat: ObservableObject {
         connection.release(reason)
     }
 
-    /// A different customer signed in on this phone, or the customer's memory was forgotten: the conversation leaves the screen.
+    /// The customer's memory was forgotten: the conversation leaves the screen, and what was waiting to go with it.
     func forgetTranscript() {
         connection.clearTranscript()
+    }
+
+    /**
+     * WHO A CHAT BELONGS TO (DESIGN.md): the identity changed. Lines that were
+     * another identity's go — not the customer's still to send — and a chat
+     * connected or connecting for it is closed normally and connected again
+     * at once for this one while the customer is in it, else at the next open
+     * or message (`ChatConnection.identityChanged`). The booked calls on the
+     * card are the identity's too: gone, and fetched again for this one.
+     */
+    func identityChanged(from previous: String?, to current: String?) {
+        connection.identityChanged(to: current)
+        guard previous != current else { return }
+        upcomingEpoch += 1
+        lastUpcomingFetch = nil
+        if !upcomingCalls.isEmpty { upcomingCalls = [] }
+        if !cancelling.isEmpty { cancelling = [] }
+        if !cancelFailed.isEmpty { cancelFailed = [] }
+        if isOpen { fetchUpcoming(force: true) }
     }
 
     // MARK: - Internals
@@ -383,6 +486,17 @@ public final class GraineChat: ObservableObject {
             if ended != connection.ended { ended = connection.ended }
             if rating != connection.rating { rating = connection.rating }
             if wasOnline != connection.wasOnline { wasOnline = connection.wasOnline }
+            if disconnected != connection.disconnected { disconnected = connection.disconnected }
+            let marked = connection.transcript.marks
+            let before = marked.isEmpty ? [] : connection.transcript.turns.map(\.id).filter { marked.contains($0) }
+            if newConversationBefore != before { newConversationBefore = before }
+            if sessionId != connection.sessionId { sessionId = connection.sessionId }
+            let runs = ChatSessions.of(connection.transcript.turns, sessionId: connection.sessionId)
+            if sessions != runs { sessions = runs }
+        case .letGo:
+            // Idle with no window showing it: closed, as `close()` closes it — the next open or message connects again.
+            isOpen = false
+            openedSize = nil
         case .rated(let answer):
             onRated?(answer)
         case .opened:
@@ -392,7 +506,7 @@ public final class GraineChat: ObservableObject {
         case .widget(let widget):
             graine.componentArrived(widget)
         case .widgetPending(let hint):
-            graine.notifyListeners { $0.onWidgetPending(hint) }
+            graine.componentPending(hint)
         case .agentTurnEnded(let turn):
             graine.notifyListeners { $0.onChatMessage(turn) }
             // The agent may have just booked a call for the customer.

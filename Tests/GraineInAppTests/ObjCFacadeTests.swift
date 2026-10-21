@@ -28,6 +28,9 @@ import Testing
                 "scheduleCallAt:reason:completion:", "scheduleCallJSONAt:reason:completion:",
                 "scheduledCallsWithCompletion:", "scheduledCallsJSONWithCompletion:", "cancelScheduledCall:completion:",
                 "addListener:", "removeListener:", "observeEvents:",
+                // 0.14.0, public state (PUBLIC-STATE.md).
+                "bookingUnavailableReason", "bookingSlotsJSONForDay:",
+                "componentJSON", "componentPending", "componentPendingKind", "observeComponent:",
             ], [
                 "errorDomain", "current", "configureWithBaseUrl:publishableKey:", "configureWithBaseUrl:publishableKey:variables:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:",
@@ -42,6 +45,7 @@ import Testing
                 "addListener:", "removeListener:", "observe:",
                 "quickReplies", "sendQuickReply:", "ended", "rating", "rateWithStyle:value:", "observeRatings:",
                 "pinned", "pinWithTitle:subtitle:imageUrl:badge:", "clearPin", "setAttachHandler:",
+                "setShown:", "disconnected", "wasOnline", "newConversationBefore", "dismissWidgetWithId:",
             ], []),
             "GraineObjCQuickReply": (["label", "text", "initWithLabel:text:"], []),
             "GraineObjCChatRating": (["style", "value", "scale", "json"], []),
@@ -53,10 +57,12 @@ import Testing
                 "direction", "muted", "speakerOn", "agentSpeaking", "reconnecting", "hosted", "agent", "showsCallScreen", "snapshotJSON",
                 "addListener:", "removeListener:", "observe:", "observeOutcomes:", "observeIncoming:",
                 "callPermissionsJSON", "requestCallPermissionsJSONWithCompletion:", "openCallSettings:", "callSetupProblemsJSON",
+                "reason", "agentLevel", "agentLevelHeard", "connectedAt", "connectionJSON",
             ], []),
             "GraineObjCVoice": ([
                 "attach", "start", "end", "setMuted:", "connected", "connecting", "muted", "snapshotJSON", "observe:",
                 "captionsOn", "setCaptionsOn:", "clearCaptions",
+                "status", "error", "agentLevel", "micLevel", "transport", "transportFallbackReason", "micDenied",
             ], []),
             "GraineObjCRegistration": (["unregister"], []),
             "GraineObjCActionResult": (["status", "message", "data"], ["ok:", "ok:data:", "refused:", "error:"]),
@@ -64,7 +70,7 @@ import Testing
             "GraineObjCScheduledCall": (["identifier", "at", "status", "source", "reason", "isUpcoming", "canCancel"], []),
             "GraineObjCSession": (["agentId", "memoryEnabled", "identityField", "devicesPerUser", "usersCanBook", "hostedRinging", "callName", "json"], []),
             "GraineObjCChatTurn": (["identifier", "role", "text", "live", "delivery", "at", "proactive", "restored", "channel"], []),
-            "GraineObjCCallOutcome": (["callId", "outcome", "reason", "durationSeconds", "hosted", "agent", "json"], []),
+            "GraineObjCCallOutcome": (["callId", "outcome", "reason", "durationSeconds", "hosted", "agent", "connectionJSON", "json"], []),
         ]
         for (name, sels) in selectors {
             let cls = try #require(NSClassFromString(name) as? NSObject.Type, "\(name) is an Objective-C class by that name")

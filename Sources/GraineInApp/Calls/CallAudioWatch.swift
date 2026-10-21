@@ -49,6 +49,17 @@ final class CallAudioWatch {
     /// Whether an open conversation is waiting for its audio.
     var isWaiting: Bool { waiting }
 
+    /**
+     * Whether the call's audio already runs as its conversation opens:
+     * CallKit activated it — or the call is on WebRTC, whose media path comes
+     * up only once its audio runs (CallKit's, or the leg's own direct start).
+     * Then there is nothing to wait for: the watch never touches a call that
+     * is carrying the agent's voice.
+     */
+    static func runningAtOpen(callKitActivated: Bool, transport: CallEngine.Transport) -> Bool {
+        callKitActivated || transport == .webrtc
+    }
+
     /// The conversation opened. With the audio already running it is connected now; otherwise the wait begins.
     func opened(audioRunning: Bool) {
         stop()

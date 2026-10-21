@@ -75,6 +75,50 @@ public final class GraineVoice: NSObject, ObservableObject {
      * `end()` and `detach()`.
      */
     @Published public private(set) var callFailed = false { didSet { refreshConnectWait() } }
+    /**
+     * The road the call's audio runs on, once the page has said
+     * (`graine:transport`): `.webrtc` or `.websocket`. Nil before the first
+     * call; a start clears it.
+     */
+    @Published public private(set) var transport: GraineTransport?
+    /// Why a call that could have run on WebRTC runs on the WebSocket, in the page's words (`no_answer`, `ice_timeout`, …); nil otherwise.
+    @Published public private(set) var transportFallbackReason: String?
+    /**
+     * How loud the agent's voice is as it plays, 0–1, as the call page
+     * measures it — about five times a second while a call is live, 0
+     * otherwise. A page that does not measure it leaves it at 0: draw `phase`.
+     */
+    @Published public private(set) var agentLevel: Double = 0
+    /// How loud the customer's microphone is, 0–1, as the call page measures it — as `agentLevel`.
+    @Published public private(set) var micLevel: Double = 0
+    /// The microphone was refused for the last start: the bar's "Needs microphone". A start clears it, and so does a call that connects.
+    @Published public private(set) var micDenied = false
+    /// A misconfiguration the call reported (its transport `not_configured`), in the page's words: the bar's "Unavailable". A start clears it.
+    @Published private(set) var fault: String?
+    /// A call that connected is over, and nothing has started since.
+    @Published private(set) var callEnded = false
+
+    /**
+     * Why the call failed, in a sentence, while `status` is `failed` — the
+     * agent is not set up for this app (the transport said `not_configured`),
+     * the microphone was refused, the page could not load after its retries,
+     * or nothing could carry the last start (`callFailed`). Nil otherwise.
+     */
+    public var error: String? {
+        VoiceFailure.sentence(fault: fault, micDenied: micDenied, connectivity: connectivity, callFailed: callFailed)
+    }
+
+    /**
+     * What the call is doing, in one word, for a bar of your own: `phase`'s
+     * words, and muted, failed (`error` says why) and ended — the moments the
+     * SDK's own bar says "Muted", "Unavailable" or "Couldn’t connect".
+     */
+    public var status: GraineVoiceStatus {
+        GraineVoiceStatus.of(
+            phase: phase, calling: connecting || connected || reconnecting, connected: connected, muted: muted,
+            failed: error != nil, ended: callEnded
+        )
+    }
 
     /// Whether the engine is mounted.
     public var isAttached: Bool { webView != nil }
@@ -317,6 +361,8 @@ public final class GraineVoice: NSObject, ObservableObject {
         if awaitingAgent { awaitingAgent = false }
         setAttempt(attempt.after(.ended))
         setCall(connected: false, connecting: false)
+        // No engine, no call: nothing of the last one is news.
+        freshAttempt()
         scheduleAudioRestore()
     }
 
@@ -350,6 +396,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         graine.forgetComponents()
         // A new attempt: the last one's failure and stage are not news.
         setAttempt(attempt.after(.started))
+        freshAttempt()
         setCall(connected: connected, connecting: true)
         if !GraineVoice.micGranted() {
             pendingStart = true
@@ -358,7 +405,7 @@ public final class GraineVoice: NSObject, ObservableObject {
                 if !granted {
                     self.pendingStart = false
                     self.setCall(connected: false, connecting: false)
-                    self.report { $0.onMicDenied(reason: "NotAllowedError") }
+                    self.micWasDenied("NotAllowedError")
                     return
                 }
                 if self.ready {
@@ -543,6 +590,11 @@ public final class GraineVoice: NSObject, ObservableObject {
     // MARK: - What the page says
 
     fileprivate func receive(_ raw: String) {
+        // Five times a second while live: kept out of the debug log, which they would drown.
+        if let levels = VoiceLevels.parse(raw) {
+            heard(agent: levels.agent, mic: levels.mic)
+            return
+        }
         if graine.config.debug { GraineLog.trace("← page \(raw.prefix(600))") }
         guard let message = GraineProtocol.parse(raw) else { return }
         handle(message)
@@ -577,8 +629,10 @@ public final class GraineVoice: NSObject, ObservableObject {
             if isConnected {
                 endNotified = false
                 reconnecting = false
-                // An answered call is not still retrying, and did not fail.
+                // An answered call is not still retrying, and did not fail — nor waiting on a microphone, nor over.
                 setAttempt(attempt.after(.connected))
+                if micDenied { micDenied = false }
+                if callEnded { callEnded = false }
                 endWatchdogItem?.cancel()
                 endWatchdogItem = nil
             }
@@ -603,7 +657,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             graine.componentArrived(widget)
 
         case .widgetPending(let hint):
-            report { $0.onWidgetPending(hint) }
+            graine.componentPending(hint)
 
         case let .appAction(actionId, name, arguments):
             // The runtime is BLOCKED on this answer; it goes back the way the request came.
@@ -625,21 +679,23 @@ public final class GraineVoice: NSObject, ObservableObject {
             startedCall = false
             setQuality(.unknown)
             scheduleAudioRestore()
-            if !endNotified {
-                endNotified = true
-                report { $0.onEnded() }
-            }
+            callOver()
 
         case .micDenied(let reason):
             pendingStart = false
             setCall(connected: false, connecting: false)
-            report { $0.onMicDenied(reason: reason) }
+            micWasDenied(reason)
 
-        case let .transport(transport, requested, reason, text):
-            report { $0.onTransport(transport, requested: requested, reason: reason, message: text) }
+        case let .transport(carried, requested, reason, text):
+            if transport != carried { transport = carried }
+            // Only a call on the WebSocket fell back; on WebRTC nothing did.
+            let fallback = carried == .websocket ? reason : nil
+            if transportFallbackReason != fallback { transportFallbackReason = fallback }
+            report { $0.onTransport(carried, requested: requested, reason: reason, message: text) }
             // A MISCONFIGURATION IS AN ERROR, even though the call survived it: `not_configured`
             // never recovers on its own, and its only symptom is a call on the transport nobody chose.
             if reason == "not_configured", let text = text {
+                fault = text
                 report { $0.onError(text) }
             }
 
@@ -706,6 +762,8 @@ public final class GraineVoice: NSObject, ObservableObject {
         let liveChanged = isConnected != connected
         if connected != isConnected { connected = isConnected }
         if connecting != isConnecting { connecting = isConnecting }
+        // Off a call there is nothing to measure.
+        if !isConnected { heard(agent: 0, mic: 0) }
         // The friction clock runs only during a live call.
         if liveChanged { graine.callStateChanged(live: isConnected) }
         if changed { report { $0.onCallState(connected: isConnected, connecting: isConnecting) } }
@@ -725,6 +783,40 @@ public final class GraineVoice: NSObject, ObservableObject {
 
     private func report(_ call: (GraineListener) -> Void) {
         graine.notifyListeners(call)
+    }
+
+    /// A new attempt (or no engine at all): the last call's road, levels, refusal, misconfiguration and end are not news.
+    private func freshAttempt() {
+        if transport != nil { transport = nil }
+        if transportFallbackReason != nil { transportFallbackReason = nil }
+        if micDenied { micDenied = false }
+        if fault != nil { fault = nil }
+        if callEnded { callEnded = false }
+        heard(agent: 0, mic: 0)
+    }
+
+    /// The microphone was refused: said once to the listeners, and kept for the bar's "Needs microphone".
+    private func micWasDenied(_ reason: String) {
+        if !micDenied { micDenied = true }
+        report { $0.onMicDenied(reason: reason) }
+    }
+
+    /// The call that connected is over — said once, however its end was learned. The levels go to 0.
+    private func callOver() {
+        heard(agent: 0, mic: 0)
+        guard !endNotified else { return }
+        endNotified = true
+        if !callEnded { callEnded = true }
+        report { $0.onEnded() }
+    }
+
+    /// The page's levels: followed while a call is live, 0 otherwise.
+    private func heard(agent: Double?, mic: Double?) {
+        let live = connected
+        let nextAgent = live ? (agent ?? agentLevel) : 0
+        let nextMic = live ? (mic ?? micLevel) : 0
+        if agentLevel != nextAgent { agentLevel = nextAgent }
+        if micLevel != nextMic { micLevel = nextMic }
     }
 
     // MARK: - The page's load, watched
@@ -802,10 +894,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         GraineLog.warning("The page did not confirm the call ended; ending it locally.")
         setCall(connected: false, connecting: false)
         startedCall = false
-        if !endNotified {
-            endNotified = true
-            report { $0.onEnded() }
-        }
+        callOver()
         scheduleAudioRestore()
         reloadEngine()
     }
@@ -822,10 +911,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         pendingStart = false
         if connectStage != nil { connectStage = nil }
         setCall(connected: false, connecting: false)
-        if !endNotified {
-            endNotified = true
-            report { $0.onEnded() }
-        }
+        callOver()
         scheduleAudioRestore()
         if let target = target {
             DispatchQueue.main.async { [weak self] in self?.attach(to: target) }
@@ -897,7 +983,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         let ours = originHost.lowercased() == (URL(string: graine.config.baseUrl)?.host?.lowercased() ?? "")
         if type == .microphone && ours && GraineVoice.micGranted() { return .grant }
         if type == .microphone || type == .cameraAndMicrophone {
-            report { $0.onMicDenied(reason: "NotAllowedError") }
+            micWasDenied("NotAllowedError")
         }
         return .deny
     }
@@ -997,9 +1083,38 @@ public final class GraineVoice: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1_500), execute: item)
     }
 
+    /**
+     * A native call is about to take the audio (GraineCalls, before CallKit
+     * activates it): this engine's call has been ended, and the audio session
+     * it activated is let go of now rather than 1.5 s from now — CallKit does
+     * not hand a call an audio session the app already holds active, and a
+     * restore landing in the middle of the native call would deactivate the
+     * call's own. Main thread.
+     */
+    func yieldAudioSession() {
+        guard savedAudio != nil else { return }
+        audioRestoreItem?.cancel()
+        audioRestoreItem = nil
+        let saved = savedAudio
+        savedAudio = nil
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(false, options: [.notifyOthersOnDeactivation])
+            GraineLog.info("Calls: the in-app voice call's audio session was let go of before the native call.")
+        } catch {
+            GraineLog.warning("Calls: the in-app voice call still holds the audio session (\(GraineCalls.describeAudioError(error))); CallKit may not activate the native call's audio.")
+        }
+        if let saved = saved { try? session.setCategory(saved.category, mode: saved.mode, options: saved.options) }
+    }
+
     private func restoreAudioSession() {
         audioRestoreItem = nil
         guard let saved = savedAudio, !connected, !connecting, !startedCall else { return }
+        // Never in a native call: the audio session is CallKit's call's now.
+        guard !graine.nativeCallLive else {
+            savedAudio = nil
+            return
+        }
         savedAudio = nil
         let session = AVAudioSession.sharedInstance()
         do {

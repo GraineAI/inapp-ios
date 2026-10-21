@@ -489,6 +489,13 @@ private final class FoldRig {
         let loader = GraineLoaderText(connecting: "Un momento…")
         #expect(ChatWindowRules.headerStatus(online, status: .connecting, typing: false, subtitle: "", typingText: "", loader: loader) == .waiting("Un momento…"),
                 "the brand's own connecting words")
+        // Graine ended the conversation itself (4408, 4410): said before typing, and even where the design has no line.
+        #expect(ChatWindowRules.headerStatus(online, status: .offline, typing: false, subtitle: "", typingText: "", disconnected: true)
+                == .words("Disconnected", dot: false))
+        #expect(ChatWindowRules.headerStatus(typing, status: .offline, typing: true, subtitle: "", typingText: "Writing…", disconnected: true)
+                == .words("Disconnected", dot: false), "before typing and before status none")
+        #expect(ChatWindowRules.headerStatus(online, status: .connecting, typing: false, subtitle: "", typingText: "", disconnected: true)
+                == .waiting("Connecting…"), "connecting again comes first")
     }
 
     @Test func thePinTheCallButtonAndTheComposersPieces() throws {

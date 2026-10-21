@@ -89,6 +89,19 @@ import Foundation
     case reconnecting(Bool)
     /// The agent's voice level, 0–1 — what the receiver plays out — five times a second while the call is live.
     case level(Double)
+    /**
+     * An analytics row (GraineCallTelemetry's frame), exactly as the call sent
+     * it on its control channel — or would have, had the channel joined: the
+     * call's connection report is read from these.
+     */
+    case row(String)
+    /**
+     * The audio as received so far — the running figures the call's quality
+     * row will carry at its end: packets lost (percent), jitter's average and
+     * peak and the round trip (milliseconds); nil where nothing was measured.
+     * About once a second while the call is live.
+     */
+    case audio(lossPct: Double?, jitterAvgMs: Double?, jitterMaxMs: Double?, rttAvgMs: Double?)
     /// A control-channel frame — a caption, an action, a component — exactly as it arrived.
     case control(String)
     /// WebRTC cannot carry this call, and nothing has been heard yet: the core carries it on the socket.
@@ -138,6 +151,12 @@ import Foundation
     func setMuted(_ muted: Bool)
     /// A frame for the control channel; `kind` replaces a queued frame of the same kind (the screen).
     func sendControl(_ frame: String, kind: String?)
+    /**
+     * Who or what ended the call (GraineCallEndCause's word): the leg's
+     * `ended` row on the control channel — with how long the call had its
+     * audio and whether the agent's voice was heard — once, before the BYE.
+     */
+    func sendEnded(cause: String)
     /// Hang up and release everything. Nothing is reported after it.
     func hangUp()
     /**
@@ -179,6 +198,11 @@ import Foundation
         get { nil }
         set {}
     }
+
+    /// A leg that keeps no timings: the cause alone.
+    func sendEnded(cause: String) {
+        if let frame = GraineCallTelemetry.endedFrame(cause: cause, transport: "rtc") { sendControl(frame, kind: nil) }
+    }
 }
 
 /// The module itself.
@@ -207,6 +231,13 @@ import Foundation
      * web route. Answers at once.
      */
     func nextCallId(_ request: GraineRtcRequest) -> String?
+    /**
+     * CallKit took the call's audio session back (`didDeactivate`) with no leg
+     * left to tell — the call it was for is over. The module's view of the
+     * session must follow, or the next call's start believes a session active
+     * that is not. Main thread.
+     */
+    func audioSessionDeactivated()
 }
 
 @_spi(GraineRTC) public extension GraineRtcModule {
@@ -214,6 +245,8 @@ import Foundation
     func warmUp(_ request: GraineRtcRequest, log: ((String) -> Void)?) {}
     /// A module without grants: every call takes an id of its own.
     func nextCallId(_ request: GraineRtcRequest) -> String? { nil }
+    /// A module that keeps no view of the audio session.
+    func audioSessionDeactivated() {}
 }
 
 /// Where the core finds the module: installed explicitly, or looked up once by its class name.

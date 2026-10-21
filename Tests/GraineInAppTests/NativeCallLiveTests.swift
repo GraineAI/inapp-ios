@@ -306,9 +306,9 @@ final class RecordingNetwork: CallNetwork {
                 log.received(text)
                 events.received(text)
             },
-            closed: { byServer, detail in
-                log.note("closed byServer=\(byServer) \(detail ?? "")")
-                events.closed(byServer, detail)
+            closed: { byServer, detail, code in
+                log.note("closed byServer=\(byServer) code=\(code.map(String.init) ?? "-") \(detail ?? "")")
+                events.closed(byServer, detail, code)
             }
         )
         return RecordingSocket(real.openSocket(url, protocols: protocols, events: watched), log: log)
@@ -369,7 +369,7 @@ final class LiveLog {
             }
         case .format(let f): formatValue = f
         case .ended(let e): endingValue = e
-        case .reconnecting, .level: break
+        case .reconnecting, .level, .row, .audio: break
         }
     }
 

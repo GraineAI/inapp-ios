@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /*
@@ -61,6 +62,28 @@ enum ObjCBridge {
     static func millis(_ date: Date?) -> Any {
         guard let date = date else { return NSNull() }
         return NSNumber(value: Int64((date.timeIntervalSince1970 * 1000).rounded()))
+    }
+
+    /**
+     * A day as a bridge names it: `YYYY-MM-DD`, its start in `calendar`'s time
+     * zone (the device's), or a full ISO-8601 time, the moment itself (its day
+     * is the one it falls on there). Nil for anything else — a date that does
+     * not exist (2026-02-30) included.
+     */
+    static func day(_ text: String, calendar: Calendar = .current) -> Date? {
+        let s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else { return ChatHistory.time(s) }
+        let parts = s.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        var wanted = DateComponents()
+        wanted.year = parts[0]
+        wanted.month = parts[1]
+        wanted.day = parts[2]
+        guard let date = calendar.date(from: wanted) else { return nil }
+        // The calendar rolls an impossible date over (February 30th is March 2nd): that is not the day asked for.
+        let got = calendar.dateComponents([.year, .month, .day], from: date)
+        guard got.year == parts[0], got.month == parts[1], got.day == parts[2] else { return nil }
+        return calendar.startOfDay(for: date)
     }
 
     // MARK: Screens
@@ -151,6 +174,19 @@ enum ObjCBridge {
             "proactive": t.proactive,
             "restored": t.restored,
             "channel": t.channel.rawValue,
+            "session": t.session.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+
+    /// A chat session as `sessionsJSON` and the snapshot carry it: its times in milliseconds since the Unix epoch.
+    static func session(_ s: GraineChatSession) -> [String: Any] {
+        [
+            "id": s.id.map { $0 as Any } ?? NSNull(),
+            "startedAt": millis(s.startedAt),
+            "endedAt": millis(s.endedAt),
+            "channel": s.channel.rawValue,
+            "turns": s.turns,
+            "current": s.current,
         ]
     }
 
@@ -162,6 +198,16 @@ enum ObjCBridge {
         case .reconnecting(let attempt): return ("reconnecting", attempt)
         case .offline: return ("offline", 0)
         }
+    }
+
+    /// The voice bar's road in the calls' words: `webrtc` or `websocket` (GraineTransport's raw values are the wire's `rtc` / `ws`).
+    static func transportWord(_ t: GraineTransport) -> String {
+        t == .webrtc ? GraineCallTransport.webrtc.rawValue : GraineCallTransport.websocket.rawValue
+    }
+
+    /// The chat's word for a bridge: `disconnected` while Graine's own end of the conversation stands (`GraineChat.disconnected`), else the status's.
+    static func chatStatus(_ s: GraineChatStatus, disconnected: Bool) -> (word: String, attempt: Int) {
+        disconnected ? ("disconnected", 0) : chatStatus(s)
     }
 
     /**
@@ -302,14 +348,19 @@ enum ObjCBridge {
     /**
      * A call's outcome as WIRE.md has it: why (`busy` or `no_answer` for a
      * miss, who ended a call that connected, why one never did), how long a
-     * call that connected lasted, whether Graine rang it, and the agent it was
-     * with by name, when known.
+     * call that connected lasted, whether Graine rang it, the agent it was
+     * with by name, when known, and how it connected (`connection`, the
+     * report's JSON), when anything of it was known.
      */
     static func outcome(
-        _ outcome: GraineCallOutcome, callId: String, busy: Bool, connectedSeconds: Double?, hosted: Bool, agent: String? = nil
+        _ outcome: GraineCallOutcome, callId: String, busy: Bool, connectedSeconds: Double?, hosted: Bool, agent: String? = nil,
+        connection: GraineCallConnection? = nil, cause: String? = nil
     ) -> [String: Any] {
         var o: [String: Any] = ["callId": callId, "outcome": outcome.wire, "hosted": hosted]
         if let agent = agent { o["agent"] = agent }
+        if let connection = connection { o["connection"] = connection.json }
+        // Who or what ended it (GraineCallEndCause), on the outcome that ends it.
+        if let cause = cause, outcome.endReason != nil || outcome.error != nil { o["cause"] = cause }
         switch outcome {
         case .missed: o["reason"] = busy ? "busy" : "no_answer"
         case .ended(let reason):
@@ -912,6 +963,58 @@ public final class GraineObjC: NSObject {
      * `presentBookingWithReason:completion:` shows the SDK's booking sheet.
      */
     @objc public var bookingAvailable: Bool { graine.bookingAvailable }
+
+    /**
+     * Why this agent cannot be booked now (`GraineInApp.bookingUnavailableReason`):
+     * `not_loaded`, `rings_not_set_up`, `scheduling_off` or `not_identified`;
+     * nil while `bookingAvailable` is YES.
+     */
+    @objc public var bookingUnavailableReason: String? { graine.bookingUnavailableReason }
+
+    /**
+     * The times the SDK's booking sheet would offer on `isoDay` — `YYYY-MM-DD`,
+     * a day in the device's time zone (a full ISO-8601 time names its day) — as
+     * a JSON array of ISO-8601 times with the device's offset
+     * (`GraineInApp.bookingSlots`): every 5 minutes from the earliest the rules
+     * allow to the latest. `[]` for a day the sheet does not offer, or a day
+     * that cannot be read.
+     */
+    @objc(bookingSlotsJSONForDay:)
+    public func bookingSlotsJSON(forDay isoDay: String) -> String {
+        guard let day = ObjCBridge.day(isoDay) else { return "[]" }
+        return ObjCBridge.text(graine.bookingSlots(day: day).map { Scheduling.isoTime($0) })
+    }
+
+    // MARK: Components the agent draws
+
+    /**
+     * The component the agent drew that nobody has answered or closed, as JSON
+     * `{id, kind, data, fallbackText, preset}` (`GraineInApp.components.current`);
+     * nil when there is none. Answer it with the chat's
+     * `answerWidgetWithId:dataJSON:summary:`, close it with `dismissWidgetWithId:`.
+     */
+    @objc public var componentJSON: String? {
+        objcOnMainSync {
+            self.graine.components.current.map { w in
+                ObjCBridge.text(["id": w.id, "kind": w.kind, "data": w.data, "fallbackText": w.fallbackText, "preset": w.preset.rawValue] as [String: Any])
+            }
+        }
+    }
+
+    /// The agent asked for a component and its content is loading (`GraineInApp.components.pending`): draw a loader.
+    @objc public var componentPending: Bool { objcOnMainSync { self.graine.components.pending } }
+
+    /// The kind of the component on its way while `componentPending` ("" when the agent did not say).
+    @objc public var componentPendingKind: String { objcOnMainSync { self.graine.components.pendingKind } }
+
+    /// For a bridge: `observer` runs on the main thread after every change to the component or its loading, until the registration is stopped.
+    @objc(observeComponent:)
+    public func observeComponent(_ observer: @escaping () -> Void) -> GraineObjCRegistration {
+        objcOnMainSync {
+            let watching = self.graine.components.objectWillChange.sink { _ in DispatchQueue.main.async(execute: observer) }
+            return GraineObjCRegistration { watching.cancel() }
+        }
+    }
 
     // MARK: The session, and what the SDK reports
 

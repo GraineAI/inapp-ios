@@ -29,7 +29,23 @@ final class RoutedNetwork: CallNetwork {
         let raw = String(decoding: body, as: UTF8.self)
         posts.append((url.path, JSON.object(from: body) ?? [:], raw))
         let reply = replies[url.path] ?? (url.path == "/api/embed/ticket" ? ticket : (200, "{}"))
-        completion(reply.0, reply.1.map { Data($0.utf8) }, headers[url.path] ?? [:])
+        let answer = { [headers] in completion(reply.0, reply.1.map { Data($0.utf8) }, headers[url.path] ?? [:]) }
+        if holdTickets && url.path == "/api/embed/ticket" {
+            heldTickets.append(answer)
+        } else {
+            answer()
+        }
+    }
+
+    /// Ticket answers held back until `releaseTickets()`: a ticket still on its way.
+    var holdTickets = false
+    private var heldTickets: [() -> Void] = []
+
+    /// Answer every held ticket request, oldest first.
+    func releaseTickets() {
+        let held = heldTickets
+        heldTickets = []
+        held.forEach { $0() }
     }
 
     func openSocket(_ url: URL, protocols: [String], events: CallSocketEvents) -> CallSocket {

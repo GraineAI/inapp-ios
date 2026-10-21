@@ -70,6 +70,10 @@ struct GraineChatWindow: View {
     var pin: GraineChatPin? = nil
     /// The chat was connected since the customer came in: a drop is a reconnect (the banner).
     var wasOnline: Bool = false
+    /// Graine ended the conversation itself (idle, or its time limit): the header says "Disconnected".
+    var disconnected: Bool = false
+    /// The turns "Disconnected · new conversation" is drawn before: a new conversation under earlier lines.
+    var marks: Set<String> = []
     /// The dashboard's loader, and its words for each moment.
     var loader: GraineLoaderLook = Loaders.resolve(nil)
     let onSend: (String) -> Void
@@ -270,7 +274,8 @@ struct GraineChatWindow: View {
         let h = chat.header
         let titleSize = min(t.font.scale.title, VoiceBar.Chat.titleMax)
         let line = ChatWindowRules.headerStatus(
-            h, status: status, typing: typing, subtitle: chat.subtitle, typingText: chat.typing.text, loader: loader.text
+            h, status: status, typing: typing, subtitle: chat.subtitle, typingText: chat.typing.text, loader: loader.text,
+            disconnected: disconnected
         )
         return VStack(alignment: center ? .center : .leading, spacing: 0) {
             Text(title)
@@ -519,7 +524,7 @@ struct GraineChatWindow: View {
     private struct ThreadItem: Identifiable {
         enum Kind {
             case hero, pinCard, upcoming, book, welcomeCard, empty, starters, replies, typing, rating, offline
-            case row(GraineChatRow, ChatGroupPosition)
+            case row(ChatThreadRow, ChatGroupPosition)
         }
 
         let kind: Kind
@@ -559,11 +564,12 @@ struct GraineChatWindow: View {
         !offered.isEmpty && pieces.starters && ChatWindowRules.starterPlace(chat.chips, welcome: chat.welcome) == .thread
     }
 
-    private var rows: [(row: GraineChatRow, position: ChatGroupPosition)] {
-        let built = ChatRows.build(pieces.turns)
+    private var rows: [(row: ChatThreadRow, position: ChatGroupPosition)] {
+        // The new-conversation marker ends a group as a day separator does.
+        let built = ChatRows.thread(ChatRows.build(pieces.turns), marks: marks)
         let items = built.map { row -> ChatGroups.Item in
             switch row {
-            case .turn(let turn): return ChatGroups.Item(role: turn.role, at: turn.at.timeIntervalSince1970 * 1000)
+            case .row(.turn(let turn)): return ChatGroups.Item(role: turn.role, at: turn.at.timeIntervalSince1970 * 1000)
             default: return ChatGroups.Item(role: nil, at: nil, breaks: true)
             }
         }
@@ -765,9 +771,10 @@ struct GraineChatWindow: View {
         case .offline: offlineRow
         case .row(let row, let position):
             switch row {
-            case .day(let line): dayLine(line)
-            case .voice(let line): callLine(line)
-            case .turn(let turn): bubble(turn, position: position)
+            case .row(.day(let line)): dayLine(line)
+            case .row(.voice(let line)): callLine(line)
+            case .row(.turn(let turn)): bubble(turn, position: position)
+            case .newConversation: newConversationLine
             }
         }
     }
@@ -1169,6 +1176,23 @@ struct GraineChatWindow: View {
             .foregroundColor(.graineHex(chat.wallpaper.textMuted))
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /**
+     * "Disconnected · new conversation", drawn as a day separator is (DESIGN.md
+     * "A new conversation under earlier lines"): the server began a new
+     * conversation where this one could not continue.
+     */
+    private var newConversationLine: some View {
+        Text(ChatRows.newConversationLabel)
+            .font(ty.body(tokens.font.scale.caption, tokens.font.weights.strong))
+            .tracking(ty.bodyTracking(tokens.font.scale.caption))
+            .foregroundColor(.graineHex(chat.wallpaper.textMuted))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(ChatRows.newConversationSpoken)
             .accessibilityAddTraits(.isHeader)
     }
 

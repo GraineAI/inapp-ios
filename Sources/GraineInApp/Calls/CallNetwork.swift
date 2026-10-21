@@ -125,7 +125,7 @@ final class URLSessionCallSocket: NSObject, CallSocket, URLSessionWebSocketDeleg
         reason: Data?
     ) {
         let why = reason.flatMap { String(data: $0, encoding: .utf8) }.flatMap { $0.isEmpty ? nil : $0 }
-        finish(byServer: true, detail: why ?? "closed (\(closeCode.rawValue))")
+        finish(byServer: true, detail: why ?? "closed (\(closeCode.rawValue))", code: closeCode.rawValue)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -158,10 +158,13 @@ final class URLSessionCallSocket: NSObject, CallSocket, URLSessionWebSocketDeleg
         return true
     }
 
-    private func finish(byServer: Bool, detail: String?) {
+    private func finish(byServer: Bool, detail: String?, code: Int? = nil) {
         guard markFinished() else { return }
+        // A close frame can arrive just before the error that ends the task: its code still goes with it (read before
+        // the cancel), so a reader that tells one close from another — the chat's 4408 and 4410 — is not misled.
+        let code = code ?? (task.closeCode == .invalid ? nil : task.closeCode.rawValue)
         task.cancel()
         session.finishTasksAndInvalidate()
-        events.closed(byServer, detail)
+        events.closed(byServer, detail, code)
     }
 }

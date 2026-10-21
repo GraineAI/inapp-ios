@@ -13,9 +13,22 @@ import Foundation
  * Each connect is a new conversation for the agent — a fresh ticket and
  * `init`, the screen and the identity as they are now — while the transcript
  * on screen stays. A server that closes the conversation itself (the agent
- * ended it, the workspace is out of credit, the agent was turned off) is not
- * dialled again on its own: the next message does it, so a refused agent is
- * not hammered and a customer who comes back still gets an answer.
+ * ended it, the workspace is out of credit, the agent was turned off, or
+ * Graine let it go — idle, 4408, or at the session's time limit, 4410, when
+ * the header says "Disconnected") is not dialled again on its own: the next
+ * message does it, so a refused agent is not hammered and a customer who comes
+ * back still gets an answer.
+ *
+ * HOW LONG A CONVERSATION LASTS (DESIGN.md): closing the chat window does not
+ * end it. With no window showing it (`shown(false)`), the chat stays connected
+ * — the next window continues the same conversation, nothing on screen
+ * changes — until nothing has been said either way for five minutes, Graine's
+ * own idle window; only then does it hang up, as `close` does.
+ *
+ * WHO A CHAT BELONGS TO (DESIGN.md): a connection belongs to whoever was
+ * identified when its ticket was asked for — nobody, before `identify()`.
+ * Another identity while it is connected or connecting, and it is made again
+ * for that one (`identityChanged`).
  *
  * Foundation only, behind the calls' seams (CallNetwork, CallScheduler): the
  * same code runs on the main queue in an app and on a hand-moved clock in
@@ -53,6 +66,8 @@ final class ChatConnection {
         case rated(GraineChatRating)
         /// The connection went, with why (nil for a close we asked for).
         case closed(String?)
+        /// No window showed the chat and nothing was said either way for five minutes: it hung up, as `close` does.
+        case letGo
     }
 
     private enum Phase {
@@ -87,6 +102,12 @@ final class ChatConnection {
     private(set) var rating: GraineChatRating?
     /// The socket opened at least once since the customer came into the chat: a drop now is a reconnect, not a first connect.
     private(set) var wasOnline = false
+    /**
+     * Graine ended the conversation itself — idle (4408) or at the session's
+     * time limit (4410): it is not dialled again on its own, and the header
+     * says "Disconnected" until the chat connects again.
+     */
+    private(set) var disconnected = false
 
     private var phase: Phase = .idle
     private var wanted = false
@@ -103,6 +124,15 @@ final class ChatConnection {
     private var queue: [(id: String, text: String)] = []
     private var timers: [Int: CallTimer] = [:]
     private var nextTimerId = 0
+    /// No window shows the chat: it is let go once nothing has been said either way for `ChatWire.idleSeconds`.
+    private var unseen = false
+    /// When something was last said either way, or the customer came into the chat — the scheduler's clock.
+    private var lastActivity = 0.0
+    private var idleTimer: CallTimer?
+    /// Who the connection up (or being made) was asked for: the identity value its ticket was asked with (nil: nobody).
+    private var owner: String?
+    /// A ticket was asked for at least once, so `owner` says whose the connection is.
+    private var ownerKnown = false
 
     init(setup: Setup, network: CallNetwork, scheduler: CallScheduler, onEvent: @escaping (Event) -> Void) {
         self.setup = setup
@@ -114,12 +144,16 @@ final class ChatConnection {
     /// Typing indicator: the agent is working on a reply.
     var typing: Bool { awaitingReply || agentTyping }
 
+    /// The id of the chat's current session: this connection's, from the server's session frame; nil until it arrives.
+    var sessionId: String? { transcript.session }
+
     // MARK: - Driving it
 
     /// The customer is in the chat: connect, and stay connected.
     func open() {
         scheduler.run { [self] in
             wanted = true
+            noteActivity()
             guard !paused else { return }
             if phase == .idle && retryTimer == nil {
                 attempt = 0
@@ -130,11 +164,19 @@ final class ChatConnection {
 
     /// The customer left the chat: hang up, and do not come back on our own. The transcript stays.
     func close() {
+        scheduler.run { [self] in hangUp() }
+    }
+
+    /**
+     * Whether a chat window of the SDK's shows the chat. Unseen, the
+     * conversation stays up — the next window continues it — until nothing has
+     * been said either way for `ChatWire.idleSeconds`; then it hangs up as
+     * `close` does, and `letGo` says so.
+     */
+    func shown(_ visible: Bool) {
         scheduler.run { [self] in
-            wanted = false
-            teardown(sendStop: true, reason: nil)
-            wasOnline = false
-            setStatus(.idle)
+            unseen = !visible
+            watchIdle()
         }
     }
 
@@ -155,6 +197,11 @@ final class ChatConnection {
         scheduler.run { [self] in
             guard holds.remove(reason) != nil, holds.isEmpty else { return }
             if wanted && phase == .idle {
+                // Held past its idle minutes with no window showing it (the app away a while): let go, not dialled again.
+                if unseen && scheduler.now - lastActivity >= ChatWire.idleSeconds {
+                    letGo()
+                    return
+                }
                 attempt = 0
                 connect()
             }
@@ -169,6 +216,7 @@ final class ChatConnection {
                 queue.append((turn.id, turn.text))
             }
             wanted = true
+            noteActivity()
             retryTimer?.cancel()
             retryTimer = nil
             attempt = 0
@@ -183,6 +231,7 @@ final class ChatConnection {
             let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !words.isEmpty else { return }
             say(words)
+            noteActivity()
             onEvent(.changed)
         }
     }
@@ -213,7 +262,35 @@ final class ChatConnection {
             if phase == .open { socket?.send(ChatWire.widgetResultFrame(widgetId: widgetId, data: data)) }
             let words = summary.trimmingCharacters(in: .whitespacesAndNewlines)
             if !words.isEmpty { say(words) }
+            noteActivity()
             onEvent(.changed)
+        }
+    }
+
+    /**
+     * WHO A CHAT BELONGS TO (DESIGN.md): the identity is now `current`. The
+     * chat's lines are whoever its last ticket was for; when that is someone
+     * else — nobody → a customer, a customer → another, a customer → nobody:
+     *
+     *   1. a connection up or being made is closed normally (no
+     *      "Disconnected", no reconnect banner);
+     *   2. the turns go, with what a history restored and the marker rows;
+     *   3. the customer's lines that have not gone out — still sending, or
+     *      failed — stay, and go on the next connection;
+     *   4. a chat that was connected or connecting, while the customer is in
+     *      it (a window shows it, the app opened it, or they wrote), connects
+     *      again at once with a ticket for `current`; one that was not, or
+     *      nobody is in, connects at the next open or message — never
+     *      "Disconnected", never offline.
+     *
+     * The same identity changes nothing (other traits and the memory choice
+     * apply from the next connection), and neither does anything before the
+     * chat's first ticket: it holds nobody's lines but those still to send.
+     */
+    func identityChanged(to current: String?) {
+        scheduler.run { [self] in
+            guard ownerKnown, owner != current else { return }
+            belongsToAnother(current)
         }
     }
 
@@ -275,6 +352,7 @@ final class ChatConnection {
         let mine = generation
         phase = .preparing
         transport = nil
+        disconnected = false
         setStatus(attempt == 0 ? .connecting : .reconnecting(attempt: attempt))
         setup.session { [weak self] session in
             self?.scheduler.run { self?.sessionArrived(session, mine) }
@@ -288,11 +366,15 @@ final class ChatConnection {
             return
         }
         let variables = setup.variables()
+        let identity = setup.identity()
+        // Whose this connection is: the identity its ticket is asked with (DESIGN.md "Who a chat belongs to").
+        owner = identity?.value
+        ownerKnown = true
         let body = CallWire.ticketRequest(
             publishableKey: setup.publishableKey,
             metadata: CallWire.ticketMetadata(variables.map { ($0.0, $0.1 as Any?) }),
             mode: ChatWire.ticketMode,
-            identity: setup.identity()
+            identity: identity
         )
         guard let url = URL(string: GraineProtocol.trimTrailingSlashes(setup.baseUrl) + "/api/embed/ticket") else {
             openSocket(session: session, ticket: nil, variables: variables, mine: mine)
@@ -338,7 +420,9 @@ final class ChatConnection {
         let events = CallSocketEvents(
             opened: { [weak self] in self?.scheduler.run { self?.socketOpened(via, variables: variables, mine: mine) } },
             received: { [weak self] text in self?.scheduler.run { self?.received(text, mine: mine) } },
-            closed: { [weak self] byServer, detail in self?.scheduler.run { self?.socketClosed(byServer: byServer, detail: detail, mine: mine) } }
+            closed: { [weak self] byServer, detail, code in
+                self?.scheduler.run { self?.socketClosed(byServer: byServer, detail: detail, code: code, mine: mine) }
+            }
         )
         socket = network.openSocket(url, protocols: protocols, events: events)
         openTimer = scheduler.after(CallWire.socketOpenTimeoutSeconds) { [weak self] in
@@ -376,7 +460,7 @@ final class ChatConnection {
 
     // MARK: - Closing
 
-    private func socketClosed(byServer: Bool, detail: String?, mine: Int) {
+    private func socketClosed(byServer: Bool, detail: String?, code: Int?, mine: Int) {
         guard mine == generation else { return }
         switch phase {
         case .idle:
@@ -385,9 +469,13 @@ final class ChatConnection {
             failedToOpen(detail ?? "The conversation could not be opened.")
         case .open:
             teardown(sendStop: false, reason: detail ?? "The connection was lost.")
-            if byServer {
-                // The other side ended this conversation. The next message starts another.
-                setStatus(wanted && !paused ? .offline : .idle)
+            // Graine let the conversation go (idle, or its time limit) — by its code, however the socket reported it.
+            let graineEnded = code.map { ChatWire.endedByGraine.contains($0) } ?? false
+            if byServer || graineEnded {
+                // The other side ended this conversation. The next message starts another. When it was the agent that
+                // ended it (`conversation_end`), the chat is over rather than offline: idle, as every SDK says it.
+                disconnected = graineEnded
+                setStatus(wanted && !paused && !ended ? .offline : .idle)
                 failQueued()
             } else {
                 reconnectOrGiveUp()
@@ -452,10 +540,98 @@ final class ChatConnection {
         if wasLive { onEvent(.closed(reason)) }
     }
 
+    /**
+     * The chat's lines were another identity's (`identityChanged`). A first
+     * connect for `current` follows — "Connecting…", never "Disconnected" or
+     * the reconnect banner.
+     */
+    private func belongsToAnother(_ current: String?) {
+        let live = phase != .idle || retryTimer != nil
+        let again = live && wanted && !unseen && !paused
+        if again {
+            // Closed normally: the stop frame, then the socket.
+            teardown(sendStop: true, reason: nil)
+        } else if live {
+            // Nobody is in the chat: closed as `close` closes it; the next open or message connects.
+            hangUp()
+        }
+        // Whose the chat is now: the same change heard again changes nothing.
+        owner = current
+        attempt = 0
+        disconnected = false
+        wasOnline = false
+        var waiting = transcript.keepUnsent()
+        if waiting.count > ChatWire.queueLimit {
+            for dropped in waiting.prefix(waiting.count - ChatWire.queueLimit) { transcript.setDelivery(dropped.id, .failed) }
+            waiting.removeFirst(waiting.count - ChatWire.queueLimit)
+        }
+        queue = waiting
+        freshConversation()
+        if again {
+            connect()
+        } else {
+            setStatus(.idle)
+            if live { onEvent(.letGo) }
+        }
+        onEvent(.changed)
+    }
+
+    /// Hang up and stay down: the stop frame, no reconnect, nothing left watching the idle minutes. The transcript stays.
+    private func hangUp() {
+        wanted = false
+        idleTimer?.cancel()
+        idleTimer = nil
+        teardown(sendStop: true, reason: nil)
+        wasOnline = false
+        setStatus(.idle)
+    }
+
+    // MARK: - How long it lasts
+
+    /// Something was said either way, or the customer came into the chat: the idle minutes start again.
+    private func noteActivity() {
+        lastActivity = scheduler.now
+        // Unseen with nothing watching (it let the chat go, or no window has shown it since): watched again.
+        if unseen && idleTimer == nil { watchIdle() }
+    }
+
+    /**
+     * Unseen and wanted: let go once the idle minutes have passed since the
+     * last activity. Activity meanwhile only moves the deadline — the timer
+     * reads it when it fires and waits out what is left.
+     */
+    private func watchIdle() {
+        idleTimer?.cancel()
+        idleTimer = nil
+        guard unseen, wanted else { return }
+        let left = lastActivity + ChatWire.idleSeconds - scheduler.now
+        // Within a millisecond is over: what a clock rounds away must not wait again, and again.
+        guard left > 0.001 else {
+            letGo()
+            return
+        }
+        idleTimer = scheduler.after(left) { [weak self] in self?.watchIdle() }
+    }
+
+    /// Idle with no window showing it: hung up as `close` does. The lines stay; the next open or message connects again.
+    private func letGo() {
+        hangUp()
+        onEvent(.letGo)
+    }
+
     // MARK: - What the agent sends
 
     private func received(_ raw: String, mine: Int) {
         guard mine == generation, phase == .open, let frame = ChatInbound.parse(raw) else { return }
+        if case .ignored = frame { return }
+        if case .session(let id) = frame {
+            // This connection's session (history.json `sessionFrame`): what it carried so far takes it. Nothing said.
+            transcript.sessionStarted(id)
+            onEvent(.changed)
+            return
+        }
+        // The agent said something: an unseen chat's idle minutes start again.
+        noteActivity()
         switch frame {
         case .text(let data):
             let chunk = CallWire.readAgentChunk(data)
@@ -479,10 +655,13 @@ final class ChatConnection {
             endAgentTurn()
             onEvent(.changed)
         case .widget(let widget):
+            // A component can be the agent's first act on a connection: it says which conversation this is, as words do.
+            transcript.agentBegan()
             stopAwaiting()
             onEvent(.changed)
             onEvent(.widget(widget))
         case .widgetPending(let hint):
+            if transcript.agentBegan() { onEvent(.changed) }
             onEvent(.widgetPending(hint))
         case let .appAction(id, name, arguments):
             runAction(id: id, name: name, arguments: arguments)
@@ -510,7 +689,7 @@ final class ChatConnection {
             quickReplies = []
             ended = true
             onEvent(.changed)
-        case .ignored:
+        case .session, .ignored:
             break
         }
     }
@@ -519,6 +698,7 @@ final class ChatConnection {
     private func agentTurnStarts() {
         quickReplies = []
         if let done = transcript.agentTurnEnded() { onEvent(.agentTurnEnded(done)) }
+        transcript.agentBegan()
     }
 
     private func endAgentTurn() {

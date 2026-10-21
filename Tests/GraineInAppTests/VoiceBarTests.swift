@@ -243,6 +243,9 @@ import Testing
         #expect(line { $0.online = false } == words("No connection"))
         #expect(line { $0.inChat = true; $0.chatOnline = true } == words("Online"))
         #expect(line { $0.inChat = true } == Line(text: "Connecting…", waiting: "connecting", meter: false))
+        #expect(line { $0.inChat = true; $0.chatDisconnected = true } == words("Disconnected"),
+                "Graine ended the chat's conversation: nothing is connecting until the customer acts")
+        #expect(line { $0.chatDisconnected = true } == words("Tap to talk"), "the chat's words, never a call's")
         #expect(line { $0.error = true } == words("Unavailable"))
     }
 
@@ -254,6 +257,7 @@ import Testing
     @Test func firstMatchWinsInTheContractsOrder() {
         let ladder: [(String, (inout Input) -> Void)] = [
             ("Unavailable", { $0.error = true }),
+            ("Disconnected", { $0.inChat = true; $0.chatDisconnected = true }),
             ("Online", { $0.inChat = true; $0.chatOnline = true }),
             ("No connection", { $0.online = false }),
             ("Reconnecting…", { $0.reconnecting = true }),

@@ -191,6 +191,8 @@ enum VoiceBarStatus {
         /// The customer is in the chat rather than on a call.
         var inChat = false
         var chatOnline = false
+        /// Graine ended the chat's conversation itself (idle 4408, time limit 4410), until the customer opens it or writes again.
+        var chatDisconnected = false
         /// The page's view of the network; nil until it has said.
         var online: Bool? = nil
         var reconnecting = false
@@ -254,8 +256,12 @@ enum VoiceBarStatus {
     static func line(_ s: Input) -> Line {
         func say(_ text: String) -> Line { Line(text: text, waiting: nil, meter: false) }
         if s.error { return say("Unavailable") }
-        // The chat has no microphone and no call to place: none of the words below are true there.
-        if s.inChat { return s.chatOnline ? say("Online") : Line(text: "Connecting…", waiting: "connecting", meter: false) }
+        // The chat has no microphone and no call to place: none of the words below are true there. Graine having ended
+        // its conversation is said before anything else: nothing is connecting until the customer acts.
+        if s.inChat {
+            if s.chatDisconnected { return say("Disconnected") }
+            return s.chatOnline ? say("Online") : Line(text: "Connecting…", waiting: "connecting", meter: false)
+        }
         // The network gets named, or the agent takes the blame for it.
         if s.online == false { return say("No connection") }
         if s.reconnecting || s.connectivity == .retrying { return Line(text: "Reconnecting…", waiting: "reconnecting", meter: false) }

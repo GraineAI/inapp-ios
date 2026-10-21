@@ -20,6 +20,8 @@ public final class GraineObjCChatTurn: NSObject {
     @objc public let restored: Bool
     /// `chat`, or `voice` for a turn said on a call (drawn as one "Voice call" row).
     @objc public let channel: String
+    /// The session it was said in (`GraineChatTurn.session`); nil for turns kept before sessions were recorded.
+    @objc public let session: String?
 
     init(_ t: GraineChatTurn) {
         identifier = t.id
@@ -31,6 +33,7 @@ public final class GraineObjCChatTurn: NSObject {
         proactive = t.proactive
         restored = t.restored
         channel = t.channel.rawValue
+        session = t.session
     }
 }
 
@@ -117,6 +120,11 @@ public final class GraineObjCChat: NSObject {
             chat.$ended.sink { [weak self] _ in self?.changed() },
             chat.$rating.sink { [weak self] _ in self?.changed() },
             chat.$pinned.sink { [weak self] _ in self?.changed() },
+            chat.$disconnected.sink { [weak self] _ in self?.changed() },
+            chat.$wasOnline.sink { [weak self] _ in self?.changed() },
+            chat.$newConversationBefore.sink { [weak self] _ in self?.changed() },
+            chat.$sessionId.sink { [weak self] _ in self?.changed() },
+            chat.$sessions.sink { [weak self] _ in self?.changed() },
             // A rating given (in the window or through `rate`), once: its observers hear it.
             chat.$rating.dropFirst().compactMap { $0 }.sink { [weak self] rating in
                 self?.rated.notify { $0(GraineObjCChatRating(rating)) }
@@ -139,11 +147,34 @@ public final class GraineObjCChat: NSObject {
     /// What has been said, oldest first. Main thread.
     @objc public var turns: [GraineObjCChatTurn] { objcOnMainSync { self.graine.chat.turns.map { GraineObjCChatTurn($0) } } }
 
-    /// `idle`, `connecting`, `online`, `reconnecting` or `offline`.
-    @objc public var status: String { objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.status).word } }
+    /**
+     * `idle`, `connecting`, `online`, `reconnecting` or `offline` — or
+     * `disconnected` while Graine's own end of the conversation stands (idle
+     * or its time limit: `disconnected`), until the next open or message.
+     */
+    @objc public var status: String {
+        objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.status, disconnected: self.graine.chat.disconnected).word }
+    }
 
     /// While reconnecting, which attempt this is (of six); 0 otherwise.
     @objc public var reconnectAttempt: Int { objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.status).attempt } }
+
+    /**
+     * Graine ended the conversation itself (idle, or the session's time limit):
+     * the header says "Disconnected"; nothing reconnects until the user opens
+     * the chat or writes again (`GraineChat.disconnected`).
+     */
+    @objc public var disconnected: Bool { objcOnMainSync { self.graine.chat.disconnected } }
+
+    /// The chat was connected since the user came into it: `reconnecting` now is a dropped connection (`GraineChat.wasOnline`).
+    @objc public var wasOnline: Bool { objcOnMainSync { self.graine.chat.wasOnline } }
+
+    /**
+     * The ids of the turns a "Disconnected · new conversation" row goes before,
+     * in the turns' order — Graine began a new conversation under earlier lines
+     * (`GraineChat.newConversationBefore`); empty when none.
+     */
+    @objc public var newConversationBefore: [String] { objcOnMainSync { self.graine.chat.newConversationBefore } }
 
     /// The agent is working on a reply.
     @objc public var typing: Bool { objcOnMainSync { self.graine.chat.typing } }
@@ -173,16 +204,38 @@ public final class GraineObjCChat: NSObject {
     /// What the conversation is about, as the app pinned it; nil when nothing is pinned.
     @objc public var pinned: GraineObjCChatPin? { objcOnMainSync { self.graine.chat.pinned.map { GraineObjCChatPin($0) } } }
 
+    /// The id of the chat's current session (`GraineChat.sessionId`); nil until the server names it. Main thread.
+    @objc public var sessionId: String? { objcOnMainSync { self.graine.chat.sessionId } }
+
     /**
-     * The whole chat as JSON, for a bridge: `{turns: [{id, role, text, live, delivery, at, proactive, restored, channel}],
+     * The sessions the conversation on screen holds, oldest first
+     * (`GraineChat.sessions`), as a JSON array: `[{id, startedAt, endedAt,
+     * channel, turns, current}]` — `id` null for a session with no id, the
+     * times in milliseconds since the Unix epoch, `channel` `chat` or `voice`.
+     * Main thread.
+     */
+    @objc public var sessionsJSON: String {
+        objcOnMainSync { ObjCBridge.text(self.graine.chat.sessions.map { ObjCBridge.session($0) }) }
+    }
+
+    /**
+     * The whole chat as JSON, for a bridge: `{turns: [{id, role, text, live, delivery, at, proactive, restored, channel, session}],
      * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}], quickReplies: [{label, text}],
-     * ended, rating: {value, scale, style} | null, pin: {title, subtitle, imageUrl, badge} | null}`.
+     * ended, rating: {value, scale, style} | null, pin: {title, subtitle, imageUrl, badge} | null, disconnected,
+     * wasOnline, newConversationBefore: [turn id], sessionId, sessions: [{id, startedAt, endedAt, channel, turns,
+     * current}]}` — `status` as the property says it, `disconnected` included; `session` and `sessionId` null when
+     * there is none.
      */
     @objc public var snapshotJSON: String {
         objcOnMainSync {
             let chat = self.graine.chat
-            let status = ObjCBridge.chatStatus(chat.status)
+            let status = ObjCBridge.chatStatus(chat.status, disconnected: chat.disconnected)
             return ObjCBridge.text([
+                "disconnected": chat.disconnected,
+                "wasOnline": chat.wasOnline,
+                "newConversationBefore": chat.newConversationBefore,
+                "sessionId": chat.sessionId.map { $0 as Any } ?? NSNull(),
+                "sessions": chat.sessions.map { ObjCBridge.session($0) },
                 "turns": chat.turns.map { ObjCBridge.turn($0) },
                 "status": status.word,
                 "attempt": status.attempt,
@@ -231,6 +284,15 @@ public final class GraineObjCChat: NSObject {
     /// The user left: hang up.
     @objc(close)
     public func close() { graine.chat.close() }
+
+    /**
+     * A chat screen of the app's own came on screen (YES) or left it (NO), in
+     * pairs (`GraineChat.shown(_:)`): on screen the chat connects; once no
+     * screen shows it, the conversation is kept until it has been idle for 5
+     * minutes, then closed — so the next screen continues it.
+     */
+    @objc(setShown:)
+    public func setShown(_ visible: Bool) { graine.chat.shown(visible) }
 
     /// Send a message: shown at once, sent now or when the chat connects.
     @objc(send:)
@@ -296,6 +358,17 @@ public final class GraineObjCChat: NSObject {
     @objc(answerWidgetWithId:dataJSON:summary:)
     public func answerWidget(id: String, dataJSON: String?, summary: String) {
         graine.answerComponent(widgetId: id, data: ObjCBridge.object(dataJSON) ?? [:], summary: summary)
+    }
+
+    /**
+     * Close a component the agent drew without answering it, from a UI of your
+     * own (`GraineInApp.dismissComponent`): the agent is told quietly, and it
+     * is kept to be shown again. Nothing for an id that is not the component
+     * the agent drew last.
+     */
+    @objc(dismissWidgetWithId:)
+    public func dismissWidget(id: String) {
+        graine.dismissComponent(widgetId: id)
     }
 
     /// Fetch the upcoming calls again (the card refreshes itself; after a booking made elsewhere).

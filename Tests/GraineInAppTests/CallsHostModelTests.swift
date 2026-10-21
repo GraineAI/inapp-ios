@@ -124,6 +124,8 @@ private final class FakeCallsHostPlatform: CallsHostPlatform {
     func end() { ends += 1 }
     func setMuted(_ value: Bool) { muted.append(value) }
     func setSpeaker(_ on: Bool) { speaker.append(on) }
+    private(set) var speakerDefaults: [Bool] = []
+    func setSpeakerByDefault(_ on: Bool) { speakerDefaults.append(on) }
     func identify(_ traits: [String: Any]?) { identities.append(traits) }
     private(set) var memoryChoices: [Bool] = []
     var installIdValue: String? = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
@@ -248,6 +250,7 @@ private final class HostRig {
         #expect(options.ringTimeout == 30)
         #expect(options.appVersion == nil)
         #expect(options.callScreen == .sdk)
+        #expect(options.speakerByDefault, "the loudspeaker by default")
         #expect(!options.debug)
         #expect(options.androidSmallIcon == nil)
         #expect(options.iosIconTemplate == nil)
@@ -304,6 +307,8 @@ private final class HostRig {
             (with(["callScreen": "SDK"]), "callScreen must be \"sdk\" or \"app\""),
             (with(["debug": "yes"]), "debug must be a boolean"),
             (with(["debug": 1]), "debug must be a boolean"),
+            (with(["speakerByDefault": "no"]), "speakerByDefault must be a boolean"),
+            (with(["speakerByDefault": 1]), "speakerByDefault must be a boolean"),
             (with(["android": "ic_call"]), "android must be an object"),
             (with(["android": ["smallIcon": 7]]), "android.smallIcon must be a string"),
             (with(["ios": [true]]), "ios must be an object"),
@@ -540,20 +545,39 @@ private final class HostRig {
 @Suite struct CallsHostSnapshotTests {
     private let keys: Set<String> = [
         "state", "callId", "direction", "reason", "callerName", "muted", "speakerOn", "agentSpeaking", "reconnecting",
-        "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason",
+        "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason", "connection", "agentLevel",
     ]
 
     @Test func everyKeyIsAlwaysThereAndIdleIsNullsAndFalses() {
         let json = CallsHostSnapshot().json
         #expect(Set(json.keys) == keys)
         #expect(json["state"] as? String == "idle")
-        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason"] {
+        for key in ["callId", "direction", "reason", "callerName", "caption", "connectedAt", "error", "agent", "transport", "transportFallbackReason", "connection"] {
             #expect(json[key] is NSNull, "\(key)")
         }
         for key in ["muted", "speakerOn", "agentSpeaking", "reconnecting"] {
             #expect(json[key] as? Bool == false, "\(key)")
         }
+        #expect((json["agentLevel"] as? NSNumber)?.doubleValue == 0, "0 at idle")
         #expect(JSONSerialization.isValidJSONObject(json))
+    }
+
+    /// 0.14.0: the call visualiser's level, for the React Native and Flutter call screens — held to 0–1, and 0 at idle.
+    @Test func theAgentsLevelIsOnTheSnapshot() {
+        #expect((CallsHostSnapshot(state: .active, callId: "c1", agentLevel: 0.42).json["agentLevel"] as? NSNumber)?.doubleValue == 0.42)
+        #expect((CallsHostSnapshot(state: .active, callId: "c1", agentLevel: 3).json["agentLevel"] as? NSNumber)?.doubleValue == 1)
+        #expect((CallsHostSnapshot(state: .active, callId: "c1", agentLevel: .nan).json["agentLevel"] as? NSNumber)?.doubleValue == 0)
+        #expect((CallsHostSnapshot(state: .idle, callId: "c1", agentLevel: 0.42).json["agentLevel"] as? NSNumber)?.doubleValue == 0)
+        var gate = CallsHostStateGate()
+        _ = gate.changed()
+        #expect(gate.flush(CallsHostSnapshot(state: .active, callId: "c1", agentLevel: 0.2)) != nil)
+        _ = gate.changed()
+        #expect(gate.flush(CallsHostSnapshot(state: .active, callId: "c1", agentLevel: 0.6))?.agentLevel == 0.6, "a new level is news to a visualiser")
+        // To two decimals, as Android's host: a change nobody could see is no state event.
+        #expect(CallsHostSnapshot.level(0.4249) == 0.42 && CallsHostSnapshot.level(0.4251) == 0.43)
+        #expect(CallsHostSnapshot.level(-1) == 0 && CallsHostSnapshot.level(7) == 1 && CallsHostSnapshot.level(.nan) == 0)
+        _ = gate.changed()
+        #expect(gate.flush(CallsHostSnapshot(state: .active, callId: "c1", agentLevel: CallsHostSnapshot.level(0.6004))) == nil)
     }
 
     @Test func aLiveCallShowsEverything() throws {
@@ -981,6 +1005,41 @@ private final class HostRig {
         #expect(rig.store.load().options?["displayName"] as? String == "Acme Assistant", "kept for the next cold start")
     }
 
+    /// 0.14.0, as Android's host: the option, the method, kept for a cold start, and held when it comes before configure.
+    @Test func theSpeakerDefaultReachesTheCallsIsKeptAndCanBeSetLater() throws {
+        let rig = HostRig()
+        #expect(try CallsHostOptions.parse(["publishableKey": "pk_test_1", "displayName": "Acme", "speakerByDefault": false]).speakerByDefault == false)
+        try rig.configure(["speakerByDefault": false])
+        #expect(rig.platform.configured.last?.speakerByDefault == false)
+        #expect(rig.store.load().options?["speakerByDefault"] as? Bool == false, "kept for a cold start")
+        rig.core.setSpeakerByDefault(true)
+        #expect(rig.platform.speakerDefaults == [true])
+        #expect(rig.store.load().options?["speakerByDefault"] as? Bool == true, "and kept")
+        #expect(rig.core.options?.speakerByDefault == true)
+
+        // Before anything is configured: held, then applied and kept by the first configure.
+        let early = HostRig()
+        early.core.setSpeakerByDefault(false)
+        #expect(early.platform.speakerDefaults.isEmpty, "nothing to set it on yet")
+        try early.configure()
+        #expect(early.platform.configured.last?.speakerByDefault == false)
+        #expect(early.store.load().options?["speakerByDefault"] as? Bool == false)
+        try early.configure()
+        #expect(early.platform.configured.last?.speakerByDefault == true, "held once: the app's next configure is the app's word")
+
+        // A cold start: the kept default, and one set before the launch's restore goes into it.
+        let cold = HostRig()
+        try cold.keep(["publishableKey": "pk_test_rig", "displayName": "Acme", "speakerByDefault": false])
+        #expect(cold.core.restore())
+        #expect(cold.platform.configured.last?.speakerByDefault == false, "restored as kept")
+        let held = HostRig()
+        try held.keep()
+        held.core.setSpeakerByDefault(false)
+        #expect(held.core.restore())
+        #expect(held.platform.configured.last?.speakerByDefault == false)
+        #expect(held.store.load().options?["speakerByDefault"] as? Bool == false, "and kept with the options")
+    }
+
     @Test func invalidOptionsAreRefusedAndNothingIsKept() {
         let rig = HostRig()
         do {
@@ -1329,6 +1388,22 @@ private final class HostRig {
         rig.core.incoming(GraineIncomingCall(callId: "c2", reason: "payment_due"))
         #expect(rig.events.payloads("outcome").count == 4, "no ringing for the app's own ring")
         #expect(rig.events.payloads("incoming").last?["hosted"] == nil)
+    }
+
+    /// 0.14.0: the call's connection report rides on its outcome, and on the snapshot while the call is on.
+    @Test func theConnectionReportRidesOnTheOutcomeAndTheSnapshot() throws {
+        let rig = HostRig()
+        try rig.configure()
+        let report = GraineCallConnection(transport: .webrtc, prepared: false, credential: .web, setupMs: 740, loginMs: 300, answerMs: 605, recoveries: 0)
+        rig.platform.fields = CallsHostSnapshot(state: .active, callId: "c1", direction: .outgoing, connection: report)
+        let live = try #require(rig.core.snapshot()["connection"] as? [String: Any])
+        #expect(live["loginMs"] as? Int == 300 && live["transport"] as? String == "webrtc")
+        rig.platform.fields = CallsHostSnapshot(state: .ended(.local), callId: "c1", direction: .outgoing, connection: report)
+        rig.core.outcome(.ended(.local), callId: "c1", connection: report)
+        let ended = try #require(rig.events.payloads("outcome").last)
+        #expect((ended["connection"] as? [String: Any])?["setupMs"] as? Int == 740)
+        rig.core.outcome(.missed, callId: "other")
+        #expect(rig.events.payloads("outcome").last?["connection"] == nil, "another call's outcome says nothing of this one's")
     }
 
     @Test func outcomesFromBeforeAnythingListenedReachTheFirstSink() throws {

@@ -282,8 +282,10 @@ final class FakeSocket: CallSocket {
     // The other end.
     func open() { events.opened() }
     func frame(_ object: [String: Any]) { events.received(JSON.string(from: object) ?? "{}") }
-    func serverClose() { events.closed(true, "closed (1000)") }
-    func fail(_ detail: String) { events.closed(false, detail) }
+    /// A close frame from the server, with its code (and its reason, which then stands for the detail).
+    func serverClose(_ code: Int = 1000, reason: String? = nil) { events.closed(true, reason ?? "closed (\(code))", code) }
+    /// An error; `code` when a close frame had arrived just before it.
+    func fail(_ detail: String, code: Int? = nil) { events.closed(false, detail, code) }
 
     var sentFrames: [[String: Any]] { sent.compactMap { JSON.object(from: $0) } }
     var sentTypes: [String] { sentFrames.map { JSON.string($0["type"]) } }

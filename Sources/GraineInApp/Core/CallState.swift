@@ -118,6 +118,99 @@ public enum GrainePhase: String {
 }
 
 /**
+ * WHAT THE VOICE BAR'S CALL IS DOING, IN ONE WORD — `GraineVoice.status`, for
+ * a bar of your own: `phase`'s words, and the three `phase` leaves to other
+ * properties.
+ *
+ *   idle          no call; ready to start — whatever the page is doing in the background
+ *   connecting    a call being placed (the page loading for it included)
+ *   listening     the agent is waiting for the customer
+ *   thinking      the customer finished a line; the agent has not answered yet
+ *   speaking      the agent is talking
+ *   reconnecting  the call, or the page under it, is being brought back
+ *   muted         on a call, the microphone muted
+ *   failed        the call could not start or go on — `GraineVoice.error` says why
+ *   ended         the call is over; until the next start
+ */
+public enum GraineVoiceStatus: String, Sendable {
+    case idle
+    case connecting
+    case listening
+    case thinking
+    case speaking
+    case reconnecting
+    case muted
+    case failed
+    case ended
+
+    /**
+     * First match wins, as the SDK's own bar orders its words: a failure, the
+     * waits, muted, the conversation, its end. `calling`: the customer started
+     * a call that is not over — being placed, on, or coming back. Before one,
+     * and after it, the page loading or retrying in the background is nobody's
+     * wait: idle (or ended, right after an end), never "connecting".
+     */
+    static func of(phase: GrainePhase, calling: Bool, connected: Bool, muted: Bool, failed: Bool, ended: Bool) -> GraineVoiceStatus {
+        if failed { return .failed }
+        guard calling || connected else { return ended ? .ended : .idle }
+        switch phase {
+        case .reconnecting: return .reconnecting
+        case .connecting: return .connecting
+        default: break
+        }
+        if connected {
+            if muted { return .muted }
+            switch phase {
+            case .speaking: return .speaking
+            case .thinking: return .thinking
+            default: return .listening
+            }
+        }
+        return ended ? .ended : .idle
+    }
+}
+
+/**
+ * WHY THE VOICE BAR'S CALL FAILED, in a sentence (`GraineVoice.error`) — the
+ * moments the SDK's own bar says "Unavailable", "Needs microphone",
+ * "Couldn’t load" or "Couldn’t connect", in that order.
+ */
+enum VoiceFailure {
+    static let loadFailed = "The assistant could not load. Check your connection and try again."
+    static let connectFailed = "The call could not be connected. Check your connection and try again."
+    static let micDenied = "The microphone is not allowed for this app, so the call cannot hear the customer."
+
+    /// `fault`: a misconfiguration the call reported (its transport `not_configured`), in the page's own words.
+    static func sentence(fault: String?, micDenied denied: Bool, connectivity: GraineConnectivity, callFailed: Bool) -> String? {
+        if let fault = fault { return fault }
+        if denied { return micDenied }
+        if connectivity == .failed { return loadFailed }
+        if callFailed { return connectFailed }
+        return nil
+    }
+}
+
+/**
+ * THE VOICE BAR'S LEVELS — `{type: "graine:levels", agent, mic}`, each 0–1:
+ * the agent's voice as it plays and the customer's microphone, as the call
+ * page measures them, about five times a second while a call is live. A page
+ * that does not measure them never sends it, and the levels stay 0.
+ */
+enum VoiceLevels {
+    static let type = "graine:levels"
+
+    /// The levels in a page message, each held to 0–1 (one missing or unreadable is nil); nil for any other message.
+    static func parse(_ raw: String?) -> (agent: Double?, mic: Double?)? {
+        guard let o = JSON.object(from: raw), JSON.string(o["type"]) == type else { return nil }
+        func level(_ value: Any?) -> Double? {
+            guard let v = JSON.unwrap(value), let n = JSON.number(v), n.doubleValue.isFinite else { return nil }
+            return min(1, max(0, n.doubleValue))
+        }
+        return (level(o["agent"]), level(o["mic"]))
+    }
+}
+
+/**
  * WHERE A CALL BEING PLACED IS, as the engine reports it (`graine:progress`).
  *
  *   registering  a credential and a line are being set up (a cold start)

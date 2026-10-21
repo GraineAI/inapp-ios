@@ -19,6 +19,10 @@ import Foundation
  *         case .turn(let turn): MyBubble(turn)
  *         }
  *     }
+ *
+ * With `newConversationBefore:` (`GraineChat.newConversationBefore`) the rows
+ * are the window's own (`GraineChatWindowRow`), the "Disconnected · new
+ * conversation" marker among them.
  */
 
 /// Which day a separator names: the contract's "today", "yesterday", or the local date.
@@ -74,6 +78,66 @@ typealias ChatDayLine = GraineChatDayLine
 typealias ChatCallLine = GraineChatCallLine
 typealias ChatRow = GraineChatRow
 typealias ChatRows = GraineChatRows
+
+/**
+ * The "Disconnected · new conversation" row (DESIGN.md "A new conversation
+ * under earlier lines"): Graine began a new conversation under earlier lines.
+ * The window's own row — never a turn, never sent.
+ */
+public struct GraineChatNewConversationLine: Equatable, Sendable {
+    /// The id of the turn it goes before.
+    public let before: String
+    /// What it says: "Disconnected · new conversation".
+    public let label: String
+    /// What a screen reader says for it: "Disconnected. A new conversation started."
+    public let spoken: String
+
+    /// Stable while the conversation grows: `fresh-` and the turn's id.
+    public var id: String { "fresh-\(before)" }
+}
+
+/**
+ * One row of the SDK's own chat window, for a chat of your own:
+ * `GraineChatRows.build(_:newConversationBefore:now:calendar:)` — the rows
+ * `GraineChatRow` lists, and the "Disconnected · new conversation" marker
+ * where Graine began a new conversation under earlier lines.
+ */
+public enum GraineChatWindowRow: Equatable, Identifiable {
+    case day(GraineChatDayLine)
+    case voice(GraineChatCallLine)
+    case turn(GraineChatTurn)
+    /// The marker: drawn like a day line, after the day line of the turn it goes before.
+    case newConversation(GraineChatNewConversationLine)
+
+    /// Stable while the conversation grows: as `GraineChatRow.id`, and the marker by the turn it goes before.
+    public var id: String {
+        switch self {
+        case .day(let line): return GraineChatRow.day(line).id
+        case .voice(let line): return line.id
+        case .turn(let turn): return turn.id
+        case .newConversation(let line): return line.id
+        }
+    }
+}
+
+/**
+ * A row of the SDK's own chat window: one of the rows above, or its
+ * "Disconnected · new conversation" marker (DESIGN.md "A new conversation
+ * under earlier lines") — the window's own row, never a turn; public as
+ * `GraineChatWindowRow`.
+ */
+enum ChatThreadRow: Equatable, Identifiable {
+    case row(GraineChatRow)
+    /// The marker, before the turn with this id.
+    case newConversation(before: String)
+
+    var id: String {
+        switch self {
+        case .row(let row): return row.id
+        case .newConversation(let turn): return "fresh-\(turn)"
+        }
+    }
+}
 
 /**
  * THE ROWS A CHAT WINDOW DRAWS, for a chat of your own: a bubble per chat
@@ -135,6 +199,55 @@ public enum GraineChatRows {
     /// What a screen reader says for the row: "Voice call at 6:05 PM".
     public static func callSpoken(_ line: GraineChatCallLine, calendar: Calendar = .current, locale: Locale = .current) -> String {
         "Voice call at " + clock(line.at, calendar: calendar, locale: locale)
+    }
+
+    /**
+     * The rows the SDK's own chat window draws: `build(_:now:calendar:)`'s,
+     * with a "Disconnected · new conversation" marker before each turn in
+     * `newConversationBefore` (`GraineChat.newConversationBefore`), after that
+     * turn's day line — and never above everything: with nothing earlier drawn
+     * there is nothing to set apart. Rebuild whenever either changes.
+     */
+    public static func build(
+        _ turns: [GraineChatTurn], newConversationBefore: [String], now: Date = Date(), calendar: Calendar = .current
+    ) -> [GraineChatWindowRow] {
+        thread(build(turns, now: now, calendar: calendar), marks: Set(newConversationBefore)).map { row in
+            switch row {
+            case .row(.day(let line)): return .day(line)
+            case .row(.voice(let line)): return .voice(line)
+            case .row(.turn(let turn)): return .turn(turn)
+            case .newConversation(let turn):
+                return .newConversation(GraineChatNewConversationLine(before: turn, label: newConversationLabel, spoken: newConversationSpoken))
+            }
+        }
+    }
+
+    /// The window's marker where the server began a new conversation under earlier lines.
+    static let newConversationLabel = "Disconnected · new conversation"
+    /// What a screen reader says for it.
+    static let newConversationSpoken = "Disconnected. A new conversation started."
+
+    /**
+     * The window's rows: `rows` with the marker before each turn in `marks`,
+     * after that turn's day separator. Never above everything: with nothing
+     * earlier drawn (earlier messages hidden) there is nothing to set apart.
+     */
+    static func thread(_ rows: [GraineChatRow], marks: Set<String>) -> [ChatThreadRow] {
+        var out: [ChatThreadRow] = []
+        var earlier = false
+        for row in rows {
+            switch row {
+            case .day:
+                break
+            case .voice:
+                earlier = true
+            case .turn(let turn):
+                if earlier && marks.contains(turn.id) { out.append(.newConversation(before: turn.id)) }
+                earlier = true
+            }
+            out.append(.row(row))
+        }
+        return out
     }
 
     /// A time in the device's short words: "6:05 PM".

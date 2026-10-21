@@ -7,9 +7,10 @@ import UIKit
  * THE CHAT, AS A SCREEN — a typed conversation with your agent, drawn by the
  * SDK in the brand's design: the header, one bubble per reply, a typing
  * bubble while the agent works on one, the components it draws (answered in
- * place), and the composer. It connects when it appears and hangs up when it
- * goes; a message typed while offline waits and is sent when the connection
- * is back.
+ * place), and the composer. It connects when it appears; when it goes, the
+ * conversation is kept — the screen opened again continues it — until nothing
+ * has been said either way for five minutes. A message typed while offline
+ * waits and is sent when the connection is back.
  *
  *     NavigationLink("Ask our assistant") { GraineChatView() }
  *     .sheet(isPresented: $chatOpen) { GraineChatView(onClose: { chatOpen = false }) }
@@ -58,6 +59,8 @@ struct GraineChatScreen: View {
 
     @StateObject private var model: GraineAppearanceModel
     @StateObject private var keyboard = GraineKeyboardObserver()
+    /// On screen now: the chat counts this screen once among its windows.
+    @State private var onScreen = false
     @Environment(\.colorScheme) private var colorScheme
 
     init(graine: GraineInApp, chat: GraineChat, fonts: GraineFontStore, accentOverride: Color?, onClose: (() -> Void)?, onCall: (() -> Void)? = nil) {
@@ -96,7 +99,8 @@ struct GraineChatScreen: View {
                 callName: graine.sessionOrCached?.calls?.callName,
                 bookable: graine.bookingAvailable,
                 quickReplies: chat.quickReplies, ended: chat.ended, rating: chat.rating, pin: chat.pinned,
-                wasOnline: chat.wasOnline, loader: Loaders.resolve(model.appearance["loader"]),
+                wasOnline: chat.wasOnline, disconnected: chat.disconnected, marks: chat.marks,
+                loader: Loaders.resolve(model.appearance["loader"]),
                 onSend: { chat.send($0) },
                 onRetry: { chat.retry() },
                 onCancelCall: { chat.cancelUpcomingCall(id: $0) },
@@ -115,9 +119,16 @@ struct GraineChatScreen: View {
         .onAppear {
             graine.tapCapture.attach(to: GraineVoice.keyWindow())
             // Connected while on screen — without asking a mounted bar to draw the chat a second time.
-            chat.connectOpen()
+            guard !onScreen else { return }
+            onScreen = true
+            chat.shown(true)
         }
-        .onDisappear { chat.closeConnection() }
+        .onDisappear {
+            // Gone from the screen, not ended: the conversation is kept for the next window until it is idle.
+            guard onScreen else { return }
+            onScreen = false
+            chat.shown(false)
+        }
     }
 }
 

@@ -133,7 +133,8 @@ import Foundation
             return codec(value).map { .string($0) }
         default:
             // enum:X — the value exactly as the list writes it, compared unit for unit as JavaScript compares.
-            guard type.hasPrefix("enum:"), let allowed = enums[String(type.dropFirst(5))], let word = value as? String,
+            let list = String(type.dropFirst(5))
+            guard type.hasPrefix("enum:"), let allowed = enums[list] ?? aheadEnums[list], let word = value as? String,
                   allowed.contains(where: { $0.utf16.elementsEqual(word.utf16) }) else { return nil }
             return .string(word)
         }
@@ -272,6 +273,20 @@ import Foundation
             return parts.isEmpty ? "call quality" : parts.joined(separator: " · ")
         case "media":
             return word("reason").map { "no audio path (\($0))" } ?? "no audio path"
+        case "ended":
+            let what: String
+            switch word("cause") {
+            case "local_end"?: what = "hung up on this side"
+            case "remote_bye"?: what = "the far side hung up"
+            case "media_drop"?: what = "the audio path dropped"
+            case "audio_watch"?: what = "nothing arrived: ended on this side"
+            case "provider_reset"?: what = "the system reset the call"
+            case "failed"?: what = "failed"
+            default: what = "ended"
+            }
+            var heard = ""
+            if case .bool(let voice)? = d["voice_heard"] { heard = voice ? ", the agent heard" : ", the agent not heard" }
+            return what + (whole("after_ms").map { " after \(seconds($0))" } ?? "") + heard
         default:
             return name
         }
@@ -321,5 +336,48 @@ import Foundation
             "requested": word(requested),
             "fallback_reason": fallbackReason,
         ]) ?? ""
+    }
+
+    /**
+     * ROWS SENT AHEAD OF THE CONTRACT (Android's CallAnalytics.AHEAD, key for
+     * key): built by the same rules as `rows`, kept apart from them, so
+     * `frame` — the contract's builder — never makes one. They join
+     * protocol.ts's rows there; until then a server files them like any
+     * telemetry row, and a raw timeline shows their detail.
+     *   ended  once, as the call ends: `cause` (GraineCallEndCause's word),
+     *          `transport`, `after_ms` (how long the call had its audio) and
+     *          `voice_heard` (whether the agent's voice reached the phone)
+     */
+    static let ahead: [String: [(key: String, type: String)]] = [
+        "ended": [("cause", "enum:end_cause"), ("transport", "enum:transport"), ("after_ms", "ms"), ("voice_heard", "bool")],
+    ]
+
+    /// Their closed lists. `provider_reset` is iOS's own: Android has no CallKit to reset.
+    static let aheadEnums: [String: [String]] = [
+        "end_cause": ["local_end", "remote_bye", "media_drop", "audio_watch", "provider_reset", "failed"],
+    ]
+
+    /// The causes an `ended` row may carry: GraineCallEndCause's words.
+    static var endCauses: Set<String> { Set(aheadEnums["end_cause"] ?? []) }
+
+    /**
+     * THE `ended` ROW — who or what ended the call, sent once on its channel
+     * just before it closes (when one is still open), as Android sends it:
+     * `{name: "ended", detail, quiet, telemetry, data: {cause, transport?,
+     * after_ms?, voice_heard?}}`, the detail one line — "hung up on this side
+     * after 12.5s, the agent heard". Nil for a cause that is not one of
+     * `endCauses`. Never an id or anything personal.
+     */
+    public static func endedFrame(cause: String, transport: String? = nil, afterMs: Int? = nil, voiceHeard: Bool? = nil) -> String? {
+        guard endCauses.contains(cause), let keys = ahead["ended"] else { return nil }
+        let clean = cleanData(keys, ["cause": cause, "transport": transport, "after_ms": afterMs, "voice_heard": voiceHeard])
+        let event = WireJSON.object([
+            ("name", .string("ended")),
+            ("detail", .string(detail("ended", Dictionary(clean, uniquingKeysWith: { first, _ in first })))),
+            ("quiet", .bool(true)),
+            ("telemetry", .bool(true)),
+            ("data", .object(clean)),
+        ])
+        return WireJSON.object([("type", .string("app_event")), ("event", event)]).text
     }
 }
