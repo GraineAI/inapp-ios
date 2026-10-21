@@ -1,3 +1,7 @@
+## 0.14.1
+
+- **Booking follows the agent's calling hours.** `bookingSlots(day)` and the SDK's booking sheet offer only times inside the agent's calling window, in the user's time zone, so a picker of your own never offers a time Graine would refuse. The window is part of the scheduling rules (`callingWindow`: start, end, days).
+
 ## 0.14.0
 
 - **A chat screen that goes away no longer ends the conversation.** `GraineChatView` (and the bar's chat) keeps the conversation connected until it has been idle for 5 minutes — no message either way, Graine's own idle window — instead of hanging up as it disappeared, so the chat shown again continues the same conversation, with no new welcome. `chat.close()` and `endOnBackground` end it as before.

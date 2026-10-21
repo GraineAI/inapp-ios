@@ -174,6 +174,76 @@ private func bookable(_ extra: [String: Any] = [:]) -> [String: Any] {
         #expect(flow.dayIndex == 14, "no such day: nothing changes")
     }
 
+    /// Monday to Friday, 9:00 to 21:00 on the device's clock.
+    private let windowed = GraineSchedulingRules(
+        usersCanBook: true, minLeadMinutes: 5, maxDaysAhead: 14, hostedRinging: true,
+        callingWindow: GraineCallingWindow(start: "09:00", end: "21:00", days: [0, 1, 2, 3, 4])
+    )
+
+    @Test func withACallingWindowEachDayOffersOnlyItsHoursAndADayItLeavesOutIsNotOffered() {
+        let calendar = kolkata()
+        // Wednesday 14 Oct 2026, 18:03 in Kolkata.
+        let days = Booking.days(windowed, now: at(2026, 10, 14, 18, 3), calendar: calendar, locale: gb)
+        #expect(days[0].label == "Today" && days[0].first == at(2026, 10, 14, 18, 10) && days[0].last == at(2026, 10, 14, 20, 55))
+        #expect(days[1].label == "Tomorrow" && days[1].first == at(2026, 10, 15, 9, 0) && days[1].last == at(2026, 10, 15, 20, 55))
+        #expect(days[2].start == at(2026, 10, 16, 0, 0), "Friday")
+        #expect(days[3].start == at(2026, 10, 19, 0, 0), "Saturday and Sunday are left out: Monday is next")
+        #expect(days.count == 11, "the weekdays of today and the 14 days ahead")
+        for day in days {
+            let weekday = calendar.component(.weekday, from: day.start)
+            #expect(weekday != 1 && weekday != 7, "never a weekend")
+            #expect(calendar.component(.hour, from: day.first) >= 9 && day.last < calendar.date(bySettingHour: 21, minute: 0, second: 0, of: day.start)!)
+        }
+        // After 20:55 today nothing is left of today: the first chip is tomorrow, from 9:00.
+        let late = Booking.days(windowed, now: at(2026, 10, 14, 20, 52), calendar: calendar, locale: gb)
+        #expect(late.first?.label == "Tomorrow" && late.first?.first == at(2026, 10, 15, 9, 0))
+        // The slots of a day are its marks inside the window: 9:00 offered, 21:00 not.
+        let thursday = Booking.slots(windowed, day: at(2026, 10, 15, 12, 0), now: at(2026, 10, 14, 18, 3), calendar: calendar)
+        #expect(thursday.count == 144 && thursday.first == at(2026, 10, 15, 9, 0) && thursday.last == at(2026, 10, 15, 20, 55))
+        #expect(Booking.slots(windowed, day: at(2026, 10, 17, 12, 0), now: at(2026, 10, 14, 18, 3), calendar: calendar).isEmpty, "Saturday")
+    }
+
+    @Test func aSheetOnAWindowedAgentOpensOnTheWindowsFirstTimeAndKeepsThePickInside() {
+        let calendar = kolkata()
+        // 21:30 on Wednesday: today's window has closed, so the sheet opens on Thursday at 9:00.
+        var flow = BookingFlow(rules: windowed, now: at(2026, 10, 14, 21, 30), calendar: calendar, locale: gb)
+        #expect(flow.day?.label == "Tomorrow")
+        #expect(flow.at == at(2026, 10, 15, 9, 0))
+        flow.pickTime(at(2026, 10, 15, 7, 0))
+        #expect(flow.at == at(2026, 10, 15, 9, 0), "before the window opens: its first time")
+        flow.pickTime(at(2026, 10, 15, 22, 0))
+        #expect(flow.at == at(2026, 10, 15, 20, 55), "after it closes: its last time")
+        flow.pickDay(1)
+        #expect(flow.at == at(2026, 10, 16, 20, 55) && flow.day?.start == at(2026, 10, 16, 0, 0), "Friday, the same time")
+        flow.pickDay(2)
+        #expect(flow.day?.start == at(2026, 10, 19, 0, 0), "Monday comes after Friday")
+    }
+
+    @Test @MainActor func bookingSlotsFollowTheWindowTheSessionSends() throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session(bookable(["callingWindow": ["start": "09:00", "end": "21:00", "days": [0, 1, 2, 3, 4]]]))
+        #expect(rig.graine.schedulingRules.callingWindow == GraineCallingWindow(start: "09:00", end: "21:00", days: [0, 1, 2, 3, 4]))
+        let calendar = kolkata()
+        let now = at(2026, 10, 14, 18, 3)
+        let friday = rig.graine.bookingSlots(day: at(2026, 10, 16, 12, 0), now: now, calendar: calendar)
+        #expect(friday.first == at(2026, 10, 16, 9, 0) && friday.last == at(2026, 10, 16, 20, 55) && friday.count == 144)
+        #expect(rig.graine.bookingSlots(day: at(2026, 10, 18, 12, 0), now: now, calendar: calendar).isEmpty, "Sunday")
+        // The Objective-C session says the same window, for the multiplatform SDK.
+        let json = try #require(GraineObjC(graine: rig.graine).sessionJSON?.data(using: .utf8))
+        let calls = try #require((try JSONSerialization.jsonObject(with: json) as? [String: Any])?["calls"] as? [String: Any])
+        let window = try #require(calls["callingWindow"] as? [String: Any])
+        #expect(window["start"] as? String == "09:00" && window["end"] as? String == "21:00")
+        #expect((window["days"] as? [Int]) == [0, 1, 2, 3, 4])
+        // No window in the session: the facade says null, and every time is offered as before.
+        rig.session(bookable())
+        let plain = try #require(GraineObjC(graine: rig.graine).sessionJSON?.data(using: .utf8))
+        let plainCalls = try #require((try JSONSerialization.jsonObject(with: plain) as? [String: Any])?["calls"] as? [String: Any])
+        #expect(plainCalls["callingWindow"] is NSNull)
+        #expect(rig.graine.schedulingRules.callingWindow == nil)
+        #expect(rig.graine.bookingSlots(day: at(2026, 10, 18, 12, 0), now: now, calendar: calendar).count == 288)
+    }
+
     @Test func theSheetsWordsAreTheSpecs() throws {
         var calendar = kolkata()
         calendar.locale = gb

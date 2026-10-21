@@ -144,20 +144,29 @@ enum Booking {
 
     /**
      * Every day from the one `first(now)` falls on to the one `last(now)` falls
-     * on, each holding only the times between the two — the chips. A day with
-     * no time left in it is not offered.
+     * on, each holding only the times between the two — the chips — and, when
+     * the agent has a calling window, only the times inside it: each day's
+     * first and last time are its first and last inside the window, and a day
+     * with no time left in it (or none inside the window) is not offered.
      */
     static func days(_ rules: GraineSchedulingRules, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> [Day] {
         let from = first(rules, now: now)
         let to = last(rules, now: now)
         guard from <= to else { return [] }
+        let window = rules.callingWindow
+        let clock = GraineCallingWindow.clock(for: calendar)
         var out: [Day] = []
         var start = calendar.startOfDay(for: from)
         let lastStart = calendar.startOfDay(for: to)
         while start <= lastStart, out.count < 400 {
             guard let next = calendar.date(byAdding: .day, value: 1, to: start).map({ calendar.startOfDay(for: $0) }), next > start else { break }
-            let dayFirst = max(from, start)
-            let dayLast = min(to, roundDown(next.addingTimeInterval(-1)))
+            var dayFirst = max(from, start)
+            var dayLast = min(to, roundDown(next.addingTimeInterval(-1)))
+            if let window = window, dayFirst <= dayLast {
+                // The first and the last 5-minute mark inside the window, read on the device's clock.
+                while dayFirst <= dayLast, !window.allows(dayFirst, clock: clock) { dayFirst = dayFirst.addingTimeInterval(step) }
+                while dayLast >= dayFirst, !window.allows(dayLast, clock: clock) { dayLast = dayLast.addingTimeInterval(-step) }
+            }
             if dayFirst <= dayLast {
                 out.append(Day(start: start, first: dayFirst, last: dayLast, label: dayLabel(start, now: now, calendar: calendar, locale: locale)))
             }
@@ -168,18 +177,24 @@ enum Booking {
 
     /**
      * Every time the sheet's picker offers on the day holding `day`, oldest
-     * first: each 5-minute mark from that day's first time to its last. None
-     * for a day the sheet does not offer.
+     * first: each 5-minute mark from that day's first time to its last — with
+     * a calling window, only the marks inside it (its days, from its start up
+     * to, not including, its end, on the device's clock). None for a day the
+     * sheet does not offer.
      */
     static func slots(_ rules: GraineSchedulingRules, day: Date, now: Date, calendar: Calendar = .current) -> [Date] {
         let start = calendar.startOfDay(for: day)
         guard let offered = days(rules, now: now, calendar: calendar).first(where: { $0.start == start }) else { return [] }
+        let window = rules.callingWindow
+        let clock = GraineCallingWindow.clock(for: calendar)
         var out: [Date] = []
         var at = offered.first
+        var walked = 0
         // Bounded: a day has at most 25 hours (the night the clocks go back) of 5-minute marks.
-        while at <= offered.last, out.count <= 25 * 60 / minuteStep {
-            out.append(at)
+        while at <= offered.last, walked <= 25 * 60 / minuteStep {
+            if window?.allows(at, clock: clock) ?? true { out.append(at) }
             at = at.addingTimeInterval(step)
+            walked += 1
         }
         return out
     }

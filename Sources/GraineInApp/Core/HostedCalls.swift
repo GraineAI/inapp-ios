@@ -32,6 +32,12 @@ public struct GraineHostedCallsSettings: Equatable, Sendable {
      * `.webrtc`, or nil (no opinion), leaves the app's `callTransport` to decide.
      */
     public let audioTransport: GraineCallTransport?
+    /**
+     * The agent's calling window (`calls.scheduling.callingWindow`): the hours
+     * Graine may ring, on the device's clock; nil when it has none, or sent
+     * none this SDK can read. Booking offers only the times inside it.
+     */
+    public let callingWindow: GraineCallingWindow?
 
     /// Graine rings iOS devices for this agent.
     public var ringsThisPlatform: Bool {
@@ -57,7 +63,8 @@ public struct GraineHostedCallsSettings: Equatable, Sendable {
             maxDaysAhead: rules?.maxDaysAhead,
             minLeadMinutes: rules?.minLeadMinutes,
             maxPendingPerUser: rules?.maxPendingPerUser,
-            audioTransport: (JSON.unwrap(o["audioTransport"]) as? String).flatMap(GraineCallTransport.from).flatMap { $0 == .auto ? nil : $0 }
+            audioTransport: (JSON.unwrap(o["audioTransport"]) as? String).flatMap(GraineCallTransport.from).flatMap { $0 == .auto ? nil : $0 },
+            callingWindow: rules?.callingWindow
         )
     }
 }

@@ -103,6 +103,96 @@ public enum GraineRingPlatform: String, Sendable {
 }
 
 /**
+ * THE AGENT'S CALLING WINDOW, as booking applies it (the session's
+ * `calls.scheduling.callingWindow`): the hours Graine may ring. `start` and
+ * `end` are "HH:MM" on a 24-hour clock — `start` included, `end` not, never
+ * across midnight — and `days` the days it applies, 0 Monday … 6 Sunday. Read
+ * on the device's clock, in its own time zone: a time is inside when its
+ * weekday is in `days` and `start` <= its time < `end`. `bookingSlots(day:)`
+ * and the SDK's booking sheet offer only the times inside it.
+ */
+public struct GraineCallingWindow: Equatable, Sendable {
+    /// When it opens, "HH:MM" (24-hour): the first time inside it.
+    public let start: String
+    /// When it closes, "HH:MM" (24-hour): the first time outside it again.
+    public let end: String
+    /// The days it applies, 0 Monday … 6 Sunday, each once, in order.
+    public let days: [Int]
+
+    public init(start: String, end: String, days: [Int]) {
+        self.start = start
+        self.end = end
+        self.days = days
+    }
+
+    /// "HH:MM" as minutes since midnight; nil for anything else.
+    private static func minutes(_ clock: String) -> Int? {
+        let parts = clock.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0].count == 2, parts[1].count == 2,
+              parts[0].allSatisfy({ $0.isASCII && $0.isNumber }), parts[1].allSatisfy({ $0.isASCII && $0.isNumber }),
+              let h = Int(parts[0]), let m = Int(parts[1]), h <= 23, m <= 59 else { return nil }
+        return h * 60 + m
+    }
+
+    /**
+     * What the session says, read the way every Graine SDK reads it: an object
+     * whose `start` and `end` are "HH:MM" (spaces around them ignored), `start`
+     * before `end`; `days` the whole numbers 0…6 in it, each once, in order —
+     * every day when it is missing or null. Anything else — not an object, a
+     * time that is not "HH:MM", no day left, `days` not a list — is no window
+     * (nil): every time between the earliest and the latest is offered, and
+     * Graine still checks the hours when the call is booked.
+     */
+    static func parse(_ raw: Any?) -> GraineCallingWindow? {
+        guard let o = JSON.unwrap(raw) as? [String: Any] else { return nil }
+        func clock(_ value: Any?) -> String? {
+            guard let s = JSON.unwrap(value) as? String else { return nil }
+            let text = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return minutes(text) == nil ? nil : text
+        }
+        guard let start = clock(o["start"]), let end = clock(o["end"]),
+              let from = minutes(start), let to = minutes(end), from < to else { return nil }
+        var days: [Int]
+        let rawDays = JSON.unwrap(o["days"])
+        if rawDays == nil || rawDays is NSNull {
+            days = Array(0...6)
+        } else if let list = rawDays as? [Any] {
+            var kept = Set<Int>()
+            for entry in list {
+                // A number, never a boolean (JSONSerialization reads `true` as an NSNumber) and never text.
+                guard let v = JSON.unwrap(entry), let n = JSON.number(v) else { continue }
+                let d = n.doubleValue
+                guard d.isFinite, d.rounded() == d, d >= 0, d <= 6 else { continue }
+                kept.insert(Int(d))
+            }
+            days = kept.sorted()
+        } else {
+            return nil
+        }
+        guard !days.isEmpty else { return nil }
+        return GraineCallingWindow(start: start, end: end, days: days)
+    }
+
+    /// The calendar the window is read with: Gregorian (Monday is 2, Sunday 1), in `calendar`'s time zone.
+    static func clock(for calendar: Calendar) -> Calendar {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        return gregorian
+    }
+
+    /// Whether `date` is inside the window on `clock`'s wall clock ([clock(for:)]).
+    func allows(_ date: Date, clock: Calendar) -> Bool {
+        guard let from = Self.minutes(start), let to = Self.minutes(end) else { return false }
+        let c = clock.dateComponents([.weekday, .hour, .minute], from: date)
+        guard let weekday = c.weekday, let hour = c.hour, let minute = c.minute else { return false }
+        // Foundation counts Sunday 1 … Saturday 7; the window, Monday 0 … Sunday 6.
+        guard days.contains((weekday + 5) % 7) else { return false }
+        let at = hour * 60 + minute
+        return from <= at && at < to
+    }
+}
+
+/**
  * THE RULES FOR BOOKING, from the session (`calls.scheduling` and `calls.*`;
  * WIRE.md "SDK types") — `GraineInApp.schedulingRules`. With nothing in the
  * session, customers cannot book (`usersCanBook` false) and the defaults hold.
@@ -121,10 +211,18 @@ public struct GraineSchedulingRules: Equatable, Sendable {
     /// Graine rings this app's devices (the workspace uploaded its push credentials).
     public let hostedRinging: Bool
     public let platforms: [GraineRingPlatform]
+    /**
+     * The agent's calling window — the hours Graine may ring, on the device's
+     * clock — or nil when it has none. `bookingSlots(day:)` and the booking
+     * sheet offer only the times inside it; Graine checks it again when the
+     * call is booked (`outsideWindow`).
+     */
+    public let callingWindow: GraineCallingWindow?
 
     public init(
         usersCanBook: Bool = false, minLeadMinutes: Int = 5, maxDaysAhead: Int = 14, maxPendingPerUser: Int = 3,
-        ringTimeoutSeconds: Int = 45, callName: String? = nil, hostedRinging: Bool = false, platforms: [GraineRingPlatform] = []
+        ringTimeoutSeconds: Int = 45, callName: String? = nil, hostedRinging: Bool = false, platforms: [GraineRingPlatform] = [],
+        callingWindow: GraineCallingWindow? = nil
     ) {
         self.usersCanBook = usersCanBook
         self.minLeadMinutes = minLeadMinutes
@@ -134,6 +232,7 @@ public struct GraineSchedulingRules: Equatable, Sendable {
         self.callName = callName
         self.hostedRinging = hostedRinging
         self.platforms = platforms
+        self.callingWindow = callingWindow
     }
 
     /// The earliest a call can be booked for: `now` plus `minLeadMinutes`.
@@ -157,7 +256,8 @@ public struct GraineSchedulingRules: Equatable, Sendable {
             ringTimeoutSeconds: c.ringTimeoutSeconds ?? 45,
             callName: c.callName,
             hostedRinging: c.hosted,
-            platforms: c.platforms.compactMap { GraineRingPlatform(rawValue: $0) }
+            platforms: c.platforms.compactMap { GraineRingPlatform(rawValue: $0) },
+            callingWindow: c.callingWindow
         )
     }
 }
@@ -177,6 +277,8 @@ enum Scheduling {
         var maxDaysAhead: Int?
         var minLeadMinutes: Int?
         var maxPendingPerUser: Int?
+        /// `calls.scheduling.callingWindow`; nil: none, or none this SDK can read.
+        var callingWindow: GraineCallingWindow? = nil
 
         static func parse(_ raw: Any?) -> Rules? {
             guard let o = JSON.unwrap(raw) as? [String: Any] else { return nil }
@@ -184,7 +286,8 @@ enum Scheduling {
                 usersCanBook: JSON.unwrap(o["usersCanBook"]).flatMap { JSON.bool($0) } ?? false,
                 maxDaysAhead: wholeNumber(o["maxDaysAhead"]),
                 minLeadMinutes: wholeNumber(o["minLeadMinutes"]),
-                maxPendingPerUser: wholeNumber(o["maxPendingPerUser"])
+                maxPendingPerUser: wholeNumber(o["maxPendingPerUser"]),
+                callingWindow: GraineCallingWindow.parse(o["callingWindow"])
             )
         }
     }

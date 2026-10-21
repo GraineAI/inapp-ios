@@ -1783,11 +1783,14 @@ public final class GraineInApp {
      * oldest first — for a picker of your own: every 5 minutes, from the
      * earliest the rules allow (`minLeadMinutes` from `now`, on the next
      * 5-minute mark) to the latest (`maxDaysAhead` days from `now`), the day
-     * counted in `calendar`'s time zone (the device's). Empty for a day the
-     * sheet does not offer: before today, beyond `maxDaysAhead`, or today once
-     * its last time has passed. Graine checks the agent's calling hours when
-     * the call is booked (`outsideWindow`); whether the customer can book at
-     * all is `bookingAvailable`.
+     * counted in `calendar`'s time zone (the device's) — and, when the agent
+     * has a calling window (`schedulingRules.callingWindow`), only the times
+     * inside it: its days, from its start up to, not including, its end, on
+     * the device's clock. Empty for a day the sheet does not offer: before
+     * today, beyond `maxDaysAhead`, a day the window leaves out, or today once
+     * its last time has passed. Graine checks the window again when the call
+     * is booked (`outsideWindow`); whether the customer can book at all is
+     * `bookingAvailable`.
      */
     public func bookingSlots(day: Date, now: Date = Date(), calendar: Calendar = .current) -> [Date] {
         Booking.slots(schedulingRules, day: day, now: now, calendar: calendar)

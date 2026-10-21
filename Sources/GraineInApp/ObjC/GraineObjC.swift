@@ -157,6 +157,8 @@ enum ObjCBridge {
                 "maxDaysAhead": c.maxDaysAhead.map { $0 as Any } ?? NSNull(),
                 "minLeadMinutes": c.minLeadMinutes.map { $0 as Any } ?? NSNull(),
                 "maxPendingPerUser": c.maxPendingPerUser.map { $0 as Any } ?? NSNull(),
+                // The agent's calling window as the SDK read it — {start, end, days} — or null: none.
+                "callingWindow": c.callingWindow.map { ["start": $0.start, "end": $0.end, "days": $0.days] as Any } ?? NSNull(),
             ] as [String: Any]
         }
         return o
@@ -976,8 +978,8 @@ public final class GraineObjC: NSObject {
      * a day in the device's time zone (a full ISO-8601 time names its day) — as
      * a JSON array of ISO-8601 times with the device's offset
      * (`GraineInApp.bookingSlots`): every 5 minutes from the earliest the rules
-     * allow to the latest. `[]` for a day the sheet does not offer, or a day
-     * that cannot be read.
+     * allow to the latest, only inside the agent's calling window when it has
+     * one. `[]` for a day the sheet does not offer, or a day that cannot be read.
      */
     @objc(bookingSlotsJSONForDay:)
     public func bookingSlotsJSON(forDay isoDay: String) -> String {
