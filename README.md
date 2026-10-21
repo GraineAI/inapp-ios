@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.1")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.3")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -210,8 +210,10 @@ leave, `clear()` to empty the screen (the conversation goes on), and `turns`
 chat is back; a dropped connection is made again on its own, then waits for
 the customer (or `retry()`). `GraineChatView` leaving the screen (or a bar
 showing the chat) does not end the conversation: with no window showing it,
-the chat stays connected until nothing has been said either way for 5 minutes,
-so opening it again continues where it was, with no new welcome. When Graine ends a conversation
+the chat stays connected for 15 seconds after it left the last screen (or after
+the last message, when that came later) — `GraineConfig.chatCloseDelaySeconds`
+and `chat.closeDelaySeconds` set another, 0 to 300 — so opening it again in
+that time continues where it was, with no new welcome. When Graine ends a conversation
 itself (idle, or the session's time limit) the lines stay, the header says
 "Disconnected", and the next open or message connects again. One conversation at a time: the chat ends a call
 and a call closes the chat. `GraineListener.onChatMessage(_:)` hears each
@@ -477,7 +479,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.1")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.3")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

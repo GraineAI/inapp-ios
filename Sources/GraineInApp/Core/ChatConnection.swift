@@ -20,10 +20,12 @@ import Foundation
  * back still gets an answer.
  *
  * HOW LONG A CONVERSATION LASTS (DESIGN.md): closing the chat window does not
- * end it. With no window showing it (`shown(false)`), the chat stays connected
- * — the next window continues the same conversation, nothing on screen
- * changes — until nothing has been said either way for five minutes, Graine's
- * own idle window; only then does it hang up, as `close` does.
+ * end it at once. With no window showing it (`shown(false)`), the chat stays
+ * connected — a window back in time continues the same conversation, nothing
+ * on screen changes — for the close delay (15 seconds unless the app sets
+ * another, 0–300) after the later of the moment the last window left and the
+ * last message either way; then it hangs up, as `close` does. (It was five
+ * minutes of quiet in 0.14.0–0.14.1.)
  *
  * WHO A CHAT BELONGS TO (DESIGN.md): a connection belongs to whoever was
  * identified when its ticket was asked for — nobody, before `identify()`.
@@ -66,7 +68,7 @@ final class ChatConnection {
         case rated(GraineChatRating)
         /// The connection went, with why (nil for a close we asked for).
         case closed(String?)
-        /// No window showed the chat and nothing was said either way for five minutes: it hung up, as `close` does.
+        /// No window showed the chat for the close delay, and nothing was said either way meanwhile: it hung up, as `close` does.
         case letGo
     }
 
@@ -124,20 +126,31 @@ final class ChatConnection {
     private var queue: [(id: String, text: String)] = []
     private var timers: [Int: CallTimer] = [:]
     private var nextTimerId = 0
-    /// No window shows the chat: it is let go once nothing has been said either way for `ChatWire.idleSeconds`.
+    /// No window shows the chat: it is let go once the close delay has passed since it left the last one, and since the last message.
     private var unseen = false
+    /// When the last window left — the scheduler's clock.
+    private var unseenSince = 0.0
     /// When something was last said either way, or the customer came into the chat — the scheduler's clock.
     private var lastActivity = 0.0
+    /// How long a chat no window shows is kept, in seconds: 0 (it closes as the last window leaves) to 300.
+    private var closeDelay: Double
     private var idleTimer: CallTimer?
     /// Who the connection up (or being made) was asked for: the identity value its ticket was asked with (nil: nobody).
     private var owner: String?
     /// A ticket was asked for at least once, so `owner` says whose the connection is.
     private var ownerKnown = false
 
-    init(setup: Setup, network: CallNetwork, scheduler: CallScheduler, onEvent: @escaping (Event) -> Void) {
+    init(
+        setup: Setup,
+        network: CallNetwork,
+        scheduler: CallScheduler,
+        closeDelaySeconds: Int = ChatWire.closeDelaySeconds,
+        onEvent: @escaping (Event) -> Void
+    ) {
         self.setup = setup
         self.network = network
         self.scheduler = scheduler
+        self.closeDelay = Double(ChatWire.closeDelay(closeDelaySeconds))
         self.onEvent = onEvent
     }
 
@@ -168,15 +181,29 @@ final class ChatConnection {
     }
 
     /**
-     * Whether a chat window of the SDK's shows the chat. Unseen, the
-     * conversation stays up — the next window continues it — until nothing has
-     * been said either way for `ChatWire.idleSeconds`; then it hangs up as
-     * `close` does, and `letGo` says so.
+     * Whether a chat window shows the chat. Unseen, the conversation stays up
+     * — a window back in time continues it — for the close delay after the
+     * later of the moment it left the last window and the last message either
+     * way; then it hangs up as `close` does, and `letGo` says so. A window
+     * showing it again calls the close off.
      */
     func shown(_ visible: Bool) {
         scheduler.run { [self] in
+            if !visible && !unseen { unseenSince = scheduler.now }
             unseen = !visible
             watchIdle()
+        }
+    }
+
+    /**
+     * The close delay, in seconds (clamped to 0–300). A close already waiting
+     * waits again with it: from the same moments, the new length — at once
+     * when that is already past.
+     */
+    func setCloseDelay(_ seconds: Int) {
+        scheduler.run { [self] in
+            closeDelay = Double(ChatWire.closeDelay(seconds))
+            if unseen && wanted { watchIdle() }
         }
     }
 
@@ -197,8 +224,8 @@ final class ChatConnection {
         scheduler.run { [self] in
             guard holds.remove(reason) != nil, holds.isEmpty else { return }
             if wanted && phase == .idle {
-                // Held past its idle minutes with no window showing it (the app away a while): let go, not dialled again.
-                if unseen && scheduler.now - lastActivity >= ChatWire.idleSeconds {
+                // Held past its close delay with no window showing it (the app away a while): let go, not dialled again.
+                if unseen && scheduler.now - max(unseenSince, lastActivity) >= closeDelay {
                     letGo()
                     return
                 }
@@ -576,7 +603,7 @@ final class ChatConnection {
         onEvent(.changed)
     }
 
-    /// Hang up and stay down: the stop frame, no reconnect, nothing left watching the idle minutes. The transcript stays.
+    /// Hang up and stay down: the stop frame, no reconnect, nothing left waiting to close it. The transcript stays.
     private func hangUp() {
         wanted = false
         idleTimer?.cancel()
@@ -588,7 +615,7 @@ final class ChatConnection {
 
     // MARK: - How long it lasts
 
-    /// Something was said either way, or the customer came into the chat: the idle minutes start again.
+    /// Something was said either way, or the customer came into the chat: a close waiting for an unseen chat waits again from now.
     private func noteActivity() {
         lastActivity = scheduler.now
         // Unseen with nothing watching (it let the chat go, or no window has shown it since): watched again.
@@ -596,15 +623,16 @@ final class ChatConnection {
     }
 
     /**
-     * Unseen and wanted: let go once the idle minutes have passed since the
-     * last activity. Activity meanwhile only moves the deadline — the timer
-     * reads it when it fires and waits out what is left.
+     * Unseen and wanted: let go once the close delay has passed since the
+     * later of the moment the last window left and the last activity.
+     * Activity meanwhile only moves the deadline — the timer reads it when it
+     * fires and waits out what is left.
      */
     private func watchIdle() {
         idleTimer?.cancel()
         idleTimer = nil
         guard unseen, wanted else { return }
-        let left = lastActivity + ChatWire.idleSeconds - scheduler.now
+        let left = max(unseenSince, lastActivity) + closeDelay - scheduler.now
         // Within a millisecond is over: what a clock rounds away must not wait again, and again.
         guard left > 0.001 else {
             letGo()
@@ -613,7 +641,7 @@ final class ChatConnection {
         idleTimer = scheduler.after(left) { [weak self] in self?.watchIdle() }
     }
 
-    /// Idle with no window showing it: hung up as `close` does. The lines stay; the next open or message connects again.
+    /// No window showed it for the close delay: hung up as `close` does. The lines stay; the next open or message connects again.
     private func letGo() {
         hangUp()
         onEvent(.letGo)
@@ -630,7 +658,7 @@ final class ChatConnection {
             onEvent(.changed)
             return
         }
-        // The agent said something: an unseen chat's idle minutes start again.
+        // The agent said something: a close waiting for an unseen chat waits again from now.
         noteActivity()
         switch frame {
         case .text(let data):

@@ -20,11 +20,21 @@ enum ChatWire {
     /// Messages typed while offline, kept to be sent; older ones beyond this are not sent.
     static let queueLimit = 20
     /**
-     * With no window showing it, the chat stays connected until nothing has
-     * been said either way for this long — the idle window Graine's server
-     * applies — then hangs up (DESIGN.md "How long a conversation lasts").
+     * How long a chat no window shows stays connected (DESIGN.md "How long a
+     * conversation lasts"): it closes, as `close()` closes it, this many
+     * seconds after the later of the moment the last window left and the last
+     * message either way — 15 unless the app says otherwise
+     * (`GraineConfig.chatCloseDelaySeconds`, `GraineChat.closeDelaySeconds`).
+     * It was 5 minutes of quiet in 0.14.0–0.14.1.
      */
-    static let idleSeconds = 300.0
+    static let closeDelaySeconds = 15
+    /// The longest a chat no window shows may be kept: 300 seconds, Graine's own idle window.
+    static let closeDelayMaxSeconds = 300
+
+    /// A close delay as the SDK keeps it: 0 (and anything below) to `closeDelayMaxSeconds`.
+    static func closeDelay(_ seconds: Int) -> Int {
+        min(max(seconds, 0), closeDelayMaxSeconds)
+    }
     /// The close codes with which Graine ends a conversation itself: idle (4408, `idle_timeout`) and the session's time limit (4410).
     static let endedByGraine: Set<Int> = [4408, 4410]
 

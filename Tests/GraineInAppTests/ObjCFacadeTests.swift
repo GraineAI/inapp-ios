@@ -36,6 +36,7 @@ import Testing
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:",
+                "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:chatCloseDelaySeconds:",
                 "named:",
             ]),
             "GraineObjCChat": ([
@@ -46,6 +47,9 @@ import Testing
                 "quickReplies", "sendQuickReply:", "ended", "rating", "rateWithStyle:value:", "observeRatings:",
                 "pinned", "pinWithTitle:subtitle:imageUrl:badge:", "clearPin", "setAttachHandler:",
                 "setShown:", "disconnected", "wasOnline", "newConversationBefore", "dismissWidgetWithId:",
+                // 0.14.3, past sessions (PUBLIC-STATE.md "Past sessions"), and how long an unseen chat is kept.
+                "pastSessionsJSON", "refreshPastSessions", "loadMorePastSessions", "sessionTranscriptJSONWithId:completion:",
+                "closeDelaySeconds", "setCloseDelaySeconds:",
             ], []),
             "GraineObjCQuickReply": (["label", "text", "initWithLabel:text:"], []),
             "GraineObjCChatRating": (["style", "value", "scale", "json"], []),

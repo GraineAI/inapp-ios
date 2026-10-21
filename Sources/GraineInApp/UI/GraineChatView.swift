@@ -8,9 +8,9 @@ import UIKit
  * SDK in the brand's design: the header, one bubble per reply, a typing
  * bubble while the agent works on one, the components it draws (answered in
  * place), and the composer. It connects when it appears; when it goes, the
- * conversation is kept — the screen opened again continues it — until nothing
- * has been said either way for five minutes. A message typed while offline
- * waits and is sent when the connection is back.
+ * conversation is kept for 15 seconds (`GraineChat.closeDelaySeconds`) — the
+ * screen opened again in that time continues it — then closed. A message typed
+ * while offline waits and is sent when the connection is back.
  *
  *     NavigationLink("Ask our assistant") { GraineChatView() }
  *     .sheet(isPresented: $chatOpen) { GraineChatView(onClose: { chatOpen = false }) }

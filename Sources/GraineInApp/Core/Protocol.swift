@@ -265,7 +265,7 @@ public enum GraineTransport: String {
 }
 
 /// Who said a caption line.
-public enum GraineRole: String {
+public enum GraineRole: String, Sendable {
     case agent
     case customer
 }

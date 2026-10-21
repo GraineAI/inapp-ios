@@ -21,16 +21,19 @@ import Foundation
  * chat, starting a call closes it, and a native call (`calls`) holds every chat
  * down until it is over. With the app in the background the chat
  * hangs up (when `GraineConfig.endOnBackground`), and comes back with the app.
- * A chat window closing does not end the conversation: with no window showing
- * it, the chat stays connected until nothing has been said either way for five
- * minutes, so the next window continues it. When Graine ends it itself (idle,
- * or the session's time limit) it is not dialled again on its own: the lines
- * stay, and the next open or message connects again.
+ * A chat window closing does not end the conversation at once: with no window
+ * showing it, the chat closes 15 seconds (`closeDelaySeconds`) after it left
+ * the last one — or after the last message, when that came later — so a
+ * window back in time continues it. (It was 5 minutes of quiet in
+ * 0.14.0–0.14.1.) When Graine ends it itself (idle, or the session's time
+ * limit) it is not dialled again on its own: the lines stay, and the next open
+ * or message connects again.
  *
  * `ObservableObject`: `GraineChatView` draws it whole; draw your own from
  * `turns`, `status` and `typing` — and `quickReplies`, `ended`, `rating`,
  * `disconnected`, `wasOnline`, `newConversationBefore`, `sessionId` and `sessions` — and tell it when
- * your screen appears and goes (`shown(_:)`). Main thread.
+ * your screen appears and goes (`shown(_:)`). Main thread. The customer's earlier sessions
+ * with the agent, and each one's chat history, are `pastSessions` and `sessionTranscript(id:)`.
  *
  * What the chat window draws beside the conversation is yours to give:
  *
@@ -127,6 +130,19 @@ public final class GraineChat: ObservableObject {
     @Published public private(set) var sessions: [GraineChatSession] = []
 
     /**
+     * THE CUSTOMER'S PAST SESSIONS with this agent — their earlier chats,
+     * talks and calls, newest first, as Execution History lists them:
+     * `{sessions, loading, hasMore, error}`. Empty until
+     * `refreshPastSessions()`; `loadMorePastSessions()` appends the next page,
+     * and `sessionTranscript(id:)` answers one session's chat history. Only
+     * for the customer `identify` names, from a device bound to them — `error`
+     * says why not (`identity_required`, `device_limit`, `rate_limited`,
+     * `unavailable`, `network`) — and cleared when the identity changes
+     * (another customer, or nobody). The session open now is never in it.
+     */
+    @Published public private(set) var pastSessions = GrainePastSessions()
+
+    /**
      * This customer's calls still to come (`scheduledCalls()`), soonest first,
      * at most three — the chat window's "Upcoming calls" card. Fetched when the
      * chat opens and after the agent finishes a reply (it may have just booked
@@ -150,6 +166,28 @@ public final class GraineChat: ObservableObject {
     public private(set) var isOpen = false
 
     /**
+     * How long the conversation stays connected once no screen shows it, in
+     * seconds: it closes — as `close()` closes it — this long after the later
+     * of the moment the last chat screen left and the last message either
+     * way; a screen showing it again before then continues it. Starts as
+     * `GraineConfig.chatCloseDelaySeconds` (15 unless the app set another);
+     * 0 closes it as the last screen leaves; at most 300 (a value outside
+     * 0…300 is clamped). Set while that wait is running, the wait takes the
+     * new length, counted from the same moments — closed at once when that is
+     * already past. Main thread. It was 5 minutes of quiet in
+     * 0.14.0–0.14.1.
+     */
+    public var closeDelaySeconds: Int {
+        get { closeDelay }
+        set {
+            closeDelay = ChatWire.closeDelay(newValue)
+            connection.setCloseDelay(closeDelay)
+        }
+    }
+
+    private var closeDelay: Int
+
+    /**
      * The size this open asked for (`open(size:)`), until `close()`; nil
      * follows `GraineConfig.chatSize`, then the dashboard's. The bar draws the
      * chat at it — and switching to the call and back keeps it.
@@ -169,6 +207,7 @@ public final class GraineChat: ObservableObject {
 
     init(graine: GraineInApp, network: CallNetwork, scheduler: CallScheduler) {
         self.graine = graine
+        closeDelay = ChatWire.closeDelay(graine.config.chatCloseDelaySeconds)
         let setup = ChatConnection.Setup(
             publishableKey: graine.config.publishableKey,
             baseUrl: graine.config.baseUrl,
@@ -181,7 +220,7 @@ public final class GraineChat: ObservableObject {
             },
             runAction: CallEngine.actionRunner(graine)
         )
-        connection = ChatConnection(setup: setup, network: network, scheduler: scheduler) { [weak self] event in
+        connection = ChatConnection(setup: setup, network: network, scheduler: scheduler, closeDelaySeconds: closeDelay) { [weak self] event in
             self?.event(event)
         }
         graine.onMain { [weak self] in self?.watch() }
@@ -237,10 +276,11 @@ public final class GraineChat: ObservableObject {
      * themselves; a chat screen of your own calls this as it appears (true)
      * and goes (false), in pairs (DESIGN.md "How long a conversation lasts").
      * On screen, the chat connects. Once no screen shows it, it stays
-     * connected — the next screen continues the same conversation, nothing on
-     * screen changes, no new welcome — until nothing has been said either way
-     * for five minutes, and then closes as `close()` closes it. A chat no
-     * screen reports stays connected until Graine's own idle limit.
+     * connected for `closeDelaySeconds` (15 unless the app set another) after
+     * the later of the moment the last screen left and the last message either
+     * way — a screen back in time continues the same conversation, nothing on
+     * screen changes, no new welcome — and then closes as `close()` closes it.
+     * A chat no screen reports stays connected until Graine's own idle limit.
      */
     public func shown(_ visible: Bool) {
         graine.onMain {
@@ -417,6 +457,110 @@ public final class GraineChat: ObservableObject {
     /// Moves on with every change of identity: a list fetched for the customer before is not shown.
     private var upcomingEpoch = 0
 
+    // MARK: - Past sessions
+
+    /**
+     * Load the first page of `pastSessions` — the customer's most recent
+     * sessions with this agent — replacing what was loaded. While it loads,
+     * `loading` is true and what was loaded stays; a refusal keeps it too, with
+     * `error` saying why. With nobody identified nothing is asked:
+     * `error` is `identity_required` at once.
+     */
+    public func refreshPastSessions() {
+        graine.onMain { self.fetchPastSessions(more: false) }
+    }
+
+    /**
+     * Load the next page of `pastSessions` and append it — a session already
+     * listed is not listed twice. Nothing happens while a page is loading,
+     * and when there is no next page (`hasMore` false, or nothing loaded yet:
+     * `refreshPastSessions()` loads the first). After a refusal, calling it
+     * again asks for the same page.
+     */
+    public func loadMorePastSessions() {
+        graine.onMain { self.fetchPastSessions(more: true) }
+    }
+
+    /**
+     * One past session's chat history, oldest first — the session as
+     * `pastSessions` describes it, and every message said in it. Only the
+     * identified customer's own: another customer's session, or one Graine
+     * does not know, is `notFound` — as is an answer that arrives after the
+     * identity changed. Throws `GraineServiceError`: `invalidRequest` for a
+     * blank id and `identityRequired` with nobody identified (nothing is
+     * sent), `notFound`, `deviceLimit`, `rateLimited`, `unavailable`, `network`.
+     */
+    public func sessionTranscript(id: String) async throws -> GraineSessionTranscript {
+        let wanted = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { throw GraineServiceError(code: .invalidRequest, message: "No session id.") }
+        // Who the customer is waits for the agent's settings (they name the trait), as `memories()` does.
+        _ = await graine.sessionNow()
+        guard let value = graine.identity.snapshot().value else {
+            throw GraineServiceError(code: .identityRequired, message: "Nobody is identified: call identify() with the customer's identifier first.")
+        }
+        let body = try await graine.requests.post(PastSessionsWire.transcriptPath, [
+            ("installId", .string(graine.installId)),
+            ("identity", .object([("value", .string(value))])),
+            ("id", .string(wanted)),
+        ])
+        // Asked for someone who is no longer the one signed in: not this customer's session.
+        guard graine.identity.snapshot().value == value else {
+            throw GraineServiceError(code: .notFound, message: "That session is not this user's.")
+        }
+        return PastSessionsWire.transcript(body, id: wanted)
+    }
+
+    /// Moves on with every refresh and every change of identity: an answer to a request made before is not shown.
+    private var pastGeneration = 0
+    /// Where the next page starts — the last page's `next`; nil before the first page and after the last.
+    private var pastCursor: String?
+
+    /// Main thread.
+    private func fetchPastSessions(more: Bool) {
+        let cursor = pastCursor
+        if more && (pastSessions.loading || cursor == nil) { return }
+        if !more { pastGeneration += 1 }
+        let generation = pastGeneration
+        setPastSessions(GrainePastSessions(sessions: pastSessions.sessions, loading: true, hasMore: pastSessions.hasMore, error: nil))
+        // Who the customer is waits for the agent's settings (they name the trait), as `memories()` does.
+        graine.loadSession { [weak self] _ in
+            guard let self = self, self.pastGeneration == generation else { return }
+            guard let value = self.graine.identity.snapshot().value else {
+                self.pastCursor = nil
+                self.setPastSessions(GrainePastSessions(error: GraineErrorCode.identityRequired.wire))
+                return
+            }
+            var fields: [(String, WireJSON)] = [
+                ("installId", .string(self.graine.installId)),
+                ("identity", .object([("value", .string(value))])),
+            ]
+            if more, let cursor = cursor { fields.append(("cursor", .string(cursor))) }
+            self.graine.requests.post(PastSessionsWire.listPath, fields) { [weak self] result in
+                guard let self = self else { return }
+                self.graine.onMain { self.pastSessionsAnswered(result, more: more, generation: generation) }
+            }
+        }
+    }
+
+    /// Main thread. An answer asked for before a refresh or another identity is not shown.
+    private func pastSessionsAnswered(_ result: Result<[String: Any], GraineServiceError>, more: Bool, generation: Int) {
+        guard pastGeneration == generation else { return }
+        switch result {
+        case .success(let body):
+            let page = PastSessionsWire.page(body)
+            pastCursor = page.next
+            let sessions = more ? PastSessionsWire.appending(page.sessions, to: pastSessions.sessions) : page.sessions
+            setPastSessions(GrainePastSessions(sessions: sessions, loading: false, hasMore: page.next != nil, error: nil))
+        case .failure(let error):
+            // What was loaded stays, and so does the page asked for: asking again asks for it again.
+            setPastSessions(GrainePastSessions(sessions: pastSessions.sessions, loading: false, hasMore: pastSessions.hasMore, error: error.code.wire))
+        }
+    }
+
+    private func setPastSessions(_ next: GrainePastSessions) {
+        if pastSessions != next { pastSessions = next }
+    }
+
     // MARK: - For the SDK's own views and routing
 
     /// The chat is the conversation a component's answer and an app event belong to.
@@ -449,7 +593,9 @@ public final class GraineChat: ObservableObject {
      * connected or connecting for it is closed normally and connected again
      * at once for this one while the customer is in it, else at the next open
      * or message (`ChatConnection.identityChanged`). The booked calls on the
-     * card are the identity's too: gone, and fetched again for this one.
+     * card are the identity's too: gone, and fetched again for this one. So
+     * are the past sessions: cleared, and a page still on its way for the
+     * identity before is never shown.
      */
     func identityChanged(from previous: String?, to current: String?) {
         connection.identityChanged(to: current)
@@ -460,6 +606,9 @@ public final class GraineChat: ObservableObject {
         if !cancelling.isEmpty { cancelling = [] }
         if !cancelFailed.isEmpty { cancelFailed = [] }
         if isOpen { fetchUpcoming(force: true) }
+        pastGeneration += 1
+        pastCursor = nil
+        setPastSessions(GrainePastSessions())
     }
 
     // MARK: - Internals

@@ -125,6 +125,7 @@ public final class GraineObjCChat: NSObject {
             chat.$newConversationBefore.sink { [weak self] _ in self?.changed() },
             chat.$sessionId.sink { [weak self] _ in self?.changed() },
             chat.$sessions.sink { [weak self] _ in self?.changed() },
+            chat.$pastSessions.sink { [weak self] _ in self?.changed() },
             // A rating given (in the window or through `rate`), once: its observers hear it.
             chat.$rating.dropFirst().compactMap { $0 }.sink { [weak self] rating in
                 self?.rated.notify { $0(GraineObjCChatRating(rating)) }
@@ -183,6 +184,19 @@ public final class GraineObjCChat: NSObject {
     @objc public var isOpen: Bool { objcOnMainSync { self.graine.chat.isOpen } }
 
     /**
+     * How long the conversation stays connected once no screen shows it, in
+     * seconds (`GraineChat.closeDelaySeconds`): it closes this long after the
+     * later of the moment the last chat screen left and the last message
+     * either way. 15 unless configured; 0 closes it as the last screen
+     * leaves; at most 300 (clamped). Set while that wait is running, the wait
+     * takes the new length, counted from the same moments.
+     */
+    @objc public var closeDelaySeconds: Int {
+        get { objcOnMainSync { self.graine.chat.closeDelaySeconds } }
+        set { objcOnMainSync { self.graine.chat.closeDelaySeconds = newValue } }
+    }
+
+    /**
      * The user's calls still to come, soonest first, at most three — the chat
      * window's Upcoming calls card (`GraineChat.upcomingCalls`). Main thread.
      */
@@ -216,6 +230,46 @@ public final class GraineObjCChat: NSObject {
      */
     @objc public var sessionsJSON: String {
         objcOnMainSync { ObjCBridge.text(self.graine.chat.sessions.map { ObjCBridge.session($0) }) }
+    }
+
+    /**
+     * The user's past sessions with this agent (`GraineChat.pastSessions`),
+     * as JSON in the shape Graine's wire carries them: `{sessions: [{id,
+     * startedAt, endedAt, durationSeconds, channel, direction, status, turns,
+     * preview}], loading, hasMore, error}` — times ISO-8601 in UTC, `channel`
+     * `chat`, `voice` or `call`, `direction` `inbound` or `outbound`;
+     * `endedAt`, `durationSeconds`, `direction` and `error` null when there is
+     * none. Observers hear every change. Main thread.
+     */
+    @objc public var pastSessionsJSON: String { objcOnMainSync { ObjCBridge.text(PastSessionsWire.json(self.graine.chat.pastSessions)) } }
+
+    /// Load the first page of the past sessions, replacing what was loaded (`GraineChat.refreshPastSessions()`).
+    @objc(refreshPastSessions)
+    public func refreshPastSessions() { graine.chat.refreshPastSessions() }
+
+    /// Load the next page of the past sessions and append it (`GraineChat.loadMorePastSessions()`).
+    @objc(loadMorePastSessions)
+    public func loadMorePastSessions() { graine.chat.loadMorePastSessions() }
+
+    /**
+     * One past session's chat history (`GraineChat.sessionTranscript(id:)`),
+     * on the main thread: the JSON `{id, startedAt, endedAt, durationSeconds,
+     * channel, direction, status, turns: [{role, text, at}]}` in the shape
+     * Graine's wire carries it — `role` `user` (the user) or `assistant` (the
+     * agent), oldest first — or the error (its `userInfo["code"]` the word:
+     * `not_found`, `identity_required`, `device_limit`, …).
+     */
+    @objc(sessionTranscriptJSONWithId:completion:)
+    public func sessionTranscriptJSON(id: String, completion: @escaping (String?, NSError?) -> Void) {
+        Task { [graine] in
+            do {
+                let transcript = try await graine.chat.sessionTranscript(id: id)
+                let json = ObjCBridge.text(PastSessionsWire.json(transcript))
+                await MainActor.run { completion(json, nil) }
+            } catch {
+                await MainActor.run { completion(nil, ObjCBridge.nsError(error)) }
+            }
+        }
     }
 
     /**
@@ -288,8 +342,9 @@ public final class GraineObjCChat: NSObject {
     /**
      * A chat screen of the app's own came on screen (YES) or left it (NO), in
      * pairs (`GraineChat.shown(_:)`): on screen the chat connects; once no
-     * screen shows it, the conversation is kept until it has been idle for 5
-     * minutes, then closed — so the next screen continues it.
+     * screen shows it, the conversation is kept for `closeDelaySeconds` (15
+     * seconds unless set), then closed — so a screen back in that time
+     * continues it.
      */
     @objc(setShown:)
     public func setShown(_ visible: Bool) { graine.chat.shown(visible) }

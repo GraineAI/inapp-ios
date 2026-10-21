@@ -32,10 +32,27 @@ final class RoutedNetwork: CallNetwork {
         let answer = { [headers] in completion(reply.0, reply.1.map { Data($0.utf8) }, headers[url.path] ?? [:]) }
         if holdTickets && url.path == "/api/embed/ticket" {
             heldTickets.append(answer)
+        } else if holding.contains(url.path) {
+            held[url.path, default: []].append(answer)
         } else {
+            beforeAnswer[url.path]?()
             answer()
         }
     }
+
+    /// Paths whose answers are held back until `release(_:)`: a request still on its way. Main thread.
+    var holding: Set<String> = []
+    private var held: [String: [() -> Void]] = [:]
+
+    /// Answer every held request to `path`, oldest first.
+    func release(_ path: String) {
+        let answers = held[path] ?? []
+        held[path] = nil
+        answers.forEach { $0() }
+    }
+
+    /// path → what happens after the request arrives and before it is answered: something that changes on the way.
+    var beforeAnswer: [String: () -> Void] = [:]
 
     /// Ticket answers held back until `releaseTickets()`: a ticket still on its way.
     var holdTickets = false
@@ -86,9 +103,12 @@ struct PlatformRig {
     let installs = MemoryInstallIdStore("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
     let graine: GraineInApp
 
-    init(variables: [String: Any] = [:]) {
+    init(variables: [String: Any] = [:], chatCloseDelaySeconds: Int = 15) {
         graine = GraineInApp(
-            config: GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_test_rig", variables: variables),
+            config: GraineConfig(
+                baseUrl: "https://www.graine.ai", publishableKey: "pk_test_rig", variables: variables,
+                chatCloseDelaySeconds: chatCloseDelaySeconds
+            ),
             installIds: installs,
             defaults: sandbox.defaults,
             sessionCache: SessionCache(directory: sandbox.folder),

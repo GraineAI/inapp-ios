@@ -104,7 +104,7 @@ private func parse(_ text: String?) -> Any? {
         #expect(!facade.chat.disconnected && facade.chat.status == "connecting")
     }
 
-    @Test func aScreenOfYourOwnKeepsTheConversationFiveIdleMinutesAfterItGoes() throws {
+    @Test func aScreenOfYourOwnKeepsTheConversationFifteenSecondsAfterItGoes() throws {
         let rig = PlatformRig()
         defer { rig.sandbox.clean() }
         rig.session()
@@ -112,8 +112,8 @@ private func parse(_ text: String?) -> Any? {
         chat.shown(true)
         try #require(rig.network.socket).open()
         chat.shown(false)
-        rig.scheduler.advance(ChatWire.idleSeconds - 1)
-        #expect(chat.status == .online && chat.isOpen, "kept while idle under five minutes with no screen")
+        rig.scheduler.advance(Double(chat.closeDelaySeconds) - 1)
+        #expect(chat.status == .online && chat.isOpen, "kept for the close delay with no screen")
         rig.scheduler.advance(1.1)
         #expect(chat.status == .idle && !chat.isOpen, "closed after")
         chat.shown(true)

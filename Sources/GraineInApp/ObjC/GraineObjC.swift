@@ -653,13 +653,33 @@ public final class GraineObjC: NSObject {
         ), name: name)
     }
 
+    /**
+     * `configure…name:chatSize:` with how long the chat stays connected once
+     * no screen shows it, in seconds (`GraineConfig.chatCloseDelaySeconds`):
+     * 15 by default, 0 closes it as the last screen leaves, at most 300 — a
+     * value outside 0…300 is clamped. A second call for a name already
+     * configured returns that agent unchanged. Never nil.
+     */
+    @objc(configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:chatCloseDelaySeconds:)
+    public static func configure(
+        baseUrl: String, publishableKey: String, appVersion: String?, debug: Bool, endOnBackground: Bool,
+        captureTaps: Bool, transport: String?, variablesJSON: String?, name: String, chatSize: String?, chatCloseDelaySeconds: Int
+    ) -> GraineObjC? {
+        configure(config(
+            baseUrl: baseUrl, publishableKey: publishableKey, appVersion: appVersion, debug: debug,
+            endOnBackground: endOnBackground, captureTaps: captureTaps, transport: transport, variablesJSON: variablesJSON,
+            chatSize: chatSize, chatCloseDelaySeconds: chatCloseDelaySeconds
+        ), name: name)
+    }
+
     static func configure(_ config: GraineConfig, name: String = GraineAgentRegistry.defaultName) -> GraineObjC {
         facade(for: GraineInApp.configure(config, name: agentName(name)))
     }
 
     static func config(
         baseUrl: String, publishableKey: String, appVersion: String?, debug: Bool, endOnBackground: Bool,
-        captureTaps: Bool, transport: String?, variablesJSON: String?, chatSize: String? = nil
+        captureTaps: Bool, transport: String?, variablesJSON: String?, chatSize: String? = nil,
+        chatCloseDelaySeconds: Int = ChatWire.closeDelaySeconds
     ) -> GraineConfig {
         GraineConfig(
             baseUrl: baseUrl,
@@ -670,7 +690,8 @@ public final class GraineObjC: NSObject {
             endOnBackground: endOnBackground,
             debug: debug,
             captureTaps: captureTaps,
-            chatSize: chatSize.flatMap { GraineChatSize(rawValue: $0) }
+            chatSize: chatSize.flatMap { GraineChatSize(rawValue: $0) },
+            chatCloseDelaySeconds: chatCloseDelaySeconds
         )
     }
 

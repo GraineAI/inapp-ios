@@ -93,6 +93,22 @@ public struct GraineConfig {
      * to `chat.open(size:)` wins for that open.
      */
     public var chatSize: GraineChatSize?
+    /**
+     * How long the chat stays connected once no screen shows it, in seconds:
+     * it closes — as `chat.close()` closes it — this long after the later of
+     * the moment the last chat screen left and the last message either way,
+     * and a screen showing it again before then continues the conversation.
+     * 15 by default; 0 closes it as the last screen leaves; at most 300 (a
+     * value outside 0…300 is clamped). The chat starts with it
+     * (`GraineChat.closeDelaySeconds` changes it later). It was 5 minutes of
+     * quiet in 0.14.0–0.14.1.
+     */
+    public var chatCloseDelaySeconds: Int {
+        didSet {
+            let kept = ChatWire.closeDelay(chatCloseDelaySeconds)
+            if kept != chatCloseDelaySeconds { chatCloseDelaySeconds = kept }
+        }
+    }
 
     public init(
         baseUrl: String,
@@ -106,7 +122,8 @@ public struct GraineConfig {
         friction: GraineFrictionConfig? = nil,
         fonts: [String: String] = [:],
         captureTaps: Bool = true,
-        chatSize: GraineChatSize? = nil
+        chatSize: GraineChatSize? = nil,
+        chatCloseDelaySeconds: Int = 15
     ) {
         self.baseUrl = baseUrl
         self.publishableKey = publishableKey
@@ -120,6 +137,7 @@ public struct GraineConfig {
         self.fonts = fonts
         self.captureTaps = captureTaps
         self.chatSize = chatSize
+        self.chatCloseDelaySeconds = ChatWire.closeDelay(chatCloseDelaySeconds)
     }
 }
 
