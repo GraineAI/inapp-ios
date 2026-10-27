@@ -80,10 +80,18 @@ enum Booking {
         blocked(calls: calls, identified: identified) == nil
     }
 
-    /// Why the sheet cannot book now, as its line; nil when it can.
-    static func blocked(calls: GraineHostedCallsSettings?, identified: Bool) -> String? {
+    /**
+     * Why the sheet cannot book now, as its line; nil when it can.
+     * `identityKnown` false: whether the customer is identified cannot be told
+     * yet — identify() was given someone, and this launch's session, which
+     * names the trait, has not arrived — so the sheet never tells someone who
+     * may well be signed in to sign in: it is not available yet, and it is
+     * read again when the session arrives.
+     */
+    static func blocked(calls: GraineHostedCallsSettings?, identified: Bool, identityKnown: Bool = true) -> String? {
         let rules = GraineSchedulingRules.from(calls)
         guard let calls = calls, calls.ringsThisPlatform, calls.usersCanBook else { return errorLine(.schedulingOff, rules: rules) }
+        guard identified || identityKnown else { return errorLine(.schedulingOff, rules: rules) }
         guard identified else { return errorLine(.identityRequired, rules: rules) }
         return nil
     }
@@ -101,11 +109,15 @@ enum Booking {
      * Why this agent cannot be booked now, as a code — `available`'s rule,
      * first match wins: `not_loaded`, `rings_not_set_up`, `scheduling_off`,
      * `not_identified`; the same words on every SDK. Nil when it can.
+     * `identityKnown` false — identify() was given someone and this launch's
+     * session, which names the trait that identifies them, has not arrived —
+     * is still `not_loaded`, never a `not_identified` that may be wrong.
      */
-    static func unavailableReason(calls: GraineHostedCallsSettings?, loaded: Bool, identified: Bool) -> String? {
+    static func unavailableReason(calls: GraineHostedCallsSettings?, loaded: Bool, identified: Bool, identityKnown: Bool = true) -> String? {
         guard loaded else { return notLoaded }
         guard let calls = calls, calls.ringsThisPlatform else { return ringsNotSetUp }
         guard calls.usersCanBook else { return schedulingOff }
+        guard identified || identityKnown else { return notLoaded }
         guard identified else { return notIdentified }
         return nil
     }

@@ -95,15 +95,21 @@ final class CallConversation {
         let callVariables = setup.callVariables
         let variables = setup.variables
         let identity = setup.identity
-        return GraineRtcRequest(
+        let security = setup.security
+        var request = GraineRtcRequest(
             baseUrl: setup.baseUrl,
             controlHost: controlHost(session),
             mintBody: { sessionId in
-                RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: callVariables, variables: variables, identity: identity)
+                RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: callVariables, variables: variables,
+                                 identity: identity, credentials: security)
             },
             sdkVersion: GraineVersion.name,
-            debug: debug
+            debug: debug,
+            // The mint carries the agent's server token; checked only here, never once the call is up.
+            clientTokens: setup.tokens.map { GraineRtcTokens($0) }
         )
+        request.guarded(by: security, identityValue: identity?.value)
+        return request
     }
 
     /// The control channel's host: the agent's socket host, without a trailing slash.
@@ -365,9 +371,11 @@ final class CallConversation {
             startSocket(CallTransportReport(transport: .websocket, requested: .webrtc, reason: reason.rawValue))
 
         case let .refused(code, message):
-            // The same failure, with the same words, the voice socket's close would bring a second later.
-            GraineLog.warning("The call was refused (\(code)): \(message)")
-            finish(.couldNotOpen(message.isEmpty ? code : "\(code): \(message)"))
+            // The same failure, with the same words, the voice socket's close would bring a second later. Refused for the
+            // server token or the key without a sentence: the SDK's own, after the code.
+            let words = message.isEmpty && ClientTokenRules.refusalCodes.contains(code) ? ClientTokenRules.sentence(code) : message
+            GraineLog.warning("The call was refused (\(code)): \(words)")
+            finish(.couldNotOpen(words.isEmpty ? code : "\(code): \(words)"))
 
         case .ended(let ending):
             switch ending {
@@ -376,6 +384,13 @@ final class CallConversation {
             case .dropped(let detail):
                 finish(rtcConnected ? .dropped(detail) : .couldNotOpen(detail))
             }
+
+        case .playoutFailed(let detail):
+            // Audio arrives and none of it reaches the speaker, even started again: nobody can hear this call. GraineCalls
+            // ends it as its audio watch ends one — the cause `audio_watch`, said on the channel before the hang-up.
+            guard rtcConnected else { return }
+            GraineLog.warning("Calls: \(CallAudioWatch.failure) \(detail): the call ends (audio_watch).")
+            onEvent(.audioFailed(CallAudioWatch.failure))
 
         case .log(let line):
             GraineLog.trace(line)
@@ -397,6 +412,8 @@ final class CallConversation {
                         GraineLog.info("Calls: the call's audio started directly (WebRTC): the call is dialled.")
                         self.audioActive = true
                         self.rtcAudioWatch?.audioStarted()
+                        // This call's audio runs, though CallKit never said so: the call is connected once its media is up.
+                        self.onEvent(.audioStartedDirectly)
                     } else {
                         GraineLog.warning("Calls: the call's audio could not be started directly (WebRTC) — the audio session's error is in the log above.")
                         self.rtcAudioWatch?.retryFailed()

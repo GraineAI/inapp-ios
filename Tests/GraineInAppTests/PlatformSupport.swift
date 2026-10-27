@@ -21,6 +21,9 @@ final class RoutedNetwork: CallNetwork {
     /// path → response headers (names lower-cased), for `Retry-After`.
     var headers: [String: [String: String]] = [:]
 
+    /// path → an answer made from the body as sent, in place of `replies` (a route whose answer changes per request).
+    var respond: [String: (Data) -> (Int, Data?)] = [:]
+
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void) {
         postWithHeaders(url, body: body) { status, data, _ in completion(status, data) }
     }
@@ -28,8 +31,12 @@ final class RoutedNetwork: CallNetwork {
     func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
         let raw = String(decoding: body, as: UTF8.self)
         posts.append((url.path, JSON.object(from: body) ?? [:], raw))
+        let made = respond[url.path]?(body)
         let reply = replies[url.path] ?? (url.path == "/api/embed/ticket" ? ticket : (200, "{}"))
-        let answer = { [headers] in completion(reply.0, reply.1.map { Data($0.utf8) }, headers[url.path] ?? [:]) }
+        let answer = { [headers] in
+            if let made = made { return completion(made.0, made.1, headers[url.path] ?? [:]) }
+            completion(reply.0, reply.1.map { Data($0.utf8) }, headers[url.path] ?? [:])
+        }
         if holdTickets && url.path == "/api/embed/ticket" {
             heldTickets.append(answer)
         } else if holding.contains(url.path) {

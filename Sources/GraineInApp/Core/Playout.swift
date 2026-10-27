@@ -15,6 +15,10 @@ import Foundation
  *     turn-taking: each turn is acknowledged later than the last until the
  *     agent simply goes quiet.
  *   - `clear()` drops everything queued and unplayed, at once.
+ *   - `takeUnplayed(at:)` hands back everything not yet heard, in order — the
+ *     chunk playing then from the sample it had reached — for a player that is
+ *     going away while the call goes on (a new route rebuilds the engine): it
+ *     plays again on the new one, never cut, never repeated.
  *
  * What has been handed on is accounted on the clock it was handed on: it
  * finishes at `playEnd`, and buffered = what is still held + what is left of
@@ -44,6 +48,10 @@ struct PlayoutPolicy {
     /// A run is going: new audio is handed straight on.
     private(set) var running = false
     private(set) var lastArrival: Double?
+    /// What was handed to the player, each with when it starts on the clock — for `takeUnplayed`. What played out
+    /// more than `handedMemorySeconds` ago is forgotten, so this holds about what is still to play.
+    private(set) var handed: [(chunk: Chunk, startsAt: Double)] = []
+    static let handedMemorySeconds = 1.0
 
     /**
      * Agent audio arrived. Returns what to hand the player now (possibly
@@ -53,7 +61,9 @@ struct PlayoutPolicy {
         settle(now: now)
         lastArrival = now
         if running {
-            playEnd = max(playEnd, now) + chunk.seconds
+            let start = max(playEnd, now)
+            playEnd = start + chunk.seconds
+            handed.append((chunk, start))
             return [chunk]
         }
         pending.append(chunk)
@@ -88,17 +98,45 @@ struct PlayoutPolicy {
         playEnd = min(playEnd, now)
         running = false
         lastArrival = nil
+        handed = []
+    }
+
+    /**
+     * Everything not yet heard at `at`, in order: what was handed to the player
+     * and had not played by then — the chunk playing at `at` from the sample it
+     * had reached — then what was still held back. The policy is emptied as
+     * `clear` empties it. For a player going away while the call goes on (a
+     * route change rebuilds the engine): pushed again on the new one, the
+     * agent's words are neither cut nor repeated.
+     */
+    mutating func takeUnplayed(at: Double) -> [Chunk] {
+        var out: [Chunk] = []
+        for (chunk, start) in handed {
+            let played = start >= at ? 0 : Int(((at - start) * Double(chunk.sampleRate)).rounded(.down))
+            if played <= 0 {
+                out.append(chunk)
+            } else if played < chunk.samples.count {
+                out.append(Chunk(samples: Array(chunk.samples[played...]), sampleRate: chunk.sampleRate))
+            }
+        }
+        out += pending
+        clear(now: at)
+        return out
     }
 
     /// A run that has played out is over; the next audio refills first.
     private mutating func settle(now: Double) {
         if running && playEnd <= now { running = false }
+        handed.removeAll { $0.startsAt + $0.chunk.seconds + PlayoutPolicy.handedMemorySeconds <= now }
     }
 
     private mutating func startRun(now: Double) -> [Chunk] {
         running = true
         var end = max(playEnd, now)
-        for chunk in pending { end += chunk.seconds }
+        for chunk in pending {
+            handed.append((chunk, end))
+            end += chunk.seconds
+        }
         playEnd = end
         let out = pending
         pending = []

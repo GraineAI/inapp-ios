@@ -126,6 +126,7 @@ public final class GraineObjCChat: NSObject {
             chat.$sessionId.sink { [weak self] _ in self?.changed() },
             chat.$sessions.sink { [weak self] _ in self?.changed() },
             chat.$pastSessions.sink { [weak self] _ in self?.changed() },
+            chat.$error.sink { [weak self] _ in self?.changed() },
             // A rating given (in the window or through `rate`), once: its observers hear it.
             chat.$rating.dropFirst().compactMap { $0 }.sink { [weak self] rating in
                 self?.rated.notify { $0(GraineObjCChatRating(rating)) }
@@ -169,6 +170,15 @@ public final class GraineObjCChat: NSObject {
 
     /// The chat was connected since the user came into it: `reconnecting` now is a dropped connection (`GraineChat.wasOnline`).
     @objc public var wasOnline: Bool { objcOnMainSync { self.graine.chat.wasOnline } }
+
+    /**
+     * Why the chat could not connect, when Graine refused it for the server
+     * token or the publishable key (`GraineChat.error`): `userInfo[@"code"]`
+     * `token_required`, `token_invalid`, `token_expired`, `token_scope` or
+     * `key_revoked`, `userInfo[@"reason"]` which part failed; nil otherwise.
+     * Final for that try: nothing reconnects by itself. New in 0.14.4.
+     */
+    @objc public var error: NSError? { objcOnMainSync { self.graine.chat.error.map { ObjCBridge.nsError($0) } } }
 
     /**
      * The ids of the turns a "Disconnected · new conversation" row goes before,
@@ -277,8 +287,8 @@ public final class GraineObjCChat: NSObject {
      * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}], quickReplies: [{label, text}],
      * ended, rating: {value, scale, style} | null, pin: {title, subtitle, imageUrl, badge} | null, disconnected,
      * wasOnline, newConversationBefore: [turn id], sessionId, sessions: [{id, startedAt, endedAt, channel, turns,
-     * current}]}` — `status` as the property says it, `disconnected` included; `session` and `sessionId` null when
-     * there is none.
+     * current}], error: {code, message, reason} | null}` — `status` as the property says it, `disconnected` included;
+     * `session` and `sessionId` null when there is none; `error` the refusal for the server token or the key (`error`).
      */
     @objc public var snapshotJSON: String {
         objcOnMainSync {
@@ -287,6 +297,9 @@ public final class GraineObjCChat: NSObject {
             return ObjCBridge.text([
                 "disconnected": chat.disconnected,
                 "wasOnline": chat.wasOnline,
+                "error": chat.error.map { e -> Any in
+                    ["code": e.code.wire, "message": e.message, "reason": e.reason.map { $0 as Any } ?? NSNull()] as [String: Any]
+                } ?? NSNull(),
                 "newConversationBefore": chat.newConversationBefore,
                 "sessionId": chat.sessionId.map { $0 as Any } ?? NSNull(),
                 "sessions": chat.sessions.map { ObjCBridge.session($0) },

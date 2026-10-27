@@ -155,6 +155,35 @@ enum IdentityRules {
         return domain.indices.contains { domain[$0] == "." && $0 > 0 && $0 < domain.count - 1 }
     }
 
+    /**
+     * The sentence for a request that needs the customer and has none, naming
+     * the trait this agent identifies customers by — the usual mistake is
+     * identifying them by another one (`user_id` sent, `patient_id` expected).
+     * `field` is that trait (nil before the session said); `identified`
+     * whether identify() was given traits at all. The same words as Android's.
+     */
+    static func missingIdentityMessage(field: String?, identified: Bool) -> String {
+        guard let field = field else { return "Nobody is identified: call identify() with the customer's identifier first." }
+        guard identified else { return "Nobody is identified: call identify() with the customer's \"\(field)\" first." }
+        return "identify() was given no usable \"\(field)\" — the trait this agent identifies customers by "
+            + "(Who is the user? in the agent's memory settings). Until it is, conversations are anonymous and nothing is remembered."
+    }
+
+    /**
+     * Whether two identity values name one customer as Graine keys them: the
+     * same normalised value under `field` (identity-vectors.json) —
+     * "Asha@Example.com" and "asha@example.com", "+91 98765 43210" and
+     * "9876543210". Nobody is nobody's same customer; with no field yet, only
+     * the same text. Every "is this someone else?" the SDK decides goes
+     * through it: a sign-out, the chat starting over, a memory choice, a
+     * request that waited for the session.
+     */
+    static func sameCustomer(field: String?, _ a: String?, _ b: String?) -> Bool {
+        if a == b { return true }
+        guard let field = field, let a = a, let b = b, let key = normalisedValue(field: field, value: a) else { return false }
+        return key == normalisedValue(field: field, value: b)
+    }
+
     /// The identity value to send for `traits` under `field`: the trait's raw text, when it is an identity at all.
     static func value(in traits: [String: Any?]?, field: String) -> String? {
         guard let traits = traits else { return nil }
@@ -182,10 +211,12 @@ protocol InstallIdStore: AnyObject {
  */
 final class KeychainInstallIdStore: InstallIdStore {
     private let service: String
-    private let account = "install-id"
+    private let account: String
 
-    init(service: String = "ai.graine.inapp") {
+    /// `account`: `install-id` for the install's id; `debug-token` for its debug token (§3.6), kept beside it.
+    init(service: String = "ai.graine.inapp", account: String = "install-id") {
         self.service = service
+        self.account = account
     }
 
     func read() -> String? {
@@ -336,10 +367,23 @@ final class IdentityState {
     private var field: String?
     /// The app's latest explicit choice, before the field is known to file it under.
     private var unfiledMemory: Bool?
+    /// The traits `unfiledMemory` was chosen for: whom they name can be read only once the session names the field.
+    private var unfiledFor: [String: Any?]?
     private var memoryOverride: Bool?
     private var resolved: String?
     /// Values that stopped being the customer's and still need their sign-out sent.
     private var signedOut: [String] = []
+    /**
+     * THE IDENTITY TOKEN the app gave for the current identity (APP-IDENTITY.md
+     * §1.3): in memory only, never logged, sent only inside `identity` with the
+     * value it was given with. Another identity — or none — drops it, and the
+     * user pass with it, in the same step that changes the identity.
+     */
+    private var token: String?
+    /// The user pass Graine issued for exactly `value`, until `expiresAt` (§3.3): memory only.
+    private var userPass: (value: String, pass: String, expiresAt: Date)?
+    /// Moves on whenever the identity or its token changes: a refreshed token asked for before is not applied after.
+    private var generationValue = 0
 
     init(choices: MemoryChoices?) {
         self.choices = choices
@@ -349,12 +393,19 @@ final class IdentityState {
     func setField(_ next: String) {
         lock.lock()
         defer { lock.unlock() }
+        let before = resolved
         field = next
         resolveLocked()
-        if let memory = unfiledMemory, let value = resolved {
+        // Filed only for the customer it was chosen for: one who signed out before the session, and the next
+        // customer on the phone, never gives that customer their choice.
+        if let memory = unfiledMemory, let value = resolved,
+           IdentityRules.sameCustomer(field: next, IdentityRules.value(in: unfiledFor, field: next), value) {
             choices?.remember(memory, field: next, value: value)
         }
         unfiledMemory = nil
+        unfiledFor = nil
+        // Another trait names someone else: the proof was for who the last one named.
+        if let was = before, was != resolved { dropProofLocked() }
     }
 
     var knownField: String? {
@@ -363,14 +414,181 @@ final class IdentityState {
         return field
     }
 
-    /// `identify(traits, memory:)`. nil traits sign out.
-    func identify(_ next: [String: Any?]?, memory: Bool?) {
+    /// Whether `a` and `b` name one customer as Graine keys them, under the trait the session named (`IdentityRules.sameCustomer`).
+    func sameCustomer(_ a: String?, _ b: String?) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        return IdentityRules.sameCustomer(field: field, a, b)
+    }
+
+    /// The traits identify() was last given, as given: what a request keeps of who asked for it.
+    var currentTraits: [String: Any?]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return traits
+    }
+
+    /// The value `asked` holds for the trait the session named — who a request made before the session was asking for. Nil before the session, or when they hold none.
+    func value(of asked: [String: Any?]?) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let f = field else { return nil }
+        return IdentityRules.value(in: asked, field: f)
+    }
+
+    /// identify() was given someone — traits, whether or not they carry the agent's trait; false after a sign-out.
+    var hasTraits: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return traits != nil
+    }
+
+    /// The session named the trait, the app identified someone, and the traits carry no usable one.
+    var traitsLackField: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return field != nil && traits != nil && resolved == nil
+    }
+
+    /// `identity_required`'s sentence, naming the trait this agent identifies customers by.
+    var missingIdentityMessage: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return IdentityRules.missingIdentityMessage(field: field, identified: traits != nil)
+    }
+
+    /**
+     * `identify(traits, memory:, identityToken:)`. nil traits sign out. The
+     * proof follows the identity in the same step: signed out, or someone else
+     * (another value of the trait that names the customer), the token and the
+     * user pass go; a token given is kept for these traits; the same identity
+     * without one keeps the token it has. Before the session names the trait,
+     * who the traits name cannot be told — then a token outlives only the very
+     * same traits (the safe reading: never sent for anyone else).
+     */
+    func identify(_ next: [String: Any?]?, memory: Bool?, token change: TokenChange = .keep) {
+        lock.lock()
+        defer { lock.unlock() }
+        let previousTraits = traits
+        let previousValue = resolved
         traits = next
         memoryOverride = nil
         resolveLocked()
         if let memory = memory { fileMemoryLocked(memory) }
+        let someoneElse: Bool
+        if next == nil {
+            someoneElse = true
+        } else if field != nil {
+            someoneElse = previousValue != resolved
+        } else {
+            someoneElse = !IdentityState.sameTraits(previousTraits, next)
+        }
+        if someoneElse { dropProofLocked() }
+        guard next != nil else { return }
+        switch change {
+        case .keep:
+            break
+        case .set(let given):
+            token = given
+            generationValue += 1
+        case .clear:
+            token = nil
+            generationValue += 1
+        }
+    }
+
+    /// What `identify` does to the token: keeps it (none given), sets it, or clears it (one given that cannot be sent).
+    enum TokenChange: Equatable {
+        case keep
+        case set(String)
+        case clear
+    }
+
+    /// `setIdentityToken`: the token for the current identity, which does not change; nil clears it. Nobody identified: nothing to attach it to.
+    @discardableResult
+    func setToken(_ next: String?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard traits != nil || next == nil else { return false }
+        token = next
+        generationValue += 1
+        return true
+    }
+
+    /// A token the refresher fetched under `generation`: kept only while the identity is still the one it was asked for. True when it changed the token.
+    func applyRefreshedToken(_ next: String, generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == generationValue, traits != nil else { return false }
+        let changed = token != next
+        token = next
+        return changed
+    }
+
+    /// Which identity (and token) a refresh is asked for.
+    var generation: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationValue
+    }
+
+    /// The token held for the identity a request names now — nil while no value is known (no conversation starts then).
+    func currentToken() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return resolved == nil ? nil : token
+    }
+
+    /// The token and the unexpired user pass for exactly `value`; nothing for any other value than the current identity's.
+    func proof(for value: String, now: Date = Date()) -> IdentityProof {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let current = resolved, current == value else { return .none }
+        var out = IdentityProof(token: token, pass: nil)
+        if let kept = userPass, kept.value == value, kept.expiresAt > now { out.pass = kept.pass }
+        return out
+    }
+
+    /// Keep the user pass an answer brought — only while `value` is still who the customer is.
+    func keepUserPass(_ pass: String, expiresAt: Date, for value: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard resolved == value else { return }
+        userPass = (value, pass, expiresAt)
+    }
+
+    /// Who the customer is changed: neither their token nor their pass may go with anyone else.
+    private func dropProofLocked() {
+        token = nil
+        userPass = nil
+        generationValue += 1
+    }
+
+    /// The same traits, key for key and value for value (as JSON reads them).
+    static func sameTraits(_ a: [String: Any?]?, _ b: [String: Any?]?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return JSON.canonical(x.mapValues { $0 as Any }) == JSON.canonical(y.mapValues { $0 as Any })
+        default: return false
+        }
+    }
+
+    /**
+     * A choice the app made for the customer `madeFor` names — heard by another
+     * agent before this one was made: taken on only for them. Before the
+     * session names the field it waits, unfiled, as identify()'s does.
+     */
+    func adoptMemory(_ memory: Bool, madeFor: [String: Any?]?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let f = field else {
+            memoryOverride = memory
+            unfiledMemory = memory
+            unfiledFor = madeFor
+            return
+        }
+        guard let value = resolved, IdentityRules.sameCustomer(field: f, IdentityRules.value(in: madeFor, field: f), value) else { return }
+        fileMemoryLocked(memory)
     }
 
     /// `setMemory(enabled)`: the current customer's choice, kept for them.
@@ -401,6 +619,7 @@ final class IdentityState {
             choices?.remember(memory, field: f, value: value)
         } else if field == nil {
             unfiledMemory = memory
+            unfiledFor = traits
         }
     }
 
@@ -413,11 +632,13 @@ final class IdentityState {
     private func resolveLocked() {
         guard let f = field else { return }
         let next = IdentityRules.value(in: traits, field: f)
-        if let previous = resolved, previous != next, !signedOut.contains(previous) {
+        // Someone else as Graine keys customers: the same customer written another way is never signed out.
+        let same = { (a: String?, b: String?) in IdentityRules.sameCustomer(field: f, a, b) }
+        if let previous = resolved, !same(previous, next), !signedOut.contains(where: { same($0, previous) }) {
             signedOut.append(previous)
         }
-        if let next = next { signedOut.removeAll { $0 == next } }
-        if resolved != next {
+        if let next = next { signedOut.removeAll { same($0, next) } }
+        if !same(resolved, next) {
             // Another customer: their own kept choice applies, not the last customer's.
             memoryOverride = nil
         }

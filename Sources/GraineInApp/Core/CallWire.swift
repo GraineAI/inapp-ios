@@ -107,15 +107,27 @@ enum CallWire {
         publishableKey: String,
         metadata: [(String, String)]?,
         mode: String = "voice",
-        identity: IdentityWire.Fields? = nil
+        identity: IdentityWire.Fields? = nil,
+        credentials: EmbedCredentials? = nil
     ) -> Data {
+        let fields = ticketFields(publishableKey: publishableKey, metadata: metadata, mode: mode, identity: identity)
+        return Data(WireJSON.object(EmbedSeal.seal(fields, credentials)).text.utf8)
+    }
+
+    /// The ticket request's fields, before they are sealed (the app's declaration, the identity's proof — APP-IDENTITY.md §1).
+    static func ticketFields(
+        publishableKey: String,
+        metadata: [(String, String)]?,
+        mode: String = "voice",
+        identity: IdentityWire.Fields? = nil
+    ) -> [(String, WireJSON)] {
         var fields: [(String, WireJSON)] = [
             ("publishableKey", .string(publishableKey)),
             ("mode", .string(mode)),
         ]
         if let metadata = metadata { fields.append(("metadata", .object(metadata.map { ($0.0, .string($0.1)) }))) }
         if let identity = identity { fields += IdentityWire.pairs(identity) }
-        return Data(WireJSON.object(fields).text.utf8)
+        return fields
     }
 
     // MARK: - URLs

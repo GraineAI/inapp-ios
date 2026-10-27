@@ -224,8 +224,12 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var routeObserver: NSObjectProtocol?
     /// CallKit activated this call's audio session (`didActivate`), and has not taken it back.
     private var audioActive = false
-    /// This call's audio runs: CallKit activated it, the SDK started it itself when CallKit never did, or WebRTC carries it.
+    /// This call's audio runs: CallKit activated it, or the SDK started it itself when CallKit never did (or took it back).
     private var audioRunning = false
+    /// This call's WebRTC leg started its audio itself before its dial, CallKit having not activated it (CallConversation).
+    private var audioStartedDirectly = false
+    /// The live call's audio, taken back by CallKit: started again directly unless CallKit gives it back first.
+    private var deactivationItem: DispatchWorkItem?
     /// The SDK activated the audio session itself (CallKit never did): it lets it go once the call is over.
     private var activatedDirectly = false
     /// The customer (or the app) chose the speaker or the earpiece with `setSpeaker` on this call; otherwise it is the default.
@@ -564,6 +568,10 @@ public final class GraineCalls: NSObject, ObservableObject {
             provider.configuration = providerConfiguration(for: ringer)
             transition(.incoming(id: call.callId))
             armRingTimeout(uuid, seconds: ringTimeout(hosted: call.hosted, agent: ringer))
+            // Before the person answers (APP-IDENTITY.md §6): the app's proof renewed, the identity token refreshed.
+            ringer.ringArrived()
+            // A fresh server token, in the background, before anyone answers (CLIENT-TOKENS.md §2.3): the answer finds one.
+            ringer.clientTokens.ring()
             prepareRing(call, agent: ringer)
         }
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(name: name)) { [weak self] error in
@@ -860,7 +868,11 @@ public final class GraineCalls: NSObject, ObservableObject {
             callVariables: CallEngine.variables(sdk: [:], whoCalled: whoCalled, reason: reason, own: own),
             // Who the customer is, the install, the memory choice, the time zone — and this call's id, so Graine
             // joins the conversation to the call it rang (or the app placed).
-            identity: graine.identityFields(callId: callId)
+            identity: graine.identityFields(callId: callId),
+            // The app's declaration and the identity's proof on the ticket and the call session (APP-IDENTITY.md).
+            security: graine.security,
+            // The ticket or the mint carries the agent's server token; checked only here, never once the call is up.
+            tokens: graine.clientTokens
         )
         let engine = CallConversation(
             setup: setup,
@@ -894,9 +906,9 @@ public final class GraineCalls: NSObject, ObservableObject {
             guard machine.state == .connecting else { return }
             if graine.config.debug { GraineLog.trace("call open via \(transport.rawValue)") }
             if direction == .outgoing { provider?.reportOutgoingCall(with: uuid, connectedAt: Date()) }
-            // Connected once its audio runs too: at once when CallKit has activated it, else the watch waits. On WebRTC the
-            // media path comes up only once the call's audio runs (CallKit's, or the leg's own direct start): it runs now.
-            let running = CallAudioWatch.runningAtOpen(callKitActivated: audioActive, transport: transport)
+            // Connected once THIS call's audio runs too: at once when CallKit activated it (and has not taken it back) or
+            // the leg started it directly, else the watch waits and rescues it — on WebRTC as on the socket.
+            let running = CallAudioWatch.runningAtOpen(callKitActivated: audioActive, startedDirectly: audioStartedDirectly)
             if running && !audioRunning { routeAudio() }
             audioWatch.opened(audioRunning: running)
         case .speaking(let value):
@@ -918,6 +930,12 @@ public final class GraineCalls: NSObject, ObservableObject {
         case let .audio(loss, jitterAvg, jitterMax, rtt):
             guard machine.state.isLive else { return }
             if connectionFold.audio(lossPct: loss, jitterAvgMs: jitterAvg, jitterMaxMs: jitterMax, rttAvgMs: rtt) { connection = connectionFold.report }
+        case .audioStartedDirectly:
+            // The leg's own rescue before its dial: CallKit never activated the audio, and it runs all the same.
+            audioStartedDirectly = true
+        case .audioFailed(let message):
+            // Its playout watch: audio arrives and none of it plays, even started again. Its end first, then the hang-up.
+            audioFailed(message, uuid: uuid)
         case .ended(let ending):
             switch ending {
             case .local:
@@ -1029,6 +1047,42 @@ public final class GraineCalls: NSObject, ObservableObject {
         }
     }
 
+    /// How long a live call waits for CallKit to give its audio back, once taken, before starting it again itself.
+    static let deactivationRescueSeconds = 0.5
+
+    /**
+     * CallKit took a live call's audio back (`didDeactivate`): unless it
+     * activates it again within half a second, the audio is started again
+     * directly, as the audio watch's rescue starts it — once per deactivation,
+     * and never for a call that has ended. A call whose audio comes back this
+     * way that was still waiting for it is connected.
+     */
+    private func armDeactivationRescue(_ uuid: UUID) {
+        deactivationItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.deactivationItem = nil
+            guard self.callUUID == uuid, self.machine.state.isLive, !self.audioActive, let engine = self.engine else { return }
+            GraineLog.warning("Calls: CallKit took the call's audio back while the call went on and has not given it back; starting it again directly.")
+            let refused = self.activateAudioDirectly()
+            if let refused = refused { GraineLog.warning("Calls: the audio session would not activate: \(refused)") }
+            engine.startAudio { [weak self] started in
+                DispatchQueue.main.async {
+                    guard let self = self, self.callUUID == uuid, self.machine.state.isLive else { return }
+                    if started {
+                        GraineLog.info("Calls: the call's audio started again directly.")
+                        self.routeAudio()
+                        self.audioWatch.audioStarted()
+                    } else {
+                        GraineLog.warning("Calls: the call's audio could not start again directly\(refused.map { " (\($0))" } ?? "").")
+                    }
+                }
+            }
+        }
+        deactivationItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + GraineCalls.deactivationRescueSeconds, execute: item)
+    }
+
     private func applyMuted(_ value: Bool) {
         muted = value
         engine?.setMuted(value)
@@ -1102,6 +1156,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         ringItem = nil
         answerMic.cancel()
         audioWatch.cancel()
+        deactivationItem?.cancel()
+        deactivationItem = nil
         // Who or what ended it, on the channel still up, before the hang-up closes it.
         if let cause = endCause { engine?.sendEnded(cause) }
         engine?.hangUp()
@@ -1160,6 +1216,9 @@ public final class GraineCalls: NSObject, ObservableObject {
     private func freshCallAudio() {
         audioActive = false
         audioRunning = false
+        audioStartedDirectly = false
+        deactivationItem?.cancel()
+        deactivationItem = nil
         routeSettlesAt = nil
         if endCause != nil { endCause = nil }
         if !speakerChosen, speakerOn != speakerByDefault { speakerOn = speakerByDefault }
@@ -1306,12 +1365,16 @@ public final class GraineCalls: NSObject, ObservableObject {
         guard audioRunning else { return }
         let session = AVAudioSession.sharedInstance()
         let outputs = session.currentRoute.outputs.map { $0.portType.rawValue }
+        // A connected Bluetooth headset is an available input before its link is the call's output.
+        let inputs = (session.availableInputs ?? []).map { $0.portType.rawValue }
         do {
-            switch CallAudioRoute.choice(speaker: speakerOn, chosen: speakerChosen, outputs: outputs) {
+            switch CallAudioRoute.choice(speaker: speakerOn, chosen: speakerChosen, outputs: outputs, inputs: inputs) {
             case .speaker: try session.overrideOutputAudioPort(.speaker)
             case .receiver: try session.overrideOutputAudioPort(.none)
             case .leave:
-                // The customer's own headset, car or AirPlay carries the call: not the loudspeaker, whatever the default.
+                // The customer's own headset, car kit or AirPlay carries the call — or is connecting to: not the loudspeaker,
+                // whatever the default, and a default loudspeaker set a moment ago is lifted so the device takes the call.
+                if outputs.contains("Speaker") { try session.overrideOutputAudioPort(.none) }
                 if speakerOn { speakerOn = false }
             }
         } catch {
@@ -1571,6 +1634,8 @@ extension GraineCalls: CXProviderDelegate {
         engine?.hangUp()
         audioActive = false
         audioRunning = false
+        deactivationItem?.cancel()
+        deactivationItem = nil
         GraineRtcRegistry.module?.audioSessionDeactivated()
     }
 
@@ -1634,6 +1699,9 @@ extension GraineCalls: CXProviderDelegate {
         // Always in the log: a call whose audio CallKit never activates is otherwise silent with nothing to show why.
         GraineLog.info("Calls: CallKit activated the call's audio (state \(machine.state)).")
         audioActive = true
+        // Given back after taking it: nothing to rescue.
+        deactivationItem?.cancel()
+        deactivationItem = nil
         engine?.startAudio()
         // An open conversation that was waiting for its audio is connected now.
         audioWatch.audioStarted()
@@ -1647,6 +1715,9 @@ extension GraineCalls: CXProviderDelegate {
         if !activatedDirectly { audioRunning = false }
         if let engine = engine {
             engine.stopAudio()
+            // While the call goes on, an interruption — not its end. And CallKit's activations are not per call: the call
+            // before's late deactivation can land on this one, its media still flowing to a speaker nobody restarts.
+            if machine.state.isLive, let uuid = callUUID { armDeactivationRescue(uuid) }
         } else {
             // The call it was for is over, and nothing told WebRTC: its view of the session must follow, or the next
             // call's start believes active a session that is not.

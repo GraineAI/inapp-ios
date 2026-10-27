@@ -596,7 +596,7 @@ import Testing
         let socket = rig.open()
         #expect(rig.audio.starts == 1)
         rig.engine.stopAudio()
-        #expect(rig.audio.stopped)
+        #expect(rig.audio.suspends == 1)
         rig.audio.speak(amp: 9_000)                  // a frame from a stopped microphone goes nowhere
         #expect(socket.sentTypes.isEmpty)
         rig.engine.startAudio()
@@ -605,6 +605,21 @@ import Testing
         rig.audio.speak(amp: 120)
         #expect(socket.sentTypes == ["audio"])
         #expect(rig.endings.isEmpty, "the call goes on")
+    }
+
+    /// A late CallKit deactivation (the call before's, on a redial within a second) lands as the greeting plays: what
+    /// was not heard is kept and plays again from where it stopped once the audio is back — never cut, never dropped.
+    @Test func theSystemTakingTheAudioBackSuspendsItKeepingWhatWasNotHeardAndOnlyTheEndStopsIt() {
+        let rig = EngineRig()
+        _ = rig.open()
+        rig.engine.stopAudio()
+        #expect(rig.audio.suspends == 1 && !rig.audio.stopped, "the deactivation suspends: what was not heard is kept")
+        rig.engine.stopAudio()
+        #expect(rig.audio.suspends == 1, "once per deactivation")
+        rig.engine.startAudio()
+        #expect(rig.audio.starts == 2, "given back: it plays on, from where it stopped")
+        rig.engine.hangUp()
+        #expect(rig.audio.stopped, "only the call's end lets go of what was queued")
     }
 
     @Test func pendingAcksDieWithTheCall() {

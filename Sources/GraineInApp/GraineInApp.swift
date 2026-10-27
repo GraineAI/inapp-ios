@@ -109,6 +109,33 @@ public struct GraineConfig {
             if kept != chatCloseDelaySeconds { chatCloseDelaySeconds = kept }
         }
     }
+    /**
+     * Development mode, for an agent that requires a verified app: `.automatic`
+     * (the default) — a debug build (`DEBUG`, or the Simulator) sends this
+     * install's debug token on every request instead of proving itself with
+     * App Attest, and a release build never makes, logs or sends one;
+     * `.always` — a release build sends it too (an internal QA build);
+     * `.never` — a debug build proves itself like a release one.
+     * `GraineInApp.debugTokenMode` changes it later.
+     */
+    public var debugTokenMode: GraineDebugTokenMode
+    /**
+     * Server tokens (optional — the strongest mode): returns a fresh token from
+     * YOUR server, which mints it with `POST /v2/client-tokens` and your secret
+     * API key for the signed-in user, or nil when none can be had right now.
+     * Asked at start, again shortly before the token expires (in the
+     * background, with jitter, and with backoff after a failure), when a call
+     * rings and when Graine refuses a token — one question at a time, never on
+     * the main thread; every request to Graine then carries the newest one.
+     * Throwing, or not answering within 15 seconds, counts as nil. A token that
+     * expires never ends a live chat or call — only new conversations wait (at
+     * most 10 seconds) for a fresh one. Needed once the agent's "Require server
+     * tokens" is enforced; nil, the default, sends none and changes nothing.
+     * New in 0.14.4.
+     */
+    public var tokenProvider: (@Sendable () async throws -> String?)?
+    /// The Objective-C facade's provider — a block that answers through `done` — in place of `tokenProvider`.
+    var tokenFetch: ClientTokens.Fetch?
 
     public init(
         baseUrl: String,
@@ -123,7 +150,9 @@ public struct GraineConfig {
         fonts: [String: String] = [:],
         captureTaps: Bool = true,
         chatSize: GraineChatSize? = nil,
-        chatCloseDelaySeconds: Int = 15
+        chatCloseDelaySeconds: Int = 15,
+        debugTokenMode: GraineDebugTokenMode = .automatic,
+        tokenProvider: (@Sendable () async throws -> String?)? = nil
     ) {
         self.baseUrl = baseUrl
         self.publishableKey = publishableKey
@@ -138,6 +167,13 @@ public struct GraineConfig {
         self.captureTaps = captureTaps
         self.chatSize = chatSize
         self.chatCloseDelaySeconds = ChatWire.closeDelay(chatCloseDelaySeconds)
+        self.debugTokenMode = debugTokenMode
+        self.tokenProvider = tokenProvider
+    }
+
+    /// How the token manager asks for tokens: the facade's block, else `tokenProvider`; nil for neither.
+    var clientTokenFetch: ClientTokens.Fetch? {
+        tokenFetch ?? tokenProvider.map { ClientTokens.fetch(async: $0) }
     }
 }
 
@@ -237,7 +273,7 @@ public struct GraineActionCheck {
  * thread; everything that touches the network does not. The methods here may
  * be called from any thread.
  */
-public final class GraineInApp {
+public final class GraineInApp: ObservableObject {
     public typealias ActionHandler = ([String: Any]) throws -> GraineActionResult
     public typealias DeferredActionHandler = ([String: Any], @escaping (GraineActionResult) -> Void) -> Void
 
@@ -265,6 +301,12 @@ public final class GraineInApp {
     private var contextDirty = false
     private var sessionWaiters: [(GraineSessionConfig?) -> Void] = []
     private var sessionLoading = false
+    /// Why the last load of the session failed, as a request that needed it hands it on; nil once one succeeds. Main thread.
+    private var sessionFailure: GraineServiceError?
+    /// Tests only: answers the session's fetch instead of the network.
+    var sessionFetch: ((@escaping (Result<GraineSessionConfig, Error>) -> Void) -> Void)?
+    /// Tests only: runs the moment this launch's session is published — what a reader on any thread could see then.
+    var sessionPublished: (() -> Void)?
     private(set) var foreground = true
     private var foregroundWatchers: [UUID: (Bool) -> Void] = [:]
     private var lifecycleTokens: [NSObjectProtocol] = []
@@ -296,13 +338,6 @@ public final class GraineInApp {
     private lazy var friction = FrictionDetector(rules: Friction.resolve([config.friction?.json]), gateOnCall: true)
     private var appFriction: GraineFrictionConfig?
     private var stallItem: DispatchWorkItem?
-
-    private lazy var urlSession: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 30
-        return URLSession(configuration: configuration)
-    }()
 
     /// Screen updates are coalesced to this. Scroll events must not become traffic.
     static let contextThrottleMs = 400
@@ -380,12 +415,41 @@ public final class GraineInApp {
     private let installIds: InstallIdStore
     private let installLock = NSLock()
     private var installValue: String?
+    private var ownDebugTokenValue: String?
     /// The last session, kept for a cold start (a push that wakes a closed app draws in the brand's design).
     let sessionCache: SessionCache
     /// The network the SDK's own requests and the chat use; the calls' seam, so tests answer for it.
     let network: CallNetwork
     private let chatScheduler: CallScheduler
-    lazy var requests = EmbedRequests(baseUrl: config.baseUrl, publishableKey: config.publishableKey, network: network)
+    /**
+     * This agent's server tokens (Core/ClientTokens.swift): from
+     * `GraineConfig.tokenProvider`, or pushed by a calls host (React Native,
+     * Flutter); with neither, none are in play and no request carries one.
+     * Every request this agent makes to Graine asks it for the token it carries.
+     */
+    let clientTokens: ClientTokens
+
+    lazy var requests = EmbedRequests(baseUrl: config.baseUrl, publishableKey: config.publishableKey, network: network, security: security, tokens: clientTokens)
+
+    /**
+     * YOUR APP AND YOUR USERS (APP-IDENTITY.md): the app's declaration on every
+     * request, its App Attest proof and pass, the identity's token and pass —
+     * and what Graine made of them, published as `verification`.
+     */
+    let security: AppVerification
+    /// The refresher this agent asks when it was built alone (tests); configured agents share the registry's.
+    private let ownTokenRefresh = IdentityTokenRefresh()
+    var tokenRefresh: IdentityTokenRefresh { registry?.tokenRefresh ?? ownTokenRefresh }
+
+    /**
+     * What Graine made of this app and of the identity your app gave, for an
+     * agent that checks them (Embed & Widgets → Install): `.app` — off,
+     * checking, verified, testBuild, debugToken or unverified; `.user` — off,
+     * verified, testUser, unverified or invalid, with the server's reason when
+     * it gave one. Both `off` until the agent's settings say it checks them.
+     * Main thread.
+     */
+    @Published public private(set) var verification = GraineVerification()
 
     /**
      * The component the agent draws, as state — the one on screen, and one on
@@ -427,20 +491,46 @@ public final class GraineInApp {
         network: CallNetwork = URLSessionCallNetwork(),
         chatScheduler: CallScheduler = DispatchCallScheduler(queue: .main),
         name: String = GraineAgentRegistry.defaultName,
-        registry: GraineAgentRegistry? = nil
+        registry: GraineAgentRegistry? = nil,
+        appStores: AppVerificationStores? = nil,
+        appEnvironment: AppVerification.Environment = AppVerificationStores.environment,
+        clientTokens: ClientTokens? = nil
     ) {
         self.name = name
         self.registry = registry
         self.defaults = defaults
         self.config = config
+        self.clientTokens = clientTokens ?? ClientTokens(fetch: config.clientTokenFetch)
         self.variables = VariableStore(buildTime: config.variables.mapValues { Optional($0) })
         self.appFriction = config.friction
         self.fonts = fonts
         self.installIds = installIds
-        self.identity = IdentityState(choices: MemoryChoices(defaults: defaults))
+        let identity = IdentityState(choices: MemoryChoices(defaults: defaults))
+        self.identity = identity
         self.sessionCache = sessionCache
         self.network = network
         self.chatScheduler = chatScheduler
+        let stores = appStores ?? AppVerificationStores.device(agent: name, publishableKey: config.publishableKey, defaults: defaults)
+        var installIdOf: () -> String = { "" }
+        var debugTokenOf: () -> String = { "" }
+        security = AppVerification(
+            publishableKey: config.publishableKey,
+            identity: identity,
+            passes: stores.passes,
+            keys: stores.keys,
+            installId: { installIdOf() },
+            debugToken: { debugTokenOf() },
+            defaults: defaults,
+            mode: config.debugTokenMode,
+            environment: appEnvironment
+        )
+        installIdOf = { [weak self] in self?.installId ?? "" }
+        debugTokenOf = { [weak self] in
+            guard let self = self else { return "" }
+            if let registry = self.registry { return registry.debugToken(resolving: stores.debugTokens, random: SecureRandom.bytes) }
+            return self.ownDebugToken(stores.debugTokens)
+        }
+        bindSecurity()
     }
 
     deinit {
@@ -508,7 +598,13 @@ public final class GraineInApp {
     func adoptShared() {
         guard let shared = registry?.shared() else { return }
         if let identified = shared.identified {
-            applyIdentify(identified.traits, memory: shared.memory ?? identified.memory)
+            // The last memory choice is the customer's it was made for: an agent made after a sign-out and another
+            // customer's sign-in never gives them the last one's.
+            applyIdentify(identified.traits, memory: nil, token: identified.token.map { .set($0) } ?? .keep)
+            if let memory = shared.memory {
+                identity.adoptMemory(memory, madeFor: shared.memoryFor)
+                identityChanged(previous: identity.snapshot().value)
+            }
         } else if let memory = shared.memory {
             applySetMemory(memory)
         }
@@ -539,7 +635,41 @@ public final class GraineInApp {
         onMain { self.watchLifecycle() }
         #endif
         onMain { self.watchTimeZone() }
+        // The first server token is asked for before the session: a new connection, which waits for it.
+        startClientTokens()
         loadSession { _ in }
+    }
+
+    /**
+     * SERVER TOKENS AT START (CLIENT-TOKENS.md §2.3): a calls host's, when one
+     * bridges them — its last push and how it is asked for another — then the
+     * app's provider, asked at once, in the background.
+     */
+    func startClientTokens() {
+        if let ask = registry?.clientTokenAsk { clientTokens.onNeed = ask }
+        if let pushed = registry?.pushedClientToken { clientTokens.push(pushed.token) }
+        clientTokens.start()
+    }
+
+    /**
+     * THE CALLS HOST'S TOKEN (CLIENT-TOKENS.md §2.4): React Native's or
+     * Flutter's own token manager pushed its newest (nil: none). Every agent
+     * sends it from now on — and every agent configured later — except one the
+     * app configured with a provider of its own, which keeps its own tokens.
+     */
+    func pushClientToken(_ token: String?) {
+        registry?.rememberClientToken(token)
+        for agent in peers { agent.clientTokens.push(token) }
+    }
+
+    /**
+     * How a calls host asks its JavaScript or Dart manager for a token — its
+     * `needClientToken` event — when one of an agent's requests was refused for
+     * its token: every agent, and every agent configured later. Any thread.
+     */
+    func askHostForClientTokens(_ ask: (() -> Void)?) {
+        registry?.rememberClientTokenAsk(ask)
+        for agent in peers { agent.clientTokens.onNeed = ask }
     }
 
     /// Every request carries the device's time zone: a change lets a call prepared under the old one go.
@@ -601,12 +731,98 @@ public final class GraineInApp {
      * the new identity while the customer is in it; otherwise at the next open
      * or message. The same identity with other traits, or another memory
      * choice, changes nothing on the open chat.
+     *
+     * - Parameter identityToken: proves the identity to an agent that verifies
+     *   users (Embed & Widgets → Install → Verified users): the HMAC your
+     *   server computes over the identity value, or the ID token (JWT) of your
+     *   own sign-in. Held in memory only and sent only with the identity it
+     *   was given for — never in the variables, the context or a log. Another
+     *   customer, or `identify(nil)`, drops it in the same step; the same
+     *   identity without one keeps it. Replace it with `setIdentityToken`.
      */
-    public func identify(_ traits: [String: Any?]?, memory: Bool? = nil) {
+    public func identify(_ traits: [String: Any?]?, memory: Bool? = nil, identityToken: String? = nil) {
+        let change = GraineInApp.tokenChange(identityToken)
         // One person for the whole app: every agent hears it (each reads the trait its own Identity setting names).
-        registry?.rememberIdentify(traits, memory: memory)
-        for agent in peers { agent.applyIdentify(traits, memory: memory) }
+        registry?.rememberIdentify(traits, memory: memory, token: change)
+        for agent in peers { agent.applyIdentify(traits, memory: memory, token: change) }
     }
+
+    /**
+     * Replace the identity token for the current identity, which does not
+     * change (APP-IDENTITY.md §1.3) — a token your app refreshed itself. nil
+     * clears it. Every agent. Nobody identified: nothing to attach it to.
+     */
+    public func setIdentityToken(_ token: String?) {
+        let next: String?
+        switch GraineInApp.tokenChange(token) {
+        case .set(let usable): next = usable
+        case .keep, .clear: next = nil
+        }
+        registry?.rememberToken(next)
+        for agent in peers {
+            if agent.identity.setToken(next) { agent.identityProofChanged() }
+        }
+    }
+
+    /**
+     * Asked for a fresh identity token when the one held has run out or is
+     * about to: a JWT with less than a minute left before a conversation
+     * starts, an answer saying it expired, or a route refusing an unverified
+     * identity (that request is then sent once more with the new token).
+     * Return nil to keep the token as it is. Asked at most once every 30
+     * seconds, never twice at once, and its answer applies only while the same
+     * customer is identified. Shared by every agent.
+     */
+    public var identityTokenRefresher: (() async -> String?)? {
+        get { tokenRefresh.refresher }
+        set { tokenRefresh.refresher = newValue }
+    }
+
+    /// A token the app gave: kept when it can be sent (not blank, at most 4,096 characters); one that cannot clears the old one.
+    static func tokenChange(_ token: String?) -> IdentityState.TokenChange {
+        guard let token = token else { return .keep }
+        guard let usable = IdentityTokenRules.usable(token) else {
+            GraineLog.warning("The identity token was not used: it is blank or longer than \(IdentityTokenRules.maxLength) characters.")
+            return .clear
+        }
+        return .set(usable)
+    }
+
+    /**
+     * Prove this app now — on first launch, before the first conversation —
+     * for an agent that requires a verified app (Embed & Widgets → Install →
+     * Prove it's your app). Waits for the agent's settings, then for App
+     * Attest and Graine; returns the verdict. `.off` when the agent does not
+     * check the app. In development mode (`debugTokenMode`) nothing is proven:
+     * the debug token goes with every request, and the verdict arrives with
+     * the next conversation. Never throws: a failure is `.unverified`, and the
+     * SDK tries again on its own.
+     */
+    public func prepareAppVerification() async -> GraineAppVerdict {
+        guard await sessionNow() != nil else { return verification.app }
+        return await withCheckedContinuation { continuation in
+            security.prepare { continuation.resume(returning: $0) }
+        }
+    }
+
+    /**
+     * Development mode (`GraineConfig.debugTokenMode`): `.automatic` — a debug
+     * build sends its debug token instead of proving itself, a release build
+     * never; `.always` — a release build too; `.never` — a debug build proves
+     * itself like a release one. This agent.
+     */
+    public var debugTokenMode: GraineDebugTokenMode {
+        get { security.mode }
+        set { security.mode = newValue }
+    }
+
+    /**
+     * This install's debug token while development mode is on, else nil:
+     * register it on the agent (Embed & Widgets → Install → Development →
+     * Debug tokens) to use this build while "Require a verified app" is on.
+     * Made once per install, kept with the install id, and logged once.
+     */
+    public var debugToken: String? { security.debugToken }
 
     /// Whether the current customer's conversations are remembered: `identify(currentTraits, memory: enabled)`. Every agent.
     public func setMemory(_ enabled: Bool) {
@@ -614,13 +830,84 @@ public final class GraineInApp {
         for agent in peers { agent.applySetMemory(enabled) }
     }
 
-    private func applyIdentify(_ traits: [String: Any?]?, memory: Bool?) {
+    private func applyIdentify(_ traits: [String: Any?]?, memory: Bool?, token: IdentityState.TokenChange = .keep) {
         let before = identity.snapshot().value
         variables.setIdentity(traits)
-        identity.identify(traits, memory: memory)
+        identity.identify(traits, memory: memory, token: token)
+        warnIfTraitsLackField()
         announceVariables()
         scheduleContext()
+        // Another person: the user's verdict was the last one's.
+        if identity.snapshot().value != before || traits == nil { security.identityChanged() }
         identityChanged(previous: before)
+    }
+
+    /**
+     * The identity's token changed, the identity did not: the engine page
+     * hears it, and the next call's grant is asked for with it (who is
+     * calling, proven anew).
+     */
+    func identityProofChanged() {
+        onMain {
+            for watch in Array(self.identityWatchers.values) { watch() }
+            self.releasePreparedCallForAnotherCaller()
+            self.warmCalls()
+        }
+    }
+
+    /// Ask the app's refresher for a fresh token for who is identified now, on every agent: `done(changed)`.
+    func refreshIdentityToken(_ done: @escaping (Bool) -> Void) {
+        let agents = peers
+        tokenRefresh.refresh(capture: {
+            let marks = agents.map { ($0, $0.identity.generation) }
+            return { token in
+                var changed = false
+                for (agent, generation) in marks where agent.identity.applyRefreshedToken(token, generation: generation) {
+                    changed = true
+                    agent.identityProofChanged()
+                }
+                return changed
+            }
+        }, done: done)
+    }
+
+    /// A ring arrived for this agent (APP-IDENTITY.md §6): the proof renewed and the token refreshed, before the person answers.
+    func ringArrived() {
+        // A push that woke a closed app: the checks the last session kept stand in until this launch's arrives.
+        if session == nil, let kept = sessionCache.load() { security.sessionCached(kept.security) }
+        security.ringArrived()
+        if identity.snapshot().value != nil, tokenRefresh.hasRefresher { refreshIdentityToken { _ in } }
+    }
+
+    /// The security engine's ways out: the network, the refresher, the published state.
+    private func bindSecurity() {
+        security.send = { [weak self] path, fields, declaration, done in
+            guard let self = self else { return }
+            self.requests.post(path, fields, cure: false, declaration: declaration, completion: done)
+        }
+        security.refreshToken = { [weak self] done in
+            guard let self = self else { return done(false) }
+            self.refreshIdentityToken(done)
+        }
+        security.hasRefresher = { [weak self] in self?.tokenRefresh.hasRefresher ?? false }
+        security.onChange = { [weak self] next in
+            guard let self = self else { return }
+            self.onMain { if self.verification != next { self.verification = next } }
+        }
+        security.onProven = { [weak self] in
+            // A pass now: what waited for one (the next call's grant) is asked again.
+            self?.onMain { self?.warmCalls() }
+        }
+    }
+
+    /// The install's debug token for an agent built alone (tests): made once, kept in its store.
+    private func ownDebugToken(_ store: InstallIdStore) -> String {
+        installLock.lock()
+        defer { installLock.unlock() }
+        if let known = ownDebugTokenValue { return known }
+        let made = DebugTokenVault.resolve(store, random: SecureRandom.bytes)
+        ownDebugTokenValue = made
+        return made
     }
 
     private func applySetMemory(_ enabled: Bool) {
@@ -653,16 +940,22 @@ public final class GraineInApp {
      * Forget everything the agent remembers about the current customer, for
      * this agent's memory — the conversation the chat continues included, so
      * the chat on screen clears too. Allowed only from a device bound to them.
-     * Returns how many memories were deleted. Throws `GraineServiceError` —
-     * `identityRequired` when nobody is identified, `deviceLimit` from a device
-     * that is not one of theirs (and then nothing is cleared).
+     * Returns how many memories were deleted. It waits for the agent's
+     * settings first (they name the trait that identifies the customer), so it
+     * can be called right after launch. Throws `GraineServiceError` —
+     * `identityRequired` when nobody is identified by the trait this agent
+     * identifies customers by (the message names it) — or when someone else
+     * was identified while the settings were loading: nothing is forgotten
+     * for anyone but the customer who asked — `deviceLimit` from a
+     * device that is not one of theirs (and then nothing is cleared), and
+     * `unavailable` / `network` / `invalidKey` / `originRefused` when the
+     * agent's settings could not be loaded (the next call loads them again).
      */
     @discardableResult
     public func forgetMemory() async throws -> Int {
-        _ = await sessionNow()
-        let now = identity.snapshot()
-        guard let value = now.value else {
-            throw GraineServiceError(code: .identityRequired, message: "Nobody is identified: call identify() with the customer's identifier first.")
+        // For the customer identified when it was asked: one replaced while the session loaded is never theirs to forget.
+        guard let value = try await customerAfterSession().value else {
+            throw GraineServiceError(code: .identityRequired, message: identity.missingIdentityMessage)
         }
         let body = try await requests.post("/api/embed/memory/forget", [
             ("installId", .string(installId)),
@@ -676,12 +969,14 @@ public final class GraineInApp {
     /**
      * Graine lets go of the conversation it kept for this agent and the current
      * customer, so the next chat starts fresh (`GraineChat.newConversation()`).
-     * Nobody identified: nothing was kept, nothing to ask. Throws
+     * Nobody identified: nothing was kept, nothing to ask. Someone identified:
+     * who they are waits for the session (it names the trait), and a session
+     * that could not be loaded is handed on — nothing was let go of. Throws
      * `GraineServiceError` as `forgetMemory()` does.
      */
     func letGoOfConversation() async throws {
-        _ = await sessionNow()
-        guard let value = identity.snapshot().value else { return }
+        guard identity.hasTraits else { return }
+        guard let value = try await customerAfterSession().value else { return }
         _ = try await requests.post("/api/embed/conversation/new", [
             ("installId", .string(installId)),
             ("identity", .object([("value", .string(value))])),
@@ -691,14 +986,21 @@ public final class GraineInApp {
     /**
      * What the agent remembers about the current customer, newest first (at
      * most 100), already redacted — to show people what is kept about them.
-     * Only from a device bound to them. Throws `GraineServiceError`:
-     * `identity_required` when nobody is identified, `device_limit` from a
-     * device that is not one of theirs.
+     * Only from a device bound to them. It waits for the agent's settings
+     * first (they name the trait that identifies the customer), so a screen
+     * opened right after launch gets the answer, not "nobody is identified".
+     * Throws `GraineServiceError`: `identity_required` when nobody is
+     * identified by the trait this agent identifies customers by (the message
+     * names it), or when someone else was identified while the settings were
+     * loading (never another customer's memories), `device_limit` from a
+     * device that is not one of theirs,
+     * `unavailable` / `network` / `invalid_key` / `origin_refused` when the
+     * agent's settings could not be loaded (the next call loads them again).
+     * Whether the agent remembers anyone at all is `session?.memoryEnabled`.
      */
     public func memories() async throws -> [GraineMemory] {
-        _ = await sessionNow()
-        guard let value = identity.snapshot().value else {
-            throw GraineServiceError(code: .identityRequired, message: "Nobody is identified: call identify() with the customer's identifier first.")
+        guard let value = try await customerAfterSession().value else {
+            throw GraineServiceError(code: .identityRequired, message: identity.missingIdentityMessage)
         }
         let body = try await requests.post("/api/embed/memory/list", [
             ("installId", .string(installId)),
@@ -732,11 +1034,15 @@ public final class GraineInApp {
     private func identityChanged(previous: String?) {
         let current = identity.snapshot().value
         onMain {
+            // The customers this device stopped being: released first, each request with the server token it held.
+            self.sendSignOuts()
+            // Server tokens are one user's (CLIENT-TOKENS.md): another user, or nobody — the token held was the last
+            // one's. Let go, and a fresh one asked for, before anything connects for who it is now.
+            if previous != current { self.clientTokens.userChanged() }
             // Who a chat belongs to (DESIGN.md): connected for someone else, it is made again for this identity;
             // not connected, another customer's lines leave the screen.
             if self.chatMade { self.chat.identityChanged(from: previous, to: current) }
             for watch in Array(self.identityWatchers.values) { watch() }
-            self.sendSignOuts()
             // Nothing prepared for the last customer's calls is theirs: a call prepared for who was calling is let go,
             // and the next call's grant asked for this one.
             self.releasePreparedCallForAnotherCaller()
@@ -1082,12 +1388,25 @@ public final class GraineInApp {
     // MARK: - The live conversation: a call, or the chat
 
     /**
-     * Something happened that the agent may want to speak up about, told to
-     * whichever conversation is live — the chat, else the call. Neither live:
-     * dropped, as on a call — queued, it would open the next conversation by
-     * announcing something from this one. Main thread.
+     * SOMETHING WORTH SPEAKING UP ABOUT: the agent may speak first — "the
+     * customer came from the breakfast reminder", and the agent opens with
+     * its check-in. Told to whichever conversation is live: the chat, else
+     * the in-app voice call. Paced by the agent: 20 s apart and 3 per
+     * conversation by default; `data` may carry `cooldown_seconds`,
+     * `max_per_session`, or `quiet: true` to record it without speaking (they
+     * travel at the event's own level), and anything else rides along as its
+     * data. Neither live: dropped — queued, it would open the next
+     * conversation by announcing something from this one — so open the chat
+     * and wait for it to be connected first. `track` informs without
+     * speaking. Any thread.
      */
-    func reportEvent(_ name: String, detail: String?, data: [String: Any]) {
+    public func reportEvent(_ name: String, detail: String? = nil, data: [String: Any] = [:]) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.reportEvent(name, detail: detail, data: data) }
+            return
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
         if chat.carriesConversation {
             chat.reportEvent(name, detail: detail, data: data)
             return
@@ -1333,7 +1652,8 @@ public final class GraineInApp {
             self.sessionWaiters.append(done)
             if self.sessionLoading { return }
             self.sessionLoading = true
-            self.fetchSession { result in
+            let fetch = self.sessionFetch ?? self.fetchSession
+            fetch { result in
                 DispatchQueue.main.async { self.finishSession(result) }
             }
         }
@@ -1345,21 +1665,29 @@ public final class GraineInApp {
         switch result {
         case .success(let session):
             loaded = session
-            stateLock.lock()
-            sessionValue = session
-            stateLock.unlock()
-            sessionCache.save(session)
+            sessionFailure = nil
             variables.setDashboardDefaults(session.variables.mapValues { Optional($0) })
-            // Which trait names the customer: the identity the app gave is read now, and anyone it replaced signed out.
+            // Which trait names the customer — read BEFORE the session is published: a reader on any thread never
+            // finds this launch's session with the trait unknown (bookingAvailable false, `not_identified` for a
+            // customer who is identified). Android orders it the same way.
             let before = identity.snapshot()
             identity.setField(session.identitySettings.field)
             variables.setIdentityField(session.identitySettings.field)
+            stateLock.lock()
+            sessionValue = session
+            stateLock.unlock()
+            sessionPublished?()
+            sessionCache.save(session)
+            // The identity the app gave is read now, and anyone it replaced signed out.
+            warnIfTraitsLackField()
             if identity.snapshot() != before {
                 // A chat connected before the customer could be read (on the kept session) is theirs from now on.
                 if chatMade { chat.identityChanged(from: before.value, to: identity.snapshot().value) }
                 for watch in Array(identityWatchers.values) { watch() }
             }
             sendSignOuts()
+            // What the agent checks of this app and its users: the app proves itself now, in the background, when it must.
+            security.sessionArrived(session.security)
             // The design first, so `theme` is already right when onSessionReady is heard.
             repickTheme()
             #if os(iOS)
@@ -1380,6 +1708,8 @@ public final class GraineInApp {
             }
         case .failure(let error):
             let message = GraineInApp.describe(error)
+            // What a request that needed the session hands on — before anyone waiting hears it.
+            sessionFailure = (error as? GraineServiceError) ?? GraineServiceError(code: .unknown("session"), message: message)
             GraineLog.error(message)
             notifyListeners { $0.onError(message) }
         }
@@ -1406,6 +1736,66 @@ public final class GraineInApp {
         await withCheckedContinuation { continuation in
             loadSession { continuation.resume(returning: $0) }
         }
+    }
+
+    /**
+     * THIS launch's session, waited for — it names the trait that identifies
+     * the customer, so who the customer is is known only then. When it could
+     * not be loaded, its own refusal is thrown (`unavailable`, `network`,
+     * `invalidKey`, `originRefused`, with the server's sentence), never
+     * "nobody is identified": the app may well have identified someone. The
+     * next call loads it again.
+     */
+    func sessionForCustomer() async throws -> GraineSessionConfig {
+        try await withCheckedThrowingContinuation { continuation in
+            loadSession { [weak self] session in
+                if let session = session { return continuation.resume(returning: session) }
+                continuation.resume(throwing: self?.sessionRefusal() ?? GraineInApp.unloadedSession)
+            }
+        }
+    }
+
+    /**
+     * WHO A REQUEST IS FOR, once this launch's session is here (as
+     * `sessionForCustomer()` waits for it): the customer as the request finds
+     * them, one snapshot, so what it sends is never read again. A request
+     * belongs to whoever was identified when it was made — when the app
+     * identified someone else while the session was on its way (a sign-out,
+     * another customer on the same phone), nothing is asked for them:
+     * `identityRequired`, never an answer about the next customer, a booking
+     * in their name, or their memories forgotten.
+     */
+    func customerAfterSession() async throws -> IdentityState.Snapshot {
+        let asked = identity.currentTraits
+        return try await withCheckedThrowingContinuation { continuation in
+            loadSession { [weak self] session in
+                guard let self = self else { return continuation.resume(throwing: GraineInApp.unloadedSession) }
+                guard session != nil else { return continuation.resume(throwing: self.sessionRefusal()) }
+                let now = self.identity.snapshot()
+                if let wanted = self.identity.value(of: asked), !self.identity.sameCustomer(wanted, now.value) {
+                    let message = now.value == nil ? self.identity.missingIdentityMessage : GraineInApp.someoneElseIdentified
+                    return continuation.resume(throwing: GraineServiceError(code: .identityRequired, message: message))
+                }
+                continuation.resume(returning: now)
+            }
+        }
+    }
+
+    /// `identityRequired`'s sentence for a request whose customer was replaced while the session loaded.
+    static let someoneElseIdentified = "Someone else was identified while the agent's settings were loading, so nothing was asked "
+        + "for the customer identified before. Ask again for the customer identified now."
+
+    /// Why this launch's session is not here: its last load's own refusal. Main thread.
+    func sessionRefusal() -> GraineServiceError {
+        sessionFailure ?? GraineInApp.unloadedSession
+    }
+
+    private static let unloadedSession = GraineServiceError(code: .unavailable, message: "The agent's settings could not be loaded. Try again in a moment.")
+
+    /// One line for the developer when identify() was given traits without the trait this agent identifies customers by.
+    private func warnIfTraitsLackField() {
+        guard identity.traitsLackField else { return }
+        GraineLog.warning((name == GraineAgentRegistry.defaultName ? "" : "Agent \"\(name)\": ") + identity.missingIdentityMessage)
     }
 
     // MARK: - The calls' first credential, ahead of the tap
@@ -1437,6 +1827,8 @@ public final class GraineInApp {
      * failure: a call without a grant mints the old way. Main thread.
      */
     func warmCalls() {
+        // An agent that requires a verified app refuses the grant without a pass: asked once the proof brings one (onProven).
+        guard !security.awaitingRequiredProof() else { return }
         guard let (module, request) = rtcGrantRequest(callId: nil, session: session) else { return }
         module.warmUp(request, log: rtcLog)
         // A call ringing now was asked for under whoever the customer was when it arrived — nobody, perhaps, in an
@@ -1468,7 +1860,7 @@ public final class GraineInApp {
      */
     private struct PreparedCall {
         let callId: String
-        /// What it was minted with: its mint body for an empty session id.
+        /// What it was minted with: its mint body for an empty session id, without what renews on its own (RtcMintBody.stable).
         let mint: Data
         /// Who was calling when it was prepared, field by field.
         let identity: IdentityWire.Fields
@@ -1505,7 +1897,7 @@ public final class GraineInApp {
         let held = preparedCall
         preparedLock.unlock()
         if let held = held, now - held.at < Self.preparedCallLife,
-           outgoingMint(reason: reason, own: own, callId: held.callId) == held.mint {
+           RtcMintBody.stable(outgoingMint(reason: reason, own: own, callId: held.callId)) == held.mint {
             return
         }
         releasePreparedCall()
@@ -1516,7 +1908,7 @@ public final class GraineInApp {
         let leg = module.makeCall(request)
         let token = UUID()
         preparedLock.lock()
-        preparedCall = PreparedCall(callId: id, mint: request.mintBody(""), identity: identity, leg: leg, at: now, token: token)
+        preparedCall = PreparedCall(callId: id, mint: RtcMintBody.stable(request.mintBody("")), identity: identity, leg: leg, at: now, token: token)
         preparedLock.unlock()
         leg.onPrepared = { [weak self] state in self?.preparedCallReported(state, token: token) }
         leg.prepare()
@@ -1535,7 +1927,7 @@ public final class GraineInApp {
         let held = preparedCall
         preparedLock.unlock()
         guard let call = held else { return nil }
-        if uptime() - call.at < Self.preparedCallLife, outgoingMint(reason: reason, own: own, callId: call.callId) == call.mint {
+        if uptime() - call.at < Self.preparedCallLife, RtcMintBody.stable(outgoingMint(reason: reason, own: own, callId: call.callId)) == call.mint {
             return call.callId
         }
         releasePreparedCall(token: call.token)
@@ -1553,7 +1945,7 @@ public final class GraineInApp {
         preparedLock.unlock()
         call.leg.onPrepared = nil
         let age = uptime() - call.at
-        guard call.mint == mint, age < Self.preparedCallLife else {
+        guard call.mint == RtcMintBody.stable(mint), age < Self.preparedCallLife else {
             call.leg.hangUp()
             return nil
         }
@@ -1603,7 +1995,7 @@ public final class GraineInApp {
     func outgoingMint(reason: String?, own: [String: String], callId: String) -> Data {
         let variables = outgoingVariables(reason: reason, own: own)
         return RtcMintBody.json(publishableKey: config.publishableKey, sessionId: "", callVariables: variables.call, variables: variables.all,
-                                identity: identityFields(callId: callId))
+                                identity: identityFields(callId: callId), credentials: security)
     }
 
     private func outgoingRtcRequest(reason: String?, own: [String: String], identity: IdentityWire.Fields, session: GraineSessionConfig) -> GraineRtcRequest {
@@ -1616,7 +2008,9 @@ public final class GraineInApp {
             session: { $0(session) },
             runAction: { _, _, answer in answer(.refused("")) },
             callVariables: variables.call,
-            identity: identity
+            identity: identity,
+            security: security,
+            tokens: clientTokens
         )
         return CallConversation.rtcRequest(setup: setup, session: session, debug: config.debug)
     }
@@ -1682,15 +2076,23 @@ public final class GraineInApp {
         guard CallTransportChoice.decide(requested: requested, dashboard: session.calls?.audioTransport, rtcAvailable: true) == .webrtc else { return nil }
         let key = config.publishableKey
         let identity = identityFields(callId: callId)
-        let request = GraineRtcRequest(
+        let security = self.security
+        var request = GraineRtcRequest(
             baseUrl: config.baseUrl,
             controlHost: CallConversation.controlHost(session),
             mintBody: { sessionId in
-                RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: [], variables: [], identity: identity)
+                RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: [], variables: [], identity: identity,
+                                 credentials: security)
             },
             sdkVersion: GraineVersion.name,
-            debug: config.debug
+            debug: config.debug,
+            // A grant request to the web route carries the agent's server token (CLIENT-TOKENS.md §2.2).
+            clientTokens: GraineRtcTokens(clientTokens)
         )
+        // A grant's renewal hears what the call session says of the app and the user, as a mint does.
+        request.mintAnswered = { status, data in
+            security.heard(status: status, body: JSON.object(from: data), identityValue: identity.value)
+        }
         return (module, request)
     }
 
@@ -1768,16 +2170,32 @@ public final class GraineInApp {
      * this iPhone (`calls.hosted`, and `calls.platforms` empty or naming iOS),
      * the agent lets customers book, and the customer is identified with the
      * trait the agent's Identity setting names (otherwise a booking is refused
-     * with `identityRequired`). Each agent answers for itself. Read it again
-     * after `identify` and once the session has loaded.
+     * with `identityRequired`). Each agent answers for itself.
+     *
+     * False until this launch's session has arrived when a customer is
+     * identified, since it names the trait that identifies them — so do not
+     * read it once at launch: read it again in `onSessionReady` and after
+     * `identify`.
      */
     public var bookingAvailable: Bool {
-        Booking.available(calls: sessionOrCached?.calls, identified: identity.snapshot().value != nil)
+        Booking.available(calls: sessionOrCached?.calls, identified: identifiedNow() == true)
     }
 
-    /// Why the booking sheet cannot book now, as its line; nil when it can.
+    /// Why the booking sheet cannot book now, as its line; nil when it can. Never "sign in" while the session that says so is still to come.
     var bookingBlocked: String? {
-        Booking.blocked(calls: sessionOrCached?.calls, identified: identity.snapshot().value != nil)
+        let who = identifiedNow()
+        return Booking.blocked(calls: sessionOrCached?.calls, identified: who == true, identityKnown: who != nil)
+    }
+
+    /**
+     * Whether the customer is identified with the trait the agent's Identity
+     * setting names: nil while that cannot be told yet — identify() was given
+     * someone, and this launch's session, which names the trait, has not
+     * arrived (the one kept on the device does not say).
+     */
+    private func identifiedNow() -> Bool? {
+        if session != nil { return identity.snapshot().value != nil }
+        return identity.hasTraits ? nil : false
     }
 
     /**
@@ -1788,12 +2206,15 @@ public final class GraineInApp {
      * the workspace has not uploaded its push credentials, or iOS is not among
      * the platforms it rings), `scheduling_off` (the agent does not let
      * customers book calls), `not_identified` (the customer is not identified with the
-     * trait the agent's Identity setting names). Read it again after
-     * `identify` and once the session has loaded.
+     * trait the agent's Identity setting names). `not_loaded` is "not yet",
+     * never a final answer — it also covers a customer identified before this
+     * launch's session arrived, since the session names the trait — so read it
+     * again in `onSessionReady` and after `identify`, rather than once at launch.
      */
     public var bookingUnavailableReason: String? {
         let session = sessionOrCached
-        return Booking.unavailableReason(calls: session?.calls, loaded: session != nil, identified: identity.snapshot().value != nil)
+        let who = identifiedNow()
+        return Booking.unavailableReason(calls: session?.calls, loaded: session != nil, identified: who == true, identityKnown: who != nil)
     }
 
     /**
@@ -1825,16 +2246,20 @@ public final class GraineInApp {
      * before `earliest(now:)`, `tooFar` after `latest(now:)`. Then the server's:
      * `outsideWindow` (the agent's calling hours, in this device's time zone),
      * `tooManyPending`, `identityRequired`, `rateLimited` (`retryAfterSeconds`).
+     * It waits for the agent's settings first; `identityRequired` too when
+     * someone else was identified while they loaded — a call is never booked
+     * for a customer who did not ask for it.
      */
     public func scheduleCall(at date: Date, reason: String? = nil) async throws -> GraineScheduledCall {
-        _ = await sessionNow()
+        // A session that could not be loaded is its own refusal, never `schedulingOff`; a customer replaced while it
+        // loaded is never booked a call they did not ask for.
+        let customer = try await customerAfterSession()
         try GraineInApp.check(date, against: schedulingRules, now: Date())
-        let f = identityFields(callId: nil)
         var fields: [(String, WireJSON)] = [("installId", .string(installId))]
-        if let value = f.value { fields.append(("identity", .object([("value", .string(value))]))) }
+        if let value = customer.value { fields.append(("identity", .object([("value", .string(value))]))) }
         fields.append(("at", .string(Scheduling.isoTime(date))))
         if let why = Scheduling.clippedReason(reason) { fields.append(("reason", .string(why))) }
-        fields.append(("timezone", .string(f.timezone)))
+        fields.append(("timezone", .string(deviceTimezone())))
         let body = try await requests.post("/api/embed/calls/schedule", fields)
         guard let call = Scheduling.booked(body) else {
             throw GraineServiceError(code: .unknown("unreadable_answer"), message: "The booking was accepted, but its answer did not describe the call.", status: 200)
@@ -1844,7 +2269,9 @@ public final class GraineInApp {
         return call
     }
 
-    /// This customer's calls still to come (this install's, when nobody is identified), upcoming first.
+    /// This customer's calls still to come (this install's, when nobody is identified), upcoming first. Waits for the
+    /// agent's settings (they name the trait that identifies the customer); when they could not be loaded, throws that
+    /// reason — `network`, `unavailable`, `invalidKey`, `originRefused` — never this install's calls alone.
     public func scheduledCalls() async throws -> [GraineScheduledCall] {
         try await withCheckedThrowingContinuation { continuation in
             listScheduledCalls { continuation.resume(with: $0) }
@@ -1854,13 +2281,76 @@ public final class GraineInApp {
     /**
      * Call one off. Only this customer's own calls (this install's, when nobody
      * is identified); `notFound` for anything else. Returns the call's status
-     * afterwards — `cancelled`.
+     * afterwards — `cancelled`. Waits for the agent's settings, as
+     * `scheduledCalls()` does, and throws their own reason when they could not
+     * be loaded.
      */
     @discardableResult
     public func cancelScheduledCall(id: String) async throws -> GraineCallStatus {
         try await withCheckedThrowingContinuation { continuation in
             cancelScheduledCall(id: id) { continuation.resume(with: $0) }
         }
+    }
+
+    /**
+     * START ONE OF YOUR OUTREACH WORKFLOWS FOR THE USER THIS APP SIGNED IN — a
+     * welcome call after sign-up, a follow-up after an order — with no server
+     * of your own (0.14.4). The workflow must have "Your app can start this"
+     * on (its Connect tab); `workflow` is its exact name or its id (`owf_…`).
+     *
+     * The run is for the identified user — `identify` with the agent's
+     * identity trait first — never for anyone `data` names. `data`: the
+     * contact fields the workflow allows — text (200 characters), numbers,
+     * yes/no; at most 12 (the first 12 by name). Anything else is left out,
+     * never refused.
+     *
+     * `idempotencyKey`: two calls with the same key start one run. Without
+     * one the SDK makes one for the call, and asks once more with it when a
+     * request got no answer.
+     *
+     * Returns the run — `alreadyRunning` when the user already had one of
+     * this workflow under way (that run, never a second). Throws
+     * `GraineServiceError`: `invalidRequest` (no workflow, a key that is not
+     * one) and `identityRequired` (nobody identified, or someone else
+     * identified while the agent's settings loaded: nothing is asked) on the
+     * device; from Graine `notAllowed`, `notVerified`, `rateLimited`
+     * (`retryAfterSeconds`), `unavailable`, `invalidRequest` (a field the
+     * workflow needs that your app may not send); `network` when no answer
+     * came twice; the session's own refusal when it could not be loaded.
+     */
+    public func startWorkflow(_ workflow: String, data: [String: Any] = [:], idempotencyKey: String? = nil) async throws -> GraineWorkflowRun {
+        guard let name = Workflows.name(workflow) else {
+            throw GraineServiceError(code: .invalidRequest, message: Workflows.nameMessage)
+        }
+        if let given = idempotencyKey, !Workflows.isIdempotencyKey(given) {
+            throw GraineServiceError(code: .invalidRequest, message: Workflows.keyMessage)
+        }
+        let key = idempotencyKey ?? Workflows.newKey()
+        // For the customer identified when it was asked: one replaced while the session loaded never has a run started
+        // for them (customerAfterSession refuses with identityRequired), and the value checked is the value sent.
+        guard let value = try await customerAfterSession().value else {
+            throw GraineServiceError(code: .identityRequired, message: identity.missingIdentityMessage)
+        }
+        let fields: [(String, WireJSON)] = [
+            ("installId", .string(installId)),
+            ("identity", .object([("value", .string(value))])),
+            ("workflow", .string(name)),
+            ("data", .object(Workflows.fields(data))),
+            ("idempotencyKey", .string(key)),
+        ]
+        let body: [String: Any]
+        do {
+            body = try await requests.post(Workflows.route, fields)
+        } catch let error as GraineServiceError where error.code == .network {
+            // No answer: the start may have been made or not. The same key again is answered with
+            // the run it made, or makes it now — never two.
+            try await Task.sleep(nanoseconds: UInt64(Workflows.retryDelay * 1_000_000_000))
+            body = try await requests.post(Workflows.route, fields)
+        }
+        guard let run = Workflows.run(body) else {
+            throw GraineServiceError(code: .unknown("unreadable_answer"), message: "The workflow was started, but its run id did not come back.", status: 200)
+        }
+        return run
     }
 
     /// The local checks `scheduleCall` makes before it asks — refused in the booking sheet's words, the same on every SDK.
@@ -1878,8 +2368,10 @@ public final class GraineInApp {
 
     /// `scheduledCalls()`, for code that answers on a callback (the chat's card). After the session, so the identity is known.
     func listScheduledCalls(_ done: @escaping (Result<[GraineScheduledCall], GraineServiceError>) -> Void) {
-        loadSession { [weak self] _ in
+        loadSession { [weak self] session in
             guard let self = self else { return }
+            // A session that could not be loaded is its own refusal — never this install's calls alone, in place of the customer's.
+            guard session != nil else { return done(.failure(self.sessionRefusal())) }
             self.requests.post("/api/embed/calls/list", self.ownCallsFields()) { result in
                 done(result.map { Scheduling.listed($0) })
             }
@@ -1888,8 +2380,10 @@ public final class GraineInApp {
 
     /// `cancelScheduledCall(id:)` on a callback: the status afterwards (`{ok, status?}`; `cancelled` when the answer says none).
     func cancelScheduledCall(id: String, _ done: @escaping (Result<GraineCallStatus, GraineServiceError>) -> Void) {
-        loadSession { [weak self] _ in
+        loadSession { [weak self] session in
             guard let self = self else { return }
+            // As listScheduledCalls: the session's own refusal, never a cancel asked as this install alone.
+            guard session != nil else { return done(.failure(self.sessionRefusal())) }
             self.requests.post("/api/embed/calls/cancel", self.ownCallsFields() + [("callId", .string(id))]) { result in
                 done(result.map { body in JSON.nonEmpty(body["status"]).map { GraineCallStatus(wire: $0) } ?? .cancelled })
             }
@@ -1903,30 +2397,55 @@ public final class GraineInApp {
         return fields
     }
 
+    /// One answer of the session route, as a test hands it: its status and body, or — no answer at all — the system's words for why.
+    struct SessionReply {
+        var status: Int
+        var data: Data?
+        var failure: String?
+    }
+
+    /**
+     * `POST /api/embed/session`, like every embed request: the key, and the
+     * app's declaration (APP-IDENTITY.md §1.1 — its id and Team ID; the debug
+     * token in development mode) — and, with server tokens in play, the newest
+     * token (CLIENT-TOKENS.md §2.3): a new connection, so it goes with a usable
+     * token or waits at most 10 s for one; refused for the token, it asks for a
+     * fresh one and is sent once more. Through the network seam, so tests answer it.
+     */
     private func fetchSession(_ completion: @escaping (Result<GraineSessionConfig, Error>) -> Void) {
-        let endpoint = GraineProtocol.trimTrailingSlashes(config.baseUrl) + "/api/embed/session"
-        guard let url = URL(string: endpoint) else {
+        guard URL(string: GraineProtocol.trimTrailingSlashes(config.baseUrl) + "/api/embed/session") != nil else {
             completion(.failure(GraineError("baseUrl \"\(config.baseUrl)\" is not a URL.")))
             return
         }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["publishableKey": config.publishableKey], options: [])
-        let task = urlSession.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let body = JSON.object(from: data)
-            if let message = GraineSessionConfig.errorMessage(status: status, body: body) {
-                completion(.failure(GraineError(message)))
-                return
-            }
-            completion(.success(GraineSessionConfig.parse(body ?? [:])))
+        requests.send("/api/embed/session", [], patient: true, newConnection: true) { status, body, headers in
+            completion(GraineInApp.session(status: status, body: body, headers: headers))
         }
-        task.resume()
+    }
+
+    /// The session, or why there is none, from a test's reply.
+    static func session(from reply: SessionReply) -> Result<GraineSessionConfig, Error> {
+        if let failure = reply.failure {
+            // No answer came back: `network`, in the system's own words.
+            return .failure(GraineServiceError(code: .network, message: failure))
+        }
+        return session(status: reply.status, body: JSON.object(from: reply.data), headers: [:])
+    }
+
+    /// The session, or why there is none — as every request that needed it hands it on.
+    static func session(status: Int, body: [String: Any]?, headers: [String: String]) -> Result<GraineSessionConfig, Error> {
+        if status <= 0 {
+            // No answer came back: `network`.
+            return .failure(GraineServiceError(code: .network, message: "Graine could not be reached. Check the connection and try again."))
+        }
+        // Refused for the server token or the publishable key: Graine's own sentence (or the SDK's), never the allowed-domains one.
+        if let refusal = ClientTokenRules.refusal(status: status, object: body) { return .failure(refusal) }
+        if let message = GraineSessionConfig.errorMessage(status: status, body: body) {
+            // A refusal keeps its code and status — what memory, booking and the rest hand on — with the session's own sentence.
+            let refusal = GraineServiceError.from(status: status, body: body, headers: headers)
+            return .failure(GraineServiceError(code: refusal.code, message: message, status: status,
+                                               retryAfterSeconds: refusal.retryAfterSeconds, reason: refusal.reason))
+        }
+        return .success(GraineSessionConfig.parse(body ?? [:]))
     }
 
     // MARK: - The design, light or dark
@@ -1968,10 +2487,14 @@ public final class GraineInApp {
     func setForeground(_ value: Bool) {
         if foreground == value { return }
         foreground = value
+        // Server tokens are never asked for in the background; back in front, one close to its expiry is refreshed.
+        clientTokens.setForeground(value)
         for watch in Array(foregroundWatchers.values) { watch(value) }
         if value {
             // Back after a while: the grant for the next tap may be half spent (warmCalls asks only then).
             warmCalls()
+            // And the app's pass may have less than six hours left, or an outage's retries were spent (APP-IDENTITY.md §3.3).
+            security.foregroundReturned()
         } else {
             // Away: nobody taps a call in the background. The call prepared for the tap is let go.
             releasePreparedCall()
@@ -1993,6 +2516,8 @@ public final class GraineInApp {
      */
     private func watchLifecycle() {
         foreground = UIApplication.shared.applicationState != .background
+        // Launched in the background (a VoIP push woke the app): no token is refreshed until it comes to the front.
+        clientTokens.setForeground(foreground)
         deviceAppearanceChanged(dark: GraineInApp.windowIsDark())
         tapCapture.attach(to: GraineVoice.keyWindow())
         let center = NotificationCenter.default

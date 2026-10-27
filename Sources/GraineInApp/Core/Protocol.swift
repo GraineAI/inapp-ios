@@ -39,6 +39,13 @@ public enum GraineProtocol {
         public static let widgetResult = "graine:widget-result"
         /// Who the customer is for memory (contract §1.2): the page puts it on its next session and ticket.
         public static let identity = "graine:identity"
+        /**
+         * The server token — `{token}`, a string or null — for the page's own
+         * requests: after `graine:ready` and on every change, while tokens are
+         * in play; and the answer to `graine:need-client-token`. Never logged.
+         * New in 0.14.4.
+         */
+        public static let clientToken = "graine:client-token"
     }
 
     /// Messages the page sends out.
@@ -58,6 +65,13 @@ public enum GraineProtocol {
         public static let reconnecting = "graine:reconnecting"
         /// Where a connect is: registering · dialling · retrying · switching · failed (contract/DESIGN.md "Connecting").
         public static let progress = "graine:progress"
+        /**
+         * A request of the page's was refused for its server token: the host
+         * asks for a fresh one (one question at a time) and posts
+         * `graine:client-token`; the page waits at most 5 s and sends that
+         * request once more. New in 0.14.4.
+         */
+        public static let needClientToken = "graine:need-client-token"
     }
 
     /**
@@ -146,12 +160,29 @@ public enum GraineProtocol {
             // The customer's identifier never reaches a log: only whether there is one.
             let value = JSON.unwrap(message["value"])
             return "identity=" + (value == nil || value is NSNull ? "none" : "set") + " memory=" + JSON.string(message["memory"])
+        case Out.clientToken:
+            // A server token never reaches a log: only whether there is one.
+            let value = JSON.unwrap(message["token"])
+            return "token=" + (value == nil || value is NSNull ? "none" : "set")
         default:
             return String((JSON.string(from: message) ?? "").prefix(300))
         }
     }
 
     /// One outgoing message: its type, and its fields as JSON values.
+    /**
+     * An app's event for a voice call, in the page's event form —
+     * `{type: "graine:app-event", event: {name, detail?, pacing keys, data?}}`,
+     * which the page hands the runtime as it is: exactly the event the chat
+     * sends (`ChatWire.appEventFrame`), so the app's data never renames it or
+     * replaces its detail, whichever conversation hears it.
+     */
+    static func appEvent(name: String, detail: String?, data: [String: Any]) -> [String: Any] {
+        let frame = JSON.object(from: ChatWire.appEventFrame(name: name, detail: detail, data: data))
+        let event = (frame?["event"] as? [String: Any]) ?? ["name": name]
+        return out(Out.appEvent, ["event": event])
+    }
+
     public static func out(_ type: String, _ fields: [String: Any?] = [:]) -> [String: Any] {
         var message: [String: Any] = ["type": type]
         for (key, value) in fields { message[key] = JSON.normalize(value) }
@@ -207,6 +238,8 @@ public enum GraineProtocol {
         case In.progress:
             // A stage this build does not know is ignored, not stored: the engine may name more later.
             return GraineConnectProgress.from(o["stage"] as? String).map { .progress($0) }
+        case In.needClientToken:
+            return .needClientToken
         default:
             return nil
         }
@@ -286,6 +319,8 @@ public enum PageMessage {
     case network(online: Bool)
     case reconnecting(active: Bool)
     case progress(GraineConnectProgress)
+    /// `graine:need-client-token`: the page was refused for its server token and wants a fresh one. New in 0.14.4.
+    case needClientToken
 }
 
 /**

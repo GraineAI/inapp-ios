@@ -352,6 +352,9 @@ final class ScriptedAudio: CallAudioIO {
     func clear() { clears += 1; buffered = 0 }
     func bufferedSeconds() -> Double { buffered }
     func stop() { stopped = true }
+    /// The system took the audio back: released, what was not heard kept for the restart.
+    private(set) var suspends = 0
+    func suspend() { suspends += 1 }
 
     /// The customer's microphone: one 20 ms frame of a 220 Hz tone at `amp`.
     func speak(amp: Double) {
@@ -403,6 +406,8 @@ final class EngineRig {
     var variables: [(String, String)] = [("who_called", "agent"), ("call_reason", "payment_due")]
     /// The identity fields on the ticket; none by default, as before identity existed.
     var identity: IdentityWire.Fields?
+    /// The agent's server tokens; none by default, as before server tokens existed.
+    var tokens: ClientTokens?
 
     private func makeEngine() -> CallEngine {
         CallEngine(
@@ -413,7 +418,8 @@ final class EngineRig {
                 contextFrame: { [unowned self] in self.contextFrame },
                 session: { [unowned self] done in done(self.session) },
                 runAction: { [unowned self] name, args, answer in self.actionRunner(name, args, answer) },
-                identity: identity
+                identity: identity,
+                tokens: tokens
             ),
             audio: audio,
             network: network,

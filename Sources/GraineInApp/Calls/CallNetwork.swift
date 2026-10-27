@@ -10,6 +10,15 @@ import Foundation
  */
 final class URLSessionCallNetwork: CallNetwork {
     private let session: URLSession
+    /// The agent's settings on a slow network: 15 s without a byte, 30 s in all — what the session always had.
+    private lazy var patient: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+    private var patientMade = false
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -21,6 +30,12 @@ final class URLSessionCallNetwork: CallNetwork {
 
     deinit {
         session.finishTasksAndInvalidate()
+        if patientMade { patient.finishTasksAndInvalidate() }
+    }
+
+    func postPatiently(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
+        patientMade = true
+        send(url, body: body, timeout: 15, on: patient, completion: completion)
     }
 
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void) {
@@ -28,7 +43,12 @@ final class URLSessionCallNetwork: CallNetwork {
     }
 
     func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        send(url, body: body, timeout: 10, on: session, completion: completion)
+    }
+
+    private func send(_ url: URL, body: Data, timeout: TimeInterval, on session: URLSession,
+                      completion: @escaping (Int, Data?, [String: String]) -> Void) {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body

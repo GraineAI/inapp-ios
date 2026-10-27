@@ -38,7 +38,8 @@ final class RingPreparation {
     func put(_ callId: String, _ leg: GraineRtcCall, mint: Data? = nil) {
         lock.lock()
         let older = legs[callId]
-        legs[callId] = Prepared(leg: leg, mint: mint)
+        // Compared without what renews on its own (the app's pass, the user's): RtcMintBody.stable.
+        legs[callId] = Prepared(leg: leg, mint: mint.map(RtcMintBody.stable))
         lock.unlock()
         older?.leg.hangUp()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.keepSeconds) { [weak self, weak leg] in
@@ -54,7 +55,7 @@ final class RingPreparation {
         let held = legs.removeValue(forKey: id)
         lock.unlock()
         guard let prepared = held else { return nil }
-        if let wanted = mint, let had = prepared.mint, wanted != had {
+        if let wanted = mint.map(RtcMintBody.stable), let had = prepared.mint, wanted != had {
             prepared.leg.hangUp()
             return nil
         }
@@ -132,7 +133,9 @@ extension GraineCalls {
             session: CallEngine.sessionLoader(agent),
             runAction: { _, _, answer in answer(.refused("")) },
             callVariables: CallEngine.variables(sdk: [:], whoCalled: whoCalled, reason: call.reason, own: own),
-            identity: agent.identityFields(callId: call.callId)
+            identity: agent.identityFields(callId: call.callId),
+            security: agent.security,
+            tokens: agent.clientTokens
         )
         let debug = agent.config.debug
         RingPreparation.shared.watch(self)

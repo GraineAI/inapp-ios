@@ -94,6 +94,21 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         #expect(tickets(rig).last?["identity"] == nil, "an anonymous ticket")
     }
 
+    @Test func theSameCustomerWrittenAnotherWayChangesNothingAndIsNeverSignedOut() throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session(["identity": ["field": "email"]])
+        rig.graine.identify(["email": "Asha@Example.com"])
+        let socket = try shownOnline(rig)
+        says(socket, "Hello Asha.")
+        rig.graine.identify(["email": "asha@example.com", "name": "Asha"])
+        #expect(rig.network.sockets.count == 1, "still the one connection")
+        #expect(!socket.sentTypes.contains("stop"), "never stopped")
+        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.turns.map(\.text) == ["Hello Asha."])
+        #expect(rig.network.bodies("/api/embed/identity/signout").isEmpty, "the customer still on the phone is never signed out")
+    }
+
     @Test func theSameIdentityChangesNothingOnAnOpenChat() throws {
         let rig = PlatformRig()
         defer { rig.sandbox.clean() }

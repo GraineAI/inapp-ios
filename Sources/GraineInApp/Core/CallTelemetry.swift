@@ -287,6 +287,25 @@ import Foundation
             var heard = ""
             if case .bool(let voice)? = d["voice_heard"] { heard = voice ? ", the agent heard" : ", the agent not heard" }
             return what + (whole("after_ms").map { " after \(seconds($0))" } ?? "") + heard
+        case "audio":
+            let what: String
+            switch word("event") {
+            case "ready"?: what = "audio playing"
+            case "rescued"?: what = "audio started directly"
+            case "deactivated_live"?: what = "audio taken back by the system"
+            case "playout_restarted"?: what = "audio arrived, nothing played: restarted"
+            case "failed"?: what = "audio never played: the call ends"
+            case "route_changed"?: what = "audio moved" + (word("route").map { " to \($0)" } ?? "")
+            default: what = "audio"
+            }
+            var via = ""
+            switch word("via") {
+            case "callkit"?: via = ", activated by the system"
+            case "direct"?: via = ", started directly"
+            case "none"?: via = ", never activated"
+            default: break
+            }
+            return what + (whole("after_ms").map { " after \(seconds($0))" } ?? "") + via + (word("reason").map { " (\($0))" } ?? "")
         default:
             return name
         }
@@ -347,14 +366,31 @@ import Foundation
      *   ended  once, as the call ends: `cause` (GraineCallEndCause's word),
      *          `transport`, `after_ms` (how long the call had its audio) and
      *          `voice_heard` (whether the agent's voice reached the phone)
+     *   audio  the phone's own audio, when it matters — iOS's, where CallKit
+     *          owns it: `event` (`ready`: the audio activated and the agent's
+     *          audio reaching the speaker, once; `rescued`: started directly,
+     *          the system never activated it or took it back mid-call;
+     *          `deactivated_live`: the system took it back while the call
+     *          went on; `playout_restarted`: audio arrived and nothing played,
+     *          so it was started again; `failed`: still nothing, the call
+     *          ends; `route_changed`: the output moved — a headset or car
+     *          kit connected or left, the speaker toggled), `transport`,
+     *          `via` (how the audio was activated by then), `route` (the
+     *          output's kind, never a device's name), `reason` (what the SDK
+     *          saw) and `after_ms` (from the tap)
      */
     static let ahead: [String: [(key: String, type: String)]] = [
         "ended": [("cause", "enum:end_cause"), ("transport", "enum:transport"), ("after_ms", "ms"), ("voice_heard", "bool")],
+        "audio": [("event", "enum:audio_event"), ("transport", "enum:transport"), ("via", "enum:audio_via"), ("route", "enum:audio_route"), ("reason", "enum:audio_reason"), ("after_ms", "ms")],
     ]
 
     /// Their closed lists. `provider_reset` is iOS's own: Android has no CallKit to reset.
     static let aheadEnums: [String: [String]] = [
         "end_cause": ["local_end", "remote_bye", "media_drop", "audio_watch", "provider_reset", "failed"],
+        "audio_event": ["ready", "rescued", "deactivated_live", "playout_restarted", "failed", "route_changed"],
+        "audio_via": ["callkit", "direct", "none"],
+        "audio_route": ["speaker", "receiver", "bluetooth", "wired", "airplay", "car"],
+        "audio_reason": ["no_activation", "deactivated", "interrupted", "unit_failed", "disabled", "inactive", "no_playout"],
     ]
 
     /// The causes an `ended` row may carry: GraineCallEndCause's words.
@@ -370,10 +406,29 @@ import Foundation
      */
     public static func endedFrame(cause: String, transport: String? = nil, afterMs: Int? = nil, voiceHeard: Bool? = nil) -> String? {
         guard endCauses.contains(cause), let keys = ahead["ended"] else { return nil }
-        let clean = cleanData(keys, ["cause": cause, "transport": transport, "after_ms": afterMs, "voice_heard": voiceHeard])
+        return aheadFrame("ended", cleanData(keys, ["cause": cause, "transport": transport, "after_ms": afterMs, "voice_heard": voiceHeard]))
+    }
+
+    /**
+     * THE `audio` ROW — the phone's audio when it matters, on the call's
+     * channel as it happens (kept until the channel joins, like every row):
+     * `{name: "audio", detail, quiet, telemetry, data: {event, transport?,
+     * via?, reason?, after_ms?}}`, the detail one line — "audio arrived,
+     * nothing played: restarted after 2.4s, activated by the system
+     * (interrupted)". Nil for an event that is not one of `audio_event`. A
+     * healthy call sends one (`ready`); everything else is the exception.
+     * Never an id or anything personal.
+     */
+    public static func audioFrame(event: String, transport: String? = nil, via: String? = nil, reason: String? = nil, afterMs: Int? = nil, route: String? = nil) -> String? {
+        guard aheadEnums["audio_event"]?.contains(event) == true, let keys = ahead["audio"] else { return nil }
+        return aheadFrame("audio", cleanData(keys, ["event": event, "transport": transport, "via": via, "route": route, "reason": reason, "after_ms": afterMs]))
+    }
+
+    /// A row sent ahead of the contract, from its cleaned data: the same event and frame `frame` builds.
+    private static func aheadFrame(_ name: String, _ clean: [(String, WireJSON)]) -> String {
         let event = WireJSON.object([
-            ("name", .string("ended")),
-            ("detail", .string(detail("ended", Dictionary(clean, uniquingKeysWith: { first, _ in first })))),
+            ("name", .string(name)),
+            ("detail", .string(detail(name, Dictionary(clean, uniquingKeysWith: { first, _ in first })))),
             ("quiet", .bool(true)),
             ("telemetry", .bool(true)),
             ("data", .object(clean)),

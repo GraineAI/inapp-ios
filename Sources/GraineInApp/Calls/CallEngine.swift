@@ -35,6 +35,17 @@ protocol CallAudioIO: AnyObject {
     func bufferedSeconds() -> Double
     /// Release the microphone and the speaker.
     func stop()
+    /**
+     * The system took the audio back while the call goes on (CallKit's `didDeactivate`): release the microphone and
+     * the speaker, but keep the agent's audio not yet heard — from where it stopped — to play when `startCapture`
+     * runs again, as audio that arrives before the start is kept.
+     */
+    func suspend()
+}
+
+extension CallAudioIO {
+    /// An implementation that keeps nothing across a deactivation releases everything.
+    func suspend() { stop() }
 }
 
 /// A WebSocket. Every callback may arrive on any thread.
@@ -61,12 +72,18 @@ protocol CallNetwork: AnyObject {
     func post(_ url: URL, body: Data, completion: @escaping (Int, Data?) -> Void)
     /// The same POST, with the answer's headers (names lower-cased) — for `Retry-After`. None by default.
     func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void)
+    /// The same, for a request a slow network may take longer over than a call's (the agent's settings: up to 30 s).
+    func postPatiently(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void)
     func openSocket(_ url: URL, protocols: [String], events: CallSocketEvents) -> CallSocket
 }
 
 extension CallNetwork {
     func postWithHeaders(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
         post(url, body: body) { status, data in completion(status, data, [:]) }
+    }
+
+    func postPatiently(_ url: URL, body: Data, completion: @escaping (Int, Data?, [String: String]) -> Void) {
+        postWithHeaders(url, body: body, completion: completion)
     }
 }
 
@@ -126,6 +143,10 @@ final class CallEngine {
         var callVariables: [(String, String)] = []
         /// Who the customer is for memory, the install, their memory choice, the time zone and the call's id — on the ticket only.
         var identity: IdentityWire.Fields? = nil
+        /// The app's and the user's proofs on the ticket and the call session (APP-IDENTITY.md): sealed in, waited for, cured once.
+        var security: EmbedProof? = nil
+        /// The call's agent's server tokens: the ticket (and a WebRTC mint) carries one when they are in play (CLIENT-TOKENS.md); nil sends none.
+        var tokens: ClientTokens? = nil
     }
 
     /// How a call's conversation ended.
@@ -167,6 +188,10 @@ final class CallEngine {
         case row(String)
         /// The audio as received so far, on WebRTC (GraineRtcEvent.audio): the report's audio until the quality row.
         case audio(lossPct: Double?, jitterAvgMs: Double?, jitterMaxMs: Double?, rttAvgMs: Double?)
+        /// The WebRTC leg started the call's audio itself before its dial — CallKit had not activated it: this call's audio runs (CallConversation).
+        case audioStartedDirectly
+        /// The call cannot be heard (the WebRTC leg's playout watch, GraineRtcEvent.playoutFailed): it ends with this.
+        case audioFailed(String)
         case ended(Ending)
     }
 
@@ -238,6 +263,10 @@ final class CallEngine {
     private var voiceRowSent = false
     /// The `ended` row went: once per call.
     private var endedSent = false
+    /// How this call's audio was activated, for its `audio` rows: by CallKit (`startAudio()`), started directly, or not yet.
+    private var audioVia = "none"
+    /// The system took the audio back while the conversation was open, and has not given it back: a direct start now is that deactivation's rescue.
+    private var deactivatedOpen = false
 
     init(setup: Setup, audio: CallAudioIO, network: CallNetwork, scheduler: CallScheduler, telemetry: Telemetry? = nil, onEvent: @escaping (Event) -> Void) {
         self.setup = setup
@@ -390,6 +419,14 @@ final class CallEngine {
                     self?.scheduler.run { self?.captured(frame) }
                 }
                 capturing = true
+                if done == nil {
+                    audioVia = "callkit"
+                } else {
+                    // Started directly — CallKit never activated it, or took it back mid-call: said on the open socket.
+                    sendAudioRow("rescued", reason: deactivatedOpen ? "deactivated" : "no_activation", via: "direct")
+                    audioVia = "direct"
+                }
+                deactivatedOpen = false
                 done?(true)
             } catch {
                 if let done = done {
@@ -401,12 +438,23 @@ final class CallEngine {
         }
     }
 
-    /// The system took the audio back (CallKit's `didDeactivate`): release it. `startAudio` takes it again.
+    /**
+     * The system took the audio back (CallKit's `didDeactivate`): release it,
+     * keeping what the agent said that was not heard yet (`suspend`) — a late
+     * deactivation on a redial within a second must not cut the greeting.
+     * `startAudio` takes it again and plays on from where it stopped. While the
+     * conversation is open it is an interruption, not the end — said in an
+     * `audio` row; GraineCalls starts the audio again if CallKit does not give
+     * it back. Only the call's end drops what was queued (`finish`).
+     */
     func stopAudio() {
         scheduler.run { [self] in
             guard capturing else { return }
             capturing = false
-            audio.stop()
+            audio.suspend()
+            guard phase == .open else { return }
+            deactivatedOpen = true
+            sendAudioRow("deactivated_live", reason: nil)
         }
     }
 
@@ -461,7 +509,7 @@ final class CallEngine {
             return
         }
         let ticketUrl = URL(string: GraineProtocol.trimTrailingSlashes(setup.baseUrl) + "/api/embed/ticket")
-        let body = CallWire.ticketRequest(
+        let fields = CallWire.ticketFields(
             publishableKey: setup.publishableKey,
             metadata: CallWire.ticketVariables(call: setup.callVariables, rest: setup.variables),
             identity: setup.identity
@@ -471,22 +519,28 @@ final class CallEngine {
             return
         }
         ticketAskedAt = scheduler.now
-        network.post(url, body: body) { [weak self] status, data in
-            self?.scheduler.run { self?.ticketArrived(session: session, status: status, data: data) }
+        ConversationTicket.ask(url: url, fields: { fields }, security: setup.security, tokens: setup.tokens, network: network) { [weak self] outcome in
+            self?.scheduler.run { self?.ticketArrived(session: session, outcome: outcome) }
         }
     }
 
-    private func ticketArrived(session: GraineSessionConfig, status: Int, data: Data?) {
+    private func ticketArrived(session: GraineSessionConfig, outcome: ConversationTicket.Outcome) {
         guard phase == .preparing else { return }
         ticketAt = scheduler.now
-        // Any non-2xx — 503 is "no gateway here" — or a network error: the direct socket.
-        var ticket: (ticket: String, wsUrl: String)?
-        if (200...299).contains(status), let body = JSON.object(from: data),
-           let t = JSON.nonEmpty(body["ticket"]), let ws = JSON.nonEmpty(body["wsUrl"]) {
-            ticket = (t, ws)
+        switch outcome {
+        case let .ticket(ticket, wsUrl):
+            ticketCame = true
+            connect(session: session, ticket: (ticket, wsUrl))
+        case .direct:
+            // Any other non-2xx — 503 is "no gateway here" — or a network error: the direct socket.
+            ticketCame = false
+            connect(session: session, ticket: nil)
+        case .refused(let error):
+            // The agent refused this app or this user, or Graine the server token or the key: the call does not open, on either road.
+            ticketCame = false
+            GraineLog.warning("The call was refused (\(error.code.wire)): \(error.message)")
+            finish(.couldNotOpen(ClientTokenRules.callError(error)), closeSocket: false)
         }
-        ticketCame = ticket != nil
-        connect(session: session, ticket: ticket)
     }
 
     private func connect(session: GraineSessionConfig, ticket: (ticket: String, wsUrl: String)?) {
@@ -568,6 +622,13 @@ final class CallEngine {
     private func sendRow(_ row: String) {
         send(row)
         onEvent(.row(row))
+    }
+
+    /// The call's `audio` row (GraineCallTelemetry.audioFrame), on the open socket: the exceptions only — this road plays its own audio.
+    private func sendAudioRow(_ event: String, reason: String?, via: String? = nil) {
+        guard let telemetry = telemetry, phase == .open else { return }
+        let afterMs = GraineCallTelemetry.milliseconds(from: telemetry.tapAt, to: scheduler.now)
+        if let row = GraineCallTelemetry.audioFrame(event: event, transport: "ws", via: via ?? audioVia, reason: reason, afterMs: afterMs) { sendRow(row) }
     }
 
     /// The analytics row for the agent's first audio on the socket — its voice, heard: once.

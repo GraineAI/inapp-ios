@@ -91,16 +91,15 @@ import Testing
 }
 
 @Suite struct CallAudioWatchAtOpenTests {
-    /// The other suspect: no SDK timer ends a call that carries the agent's voice in its first seconds.
-    @Test func aCallOnWebRtcIsNeverWaitedOnItsMediaRunsOnlyOnceItsAudioDoes() {
-        #expect(CallAudioWatch.runningAtOpen(callKitActivated: false, transport: .webrtc), "its media path is up only once its audio runs")
-        #expect(CallAudioWatch.runningAtOpen(callKitActivated: true, transport: .gateway))
-        #expect(!CallAudioWatch.runningAtOpen(callKitActivated: false, transport: .gateway), "the voice socket opens before its audio")
-        #expect(!CallAudioWatch.runningAtOpen(callKitActivated: false, transport: .direct))
+    /// 0.14.4: THIS call's audio, never the transport's word for it — a WebRTC call's media can flow while nothing plays.
+    @Test func aCallIsConnectedAtOnceOnlyWhenItsOwnAudioRuns() {
+        #expect(CallAudioWatch.runningAtOpen(callKitActivated: true, startedDirectly: false), "CallKit activated it since the call began")
+        #expect(CallAudioWatch.runningAtOpen(callKitActivated: false, startedDirectly: true), "the leg started it directly before its dial")
+        #expect(!CallAudioWatch.runningAtOpen(callKitActivated: false, startedDirectly: false), "neither, on WebRTC as on the socket: watched")
         var steps: [CallAudioWatch.Step] = []
         var pending: [() -> Void] = []
         let watch = CallAudioWatch(schedule: { _, fire in pending.append(fire); return {} }, act: { steps.append($0) })
-        watch.opened(audioRunning: CallAudioWatch.runningAtOpen(callKitActivated: false, transport: .webrtc))
+        watch.opened(audioRunning: CallAudioWatch.runningAtOpen(callKitActivated: true, startedDirectly: false))
         #expect(steps == [.connect] && pending.isEmpty, "connected at once: no timer armed, nothing that could end it")
     }
 }

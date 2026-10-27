@@ -52,6 +52,12 @@ final class ChatConnection {
         /// Runs one app action and answers — the SDK's action runner. May call back on any thread.
         var runAction: (_ name: String, _ arguments: [String: Any], _ answer: @escaping (GraineActionResult) -> Void) -> Void
         var now: () -> Date = Date.init
+        /// Whether two identity values are one customer as Graine keys them: a connection is never made again for the same one.
+        var sameCustomer: (String?, String?) -> Bool = { $0 == $1 }
+        /// The app's and the user's proofs on the ticket (APP-IDENTITY.md): sealed into it, waited for, cured once.
+        var security: EmbedProof? = nil
+        /// The agent's server tokens: the ticket carries one when they are in play (CLIENT-TOKENS.md); nil sends none.
+        var tokens: ClientTokens? = nil
     }
 
     typealias Status = GraineChatStatus
@@ -70,6 +76,14 @@ final class ChatConnection {
         case closed(String?)
         /// No window showed the chat for the close delay, and nothing was said either way meanwhile: it hung up, as `close` does.
         case letGo
+        /**
+         * The agent refused this app or this user (`app_not_allowed`, or
+         * `app_not_verified` / `identity_unverified` after the SDK tried once
+         * to cure it), or Graine the server token or the publishable key: the
+         * chat is offline (`refusal`), nothing is dialled again on its own, and
+         * what was waiting is marked failed but kept — the next try sends it.
+         */
+        case refused(GraineServiceError)
     }
 
     private enum Phase {
@@ -110,6 +124,13 @@ final class ChatConnection {
      * says "Disconnected" until the chat connects again.
      */
     private(set) var disconnected = false
+    /**
+     * Graine refused the last try for the server token or the publishable key
+     * (CLIENT-TOKENS.md §2.5): the chat is offline, nothing reconnects by
+     * itself, and the lines that were waiting stay for the next try. Nil once
+     * the chat connects again.
+     */
+    private(set) var refusal: GraineServiceError?
 
     private var phase: Phase = .idle
     private var wanted = false
@@ -238,7 +259,8 @@ final class ChatConnection {
     /// Try again now: what could not be sent goes back in the queue, and the connection is made.
     func retry() {
         scheduler.run { [self] in
-            for turn in transcript.turns where turn.role == .customer && turn.delivery == .failed {
+            // A line a refusal kept waiting is already on its way with the next connection: never twice.
+            for turn in transcript.turns where turn.role == .customer && turn.delivery == .failed && !queue.contains(where: { $0.id == turn.id }) {
                 transcript.setDelivery(turn.id, .sending)
                 queue.append((turn.id, turn.text))
             }
@@ -316,7 +338,7 @@ final class ChatConnection {
      */
     func identityChanged(to current: String?) {
         scheduler.run { [self] in
-            guard ownerKnown, owner != current else { return }
+            guard ownerKnown, !setup.sameCustomer(owner, current) else { return }
             belongsToAnother(current)
         }
     }
@@ -380,6 +402,11 @@ final class ChatConnection {
         phase = .preparing
         transport = nil
         disconnected = false
+        if refusal != nil {
+            // A new try after a refusal: what it kept waiting is waiting again.
+            refusal = nil
+            for item in queue { transcript.setDelivery(item.id, .sending) }
+        }
         setStatus(attempt == 0 ? .connecting : .reconnecting(attempt: attempt))
         setup.session { [weak self] session in
             self?.scheduler.run { self?.sessionArrived(session, mine) }
@@ -397,7 +424,7 @@ final class ChatConnection {
         // Whose this connection is: the identity its ticket is asked with (DESIGN.md "Who a chat belongs to").
         owner = identity?.value
         ownerKnown = true
-        let body = CallWire.ticketRequest(
+        let fields = CallWire.ticketFields(
             publishableKey: setup.publishableKey,
             metadata: CallWire.ticketMetadata(variables.map { ($0.0, $0.1 as Any?) }),
             mode: ChatWire.ticketMode,
@@ -407,16 +434,18 @@ final class ChatConnection {
             openSocket(session: session, ticket: nil, variables: variables, mine: mine)
             return
         }
-        network.post(url, body: body) { [weak self] status, data in
+        ConversationTicket.ask(url: url, fields: { fields }, security: setup.security, tokens: setup.tokens, network: network) { [weak self] outcome in
             self?.scheduler.run {
                 guard let self = self, mine == self.generation, self.phase == .preparing else { return }
-                var ticket: (ticket: String, wsUrl: String)?
-                // Any non-2xx — a 503 says tickets are not offered here — or a network error: the direct socket.
-                if (200...299).contains(status), let body = JSON.object(from: data),
-                   let t = JSON.nonEmpty(body["ticket"]), let ws = JSON.nonEmpty(body["wsUrl"]) {
-                    ticket = (t, ws)
+                switch outcome {
+                case let .ticket(ticket, wsUrl):
+                    self.openSocket(session: session, ticket: (ticket, wsUrl), variables: variables, mine: mine)
+                case .direct:
+                    // Any other non-2xx — a 503 says tickets are not offered here — or a network error: the direct socket.
+                    self.openSocket(session: session, ticket: nil, variables: variables, mine: mine)
+                case .refused(let error):
+                    self.refused(error)
                 }
-                self.openSocket(session: session, ticket: ticket, variables: variables, mine: mine)
             }
         }
     }
@@ -515,6 +544,24 @@ final class ChatConnection {
         reconnectOrGiveUp()
     }
 
+    /**
+     * GRAINE REFUSED THE CONVERSATION — this app or this user (APP-IDENTITY.md
+     * §2.3), or the server token or the publishable key (CLIENT-TOKENS.md
+     * §2.5): the chat is offline with that refusal —
+     * `refusal` — and no reconnect follows: the next would meet the same
+     * answer. What was waiting to go is marked as not sent and kept: the next
+     * try — `open`, `retry`, a message — sends it.
+     */
+    private func refused(_ error: GraineServiceError) {
+        teardown(sendStop: false, reason: error.message)
+        attempt = 0
+        refusal = error
+        for item in queue { transcript.setDelivery(item.id, .failed) }
+        setStatus(.offline)
+        onEvent(.refused(error))
+        onEvent(.changed)
+    }
+
     private func reconnectOrGiveUp() {
         guard wanted, !paused else {
             setStatus(.idle)
@@ -586,6 +633,7 @@ final class ChatConnection {
         owner = current
         attempt = 0
         disconnected = false
+        refusal = nil
         wasOnline = false
         var waiting = transcript.keepUnsent()
         if waiting.count > ChatWire.queueLimit {

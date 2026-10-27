@@ -222,6 +222,62 @@ import Testing
         next.identify(["user_id": "A"], memory: nil)
         #expect(next.snapshot().memory == false)
     }
+
+    @Test func theSameCustomerWrittenAnotherWayIsNoSwitch() {
+        let sandbox = Sandbox()
+        defer { sandbox.clean() }
+        let s = state(sandbox)
+        s.setField("phone")
+        s.identify(["phone": "+91 98765 43210"], memory: false)
+        s.identify(["phone": "98765-43210"], memory: nil)
+        #expect(s.takeSignOuts().isEmpty, "one customer as Graine keys them (identity-vectors.json): never signed out")
+        #expect(s.snapshot().memory == false)
+        // Before the session, a choice made under one spelling is filed for the other.
+        let early = state(sandbox)
+        early.identify(["email": "Ravi@Example.com"], memory: false)
+        early.identify(["email": "ravi@example.com "], memory: nil)
+        early.setField("email")
+        #expect(early.snapshot().memory == false)
+        #expect(IdentityRules.sameCustomer(field: "email", "Asha@Example.com", " asha@example.com"))
+        #expect(!IdentityRules.sameCustomer(field: "email", "asha@example.com", "ravi@example.com"))
+        #expect(!IdentityRules.sameCustomer(field: "email", nil, "asha@example.com"), "nobody is nobody's same customer")
+        #expect(IdentityRules.sameCustomer(field: nil, "u-1", "u-1"))
+    }
+
+    @Test func aChoiceMadeBeforeTheSessionIsNeverFiledForTheNextCustomer() {
+        let sandbox = Sandbox()
+        defer { sandbox.clean() }
+        let kept = MemoryChoices(defaults: sandbox.defaults)
+        // B said "don't remember me" on an earlier launch, on this install.
+        kept.remember(false, field: "user_id", value: "B")
+        // A chose memory on, signed out, and B signed in — all before this launch's session named the trait.
+        let s = state(sandbox)
+        s.identify(["user_id": "A"], memory: true)
+        s.identify(nil, memory: nil)
+        s.identify(["user_id": "B"], memory: nil)
+        s.setField("user_id")
+        #expect(s.snapshot() == .init(value: "B", memory: false), "B's own choice, not A's")
+        #expect(kept.choice(field: "user_id", value: "B") == false, "B's kept choice is never overwritten")
+        // Straight from A to B, and a choice made with nobody identified, are not B's either.
+        let direct = state(sandbox)
+        direct.identify(["user_id": "A"], memory: true)
+        direct.identify(["user_id": "B"], memory: nil)
+        direct.setField("user_id")
+        #expect(direct.snapshot().memory == false)
+        let unnamed = state(sandbox)
+        unnamed.setMemory(true)
+        unnamed.identify(["user_id": "B"], memory: nil)
+        unnamed.setField("user_id")
+        #expect(unnamed.snapshot().memory == false)
+        #expect(kept.choice(field: "user_id", value: "B") == false)
+        // The same customer back before the session, with other traits: their choice is theirs.
+        let back = state(sandbox)
+        back.identify(["user_id": "C"], memory: false)
+        back.identify(nil, memory: nil)
+        back.identify(["user_id": "C", "plan": "Gold"], memory: nil)
+        back.setField("user_id")
+        #expect(back.snapshot() == .init(value: "C", memory: false))
+    }
 }
 
 /// The instance: what the variables, the context and the requests carry.

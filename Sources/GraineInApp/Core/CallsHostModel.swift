@@ -517,6 +517,13 @@ enum CallsHostEvent {
     static let incoming = "incoming"
     static let voipToken = "voipToken"
     static let action = "action"
+    /**
+     * `{}`: a request of the SDK's was refused for its server token — the
+     * JavaScript or Dart token manager fetches a fresh one (one question at a
+     * time) and calls `setClientToken`; the request waits at most 5 s for it,
+     * then goes once more (CLIENT-TOKENS.md §2.4).
+     */
+    static let needClientToken = "needClientToken"
 
     /**
      * `{callId, outcome, reason?, error?, durationSeconds?, hosted?, agent?, connection?}`: `reason` (local, remote,
@@ -852,9 +859,15 @@ protocol CallsHostPlatform: AnyObject {
     func openCallSettings(_ item: GraineCallPermission) -> Bool
     /// What the app's setup still lacks for calls (`GraineCalls.callSetupProblems`); none before there is an instance.
     func callSetupProblems() -> [GraineCallSetupProblem]
+    /// The server token the wrapper pushed (nil: none), for every agent's requests (CLIENT-TOKENS.md §2.4).
+    func setClientToken(_ token: String?)
+    /// Once the instance is made: how an agent's request refused for its token asks for another — `ask`, from any thread.
+    func askForClientTokens(_ ask: @escaping () -> Void)
 }
 
 extension CallsHostPlatform {
+    func setClientToken(_ token: String?) {}
+    func askForClientTokens(_ ask: @escaping () -> Void) {}
     func setSpeakerByDefault(_ on: Bool) {}
     func agentName(forCall callId: String) -> String? { nil }
     var callHosted: Bool { false }
@@ -907,6 +920,7 @@ final class CallsHostCore {
     private var heldMemory: Bool?
     private var heldVariables: Held<[String: Any]?>?
     private var heldScreen: Held<GraineScreen?>?
+    private var heldClientToken: Held<String?>?
     /// `setSpeakerByDefault` before anything was configured: applied, and kept, by the first configure or restore.
     private var heldSpeakerByDefault: Bool?
 
@@ -955,6 +969,11 @@ final class CallsHostCore {
         if instance == nil {
             let made = platform.makeInstance(next)
             instance = (made.publishableKey, GraineProtocol.trimTrailingSlashes(made.baseUrl), made.debug)
+            // A request refused for its server token asks JavaScript or Dart for another, on the main loop.
+            platform.askForClientTokens { [weak self] in
+                guard let self = self else { return }
+                self.platform.nextTurn { [weak self] in self?.needClientToken() }
+            }
             releaseHeld()
         }
         if let running = instance, running.publishableKey != next.publishableKey || running.baseUrl != next.baseUrl {
@@ -1097,15 +1116,40 @@ final class CallsHostCore {
         platform.setScreen(screen)
     }
 
+    /**
+     * THE SERVER TOKEN JavaScript's or Dart's own token manager holds
+     * (CLIENT-TOKENS.md §2.4): on every change, nil for none. Every request the
+     * SDK makes carries it from then on; one refused for it raises
+     * `needClientToken`. A blank or non-string value is none. Before there is
+     * an instance it is held, and applied when it is made. An agent the app
+     * configured with a token provider of its own ignores it.
+     */
+    func setClientToken(_ raw: Any?) {
+        let text = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = (text?.isEmpty ?? true) ? nil : text
+        guard instance != nil else {
+            heldClientToken = Held(value: token)
+            return
+        }
+        platform.setClientToken(token)
+    }
+
+    /// A request of the SDK's was refused for its server token: JavaScript or Dart is asked for a fresh one.
+    func needClientToken() {
+        sinks.emit(CallsHostEvent.needClientToken, [:])
+    }
+
     private func releaseHeld() {
         if let held = heldIdentity { platform.identify(held.value) }
         if let held = heldMemory { platform.setMemory(held) }
         if let held = heldVariables { platform.setVariables(variables.replace(with: held.value)) }
         if let held = heldScreen { platform.setScreen(held.value) }
+        if let held = heldClientToken { platform.setClientToken(held.value) }
         heldIdentity = nil
         heldMemory = nil
         heldVariables = nil
         heldScreen = nil
+        heldClientToken = nil
         for name in actions.names { register(name) }
     }
 

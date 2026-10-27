@@ -33,6 +33,8 @@ public struct GraineSessionConfig {
     public let memoryEnabled: Bool?
     /// Whether Graine rings this app (the workspace's push credentials), and the rules for booking calls. Nil from an older server.
     public let calls: GraineHostedCallsSettings?
+    /// What the agent checks of the app and the user (APP-IDENTITY.md §2.1): nothing, from an older server.
+    let security: SessionSecurity
     /// The parts of the answer a cold start draws from before the network does (SessionCache).
     let cacheable: [String: Any]
 
@@ -62,6 +64,7 @@ public struct GraineSessionConfig {
         self.identity = identity
         self.memoryEnabled = memoryEnabled
         self.calls = calls
+        self.security = .none
         self.cacheable = [:]
     }
 
@@ -78,6 +81,7 @@ public struct GraineSessionConfig {
         self.identity = GraineIdentitySettings.parse(data["identity"])
         self.memoryEnabled = (JSON.unwrap(data["memory"]) as? [String: Any]).flatMap { JSON.unwrap($0["enabled"]) }.flatMap { JSON.bool($0) }
         self.calls = GraineHostedCallsSettings.parse(data["calls"])
+        self.security = SessionSecurity.parse(data["security"])
         var keep: [String: Any] = [:]
         for key in SessionCache.keys {
             if let value = JSON.unwrap(data[key]), !(value is NSNull) { keep[key] = value }
@@ -122,6 +126,10 @@ public struct GraineSessionConfig {
     static func errorMessage(status: Int, body: [String: Any]?) -> String? {
         if (200...299).contains(status) { return nil }
         let serverSaid = JSON.nonEmpty(body?["error"])
+        // "Only my apps": not the Allowed domains step — this app is not one of the agent's apps.
+        if JSON.nonEmpty(body?["code"]) == GraineErrorCode.appNotAllowed.wire {
+            return GraineServiceError.defaultMessage(.appNotAllowed).map { $0 + (serverSaid.map { " (server said: \($0))" } ?? "") }
+        }
         switch status {
         case 403:
             return "This agent does not accept connections from a mobile app yet. Add \"app://\" to its "
@@ -144,7 +152,8 @@ public struct GraineSessionConfig {
  * about a customer.
  */
 final class SessionCache {
-    static let keys = ["agentId", "webcallAgentId", "appearance", "design", "wsHost", "identity", "memory", "calls", "pageVersion"]
+    /// `security` too: a ring that wakes a closed app knows, before the network answers, what the agent checks of it.
+    static let keys = ["agentId", "webcallAgentId", "appearance", "design", "wsHost", "identity", "memory", "calls", "pageVersion", "security"]
 
     private let file: URL?
     private let lock = NSLock()

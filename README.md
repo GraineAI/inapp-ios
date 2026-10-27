@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.3")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.4")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -28,7 +28,9 @@ Add to `Info.plist`, because your app is the one asking for the microphone:
 ```
 
 In the dashboard, add `app://` to the agent's **Allowed domains** (Embed &
-Widgets). Without it, every session is refused with a 403.
+Widgets). Without it, every session is refused with a 403 — unless the agent
+lists your app under *Your apps* with *Only my apps* on, which needs no `app://`
+([Secure your agent](#secure-your-agent-your-app-and-your-users)).
 
 **App Store privacy.** The SDK ships a privacy manifest that declares the
 required-reason APIs it calls — system uptime, for timing, and `UserDefaults`,
@@ -106,7 +108,7 @@ the agent as `tap:<name>` — never a value — at most two a second
 ## Who the customer is, and memory
 
 ```swift
-graine.identify(["user_id": user.id, "name": user.firstName])            // memory on by default
+graine.identify(["user_id": user.id, "name": user.firstName])            // after sign-in and at every launch; memory on by default
 graine.identify(["user_id": user.id], memory: false)                     // this customer: not remembered
 graine.setMemory(true)                                                   // change their mind later
 let kept = try await graine.memories()                                   // what the agent remembers about them
@@ -116,12 +118,186 @@ graine.identify(nil)                                                     // sign
 
 The agent's **Who is the user?** setting (Agent → Memory, in the dashboard) names
 the trait that says who the customer is — `user_id` unless you chose `email`,
-`phone` or a custom trait. Its value is sent only when a conversation starts,
-never in the prompt's variables or the screen context; Graine keeps a one-way
-key of it, not the value. A placeholder (`"guest"`, `"null"`, a masked value)
-is nobody: that conversation is anonymous and has no memory. The memory
-choice is remembered for each customer on the device. `graine.installId` is
-this install's id, kept in the Keychain through reinstalls.
+`phone` or a custom trait. Send exactly that key, before the chat or a call
+opens. Its value is sent only to identify the customer, never in the prompt's
+variables or the screen context; Graine stores it so your team can see who each
+conversation was with, and keeps memory under a one-way key made from it. A
+placeholder (`"guest"`, `"null"`, a masked value) is nobody: that conversation
+is anonymous and has no memory. The memory choice is remembered for each
+customer on the device. `graine.installId` is this install's id, kept in the
+Keychain through reinstalls.
+
+**How memory reaches the agent.** At the start of each chat, Talk session or
+call — in-app calls in both directions too — the agent gets what it remembers
+about the customer: after its prompt for a prompt agent, in the flow's Briefing
+(which every step reads) for a flow agent. During the conversation it looks
+again only when the customer refers to an earlier one ("last time", "I told
+you"). New facts are ready about a minute after a conversation ends.
+`memory: false` keeps a customer out of memory entirely, from their next
+conversation. What is kept, the settings and the prompt lines that make the
+agent use it: https://www.graine.ai/docs/in-app/memory
+
+## Secure your agent: your app and your users
+
+Two protections, each turned on per agent in the dashboard (Agent → Embed &
+Widgets → Install), each with a report-only stage before it refuses anyone:
+
+- **Your apps** — which apps may use the agent's publishable key. The SDK
+  declares your app on every request by itself (its bundle id and Team ID): list
+  it under *Your apps* and turn on *Only my apps*. With *Require a verified
+  app*, the app also proves it is yours with Apple's App Attest.
+- **Verified users** — the identity you give with `identify` is proven by an
+  identity token: an HMAC your server computes with the agent's user secret, or
+  the ID token (JWT) of your own sign-in.
+
+### Identify with a token
+
+```swift
+let graine = GraineInApp.shared
+
+// After sign-in, and at every launch: the token your server issued for this user.
+graine.identify(["user_id": user.id, "name": user.firstName], identityToken: tokens.graine)
+
+// Your app refreshed the token itself:
+graine.setIdentityToken(newToken)
+
+// Or let the SDK ask when the token runs out — a JWT with less than a minute left
+// before a conversation, an answer saying it expired, or a refused request (sent again once):
+graine.identityTokenRefresher = {
+    try? await api.graineIdentityToken()   // nil keeps the token the SDK holds
+}
+
+graine.identify(nil)   // sign-out: the token, and Graine's pass for this user, go with them
+```
+
+For an HMAC token, your server computes HMAC-SHA256 over the identity value — the
+value of the trait the agent's **Who is the user?** setting names, as you pass it
+to `identify` — with the agent's user secret, and returns 64 hex characters (or
+base64). The secret stays on your server: never ship it in the app.
+
+The token is held in memory only and sent only with the identity it was given
+for — never in prompt variables, the screen context, a URL or a log. Another
+customer signing in, or `identify(nil)`, drops it in the same step; `identify`
+with the same customer and no token keeps it. A conversation that has started is
+never cut by a token expiring.
+
+### Prove the app with App Attest
+
+1. In Xcode, select your app target → **Signing & Capabilities** → **+
+   Capability** → **App Attest**.
+2. The entitlement's environment is `development` for builds Xcode installs and
+   `production` for TestFlight and the App Store — Apple uses production for
+   every distributed build, whatever the file says. Development builds are
+   accepted only while the agent's *Allow development builds* is on.
+3. Prove the app once at first launch, so the first conversation does not wait:
+
+```swift
+Task { _ = await GraineInApp.shared.prepareAppVerification() }
+```
+
+The proof is a pass this install keeps in the Keychain for 24 hours, renewed in
+the background when less than 6 hours are left (at launch, when the app comes
+back, and when a call rings). If Apple or Graine cannot be reached, the SDK keeps
+the pass it holds and tries again — 30 seconds, 2 minutes and 10 minutes later,
+then the next time the app comes to the foreground.
+
+### Test devices and debug builds
+
+The Simulator cannot run App Attest. A debug build (`DEBUG`, or the Simulator)
+sends a debug token instead of proving itself — made once per install, kept with
+the install id, and logged once:
+
+```
+Graine debug token for this install: gdt_… — register it under Agent → Embed & Widgets → Install → Development → Debug tokens to use this build while "Require a verified app" is on.
+```
+
+`GraineInApp.shared.debugToken` reads it in code. A release build never makes,
+logs or sends one, unless you opt it in:
+
+```swift
+GraineInApp.configure(GraineConfig(
+    baseUrl: "https://www.graine.ai",
+    publishableKey: "pk_live_…",
+    debugTokenMode: .always      // an internal QA build; .never: a debug build proves itself like a release one
+))
+```
+
+### What Graine made of it
+
+```swift
+let verification = GraineInApp.shared.verification   // @Published
+// verification.app:  .off · .checking · .verified · .testBuild · .debugToken · .unverified (appReason)
+// verification.user: .off · .verified · .testUser · .unverified · .invalid (userReason)
+```
+
+A request the agent refuses throws `GraineServiceError` with `.appNotAllowed`
+(this app is not one of the agent's apps — final, never retried),
+`.appNotVerified` or `.identityUnverified`; for the last two the SDK proves the
+app or asks `identityTokenRefresher`, and asks once more, before you see them.
+The chat and the calls report a refusal through `onError`.
+
+Objective-C and Kotlin Multiplatform: `identify:identityToken:`,
+`setIdentityToken:`, `setIdentityTokenRefresher:` (a block handed a completion),
+`prepareAppVerificationWithCompletion:`, `verificationApp` / `verificationUser`
+with `observeVerification:`, and `debugTokenMode` / `debugToken` on `GraineObjC`.
+
+## Server tokens
+
+The strongest mode: your server vouches for the signed-in user. It mints a
+short-lived token for one user of one agent — `POST /v2/client-tokens` with
+your secret API key: the `agent_id`, the `user_id` your app passes to
+`identify()`, the `scopes` the app needs (`chat`, `call`, `memory`, `booking`,
+`workflows`) and a `ttl_seconds` of 60–3600 — and the SDK sends it with every
+request to Graine. Once the agent's **Require server tokens** is enforced
+(Embed & Widgets), the publishable key alone opens nothing.
+
+```swift
+let graine = GraineInApp.configure(GraineConfig(
+    baseUrl: "https://www.graine.ai",
+    publishableKey: "pk_live_…",
+    // Your server mints it for the signed-in user; nil when there is none right now.
+    tokenProvider: { try await backend.graineToken() }
+))
+```
+
+- The SDK asks at start, again shortly before the token expires (in the
+  background, with a little jitter, and after a failure again in 2, 4, 8 …
+  60 seconds), when a call rings, and when Graine refuses a token — one
+  question at a time, however many requests wait for it, never on the main
+  thread. Nothing is asked while the app is in the background; back in front,
+  a token close to its expiry is refreshed. The SDK reads only the token's
+  `iat` and `exp`, and never keeps it on the device.
+- Throwing, or no answer within 15 seconds, counts as nil.
+- A token is one user's: when `identify()` names another user, or nobody, the
+  token held is let go — a sign-out still carries it — and a fresh one is asked
+  for before anything connects for who it is now.
+- A token that expires never ends, pauses or reconnects a live chat or call:
+  tokens are checked when a conversation starts. A new conversation waits at
+  most 10 seconds for a fresh one, then goes with the newest it has.
+- Refused for its token (`tokenRequired`, `tokenInvalid`, `tokenExpired`), a
+  request asks for a fresh token and goes once more — only with a different
+  one. `tokenScope` and `keyRevoked` are final. A request throws the code, with
+  `GraineServiceError.reason` saying which part failed; a chat that cannot
+  connect is `.offline` with `chat.error` and does not retry by itself; a call
+  that cannot start ends with the code at the start of its error, and never
+  moves from WebRTC to the WebSocket.
+- Without a `tokenProvider` nothing is sent and nothing changes.
+
+| Code | What it means |
+| --- | --- |
+| `tokenRequired` | The agent requires a server token and none came with the request: set `tokenProvider` |
+| `tokenInvalid` | The token could not be checked — `reason`: `malformed`, `signature`, `unknown_key`, `issuer` or `not_yet_valid` |
+| `tokenExpired` | The token expired, and a fresh one did not come in time |
+| `tokenScope` | The token is another agent's (`agent`) or another user's (`user`), or lacks the scope this needs (`scope`) |
+| `keyRevoked` | This publishable key was revoked: update the app with the agent's new key |
+
+Objective-C (and Kotlin Multiplatform, which binds it):
+`configureWithBaseUrl:…chatCloseDelaySeconds:tokenProvider:` takes a
+`void (^)(void (^done)(NSString * _Nullable token))` block. React Native and
+Flutter apps whose own code fetches the tokens push each one to the native call
+engine with `GraineCallsHost.shared.setClientToken(_:)` (their packages do it)
+and hear `needClientToken` when one is refused; an agent configured with its
+own `tokenProvider` keeps its own.
 
 ## Let the agent act
 
@@ -479,7 +655,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.3")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.4")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its
@@ -593,7 +769,9 @@ draws its own UI reads the same tokens from `graine.theme` (or `onTheme`).
 
 Pure logic lives in `Sources/GraineInApp/Core` (Foundation only) and is tested
 on a Mac against `contract/fixtures.json`, `contract/rn-parity.json`,
-`contract/design.json` and `contract/native-calls.json` —
+`contract/design.json`, `contract/native-calls.json` and
+`contract/client-tokens.json` (the server tokens' codes, what a token says about
+its own life and when each is refreshed) —
 answers generated by the React Native SDK itself, which every Graine SDK must
 reproduce. With Xcode, `swift test`.
 With only the Command Line Tools, SwiftPM does not put swift-testing on the

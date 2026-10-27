@@ -20,7 +20,11 @@ import Foundation
  * it, and `startCapture` is called from `provider(_:didActivate:)`. Agent audio
  * that arrives before then (the welcome, usually) is held and played on start.
  * An interruption pauses the engine and its end restarts it; a route change
- * rebuilds it; a restart that fails ends the call (`onFailure`).
+ * rebuilds it; a restart that fails ends the call (`onFailure`). A rebuild
+ * plays again what had not been heard when the old engine stopped
+ * (PlayoutPolicy.takeUnplayed): a headset connecting as the greeting starts
+ * never cuts it. A CallKit deactivation while the call goes on suspends it
+ * (`suspend`): what was not heard is held and plays when the audio is back.
  */
 final class GraineCallAudioIO: CallAudioIO {
     /// The audio cannot go on (an engine that will not restart). The owner ends the call.
@@ -47,6 +51,8 @@ final class GraineCallAudioIO: CallAudioIO {
     private var onFrame: ((Data) -> Void)?
     /// The most agent audio held before the audio session is handed over.
     static let earlyCapSeconds = 20.0
+    /// When the system interrupted the audio (nothing plays from then until it ends): what the rebuild at its end plays again.
+    private var interruptedAt: Double?
 
     deinit {
         for token in observers { NotificationCenter.default.removeObserver(token) }
@@ -109,6 +115,38 @@ final class GraineCallAudioIO: CallAudioIO {
         return running ? policy.bufferedSeconds(now: Self.clock()) : earlySeconds
     }
 
+    /**
+     * CallKit took the audio back while the call goes on: the engine and the microphone are released, and the agent's
+     * audio not yet heard — from where it stopped (PlayoutPolicy.takeUnplayed) — is held, ahead of anything held
+     * already, to play when `startCapture` runs again. Audio that arrives meanwhile is held too, within the same cap.
+     */
+    func suspend() {
+        lock.lock()
+        let unheard = running ? policy.takeUnplayed(at: Self.clock()) : []
+        let oldEngine = engine
+        let oldPlayer = player
+        engine = nil
+        player = nil
+        running = false
+        drainItem?.cancel()
+        drainItem = nil
+        policy.clear(now: Self.clock())
+        early = unheard + early
+        earlySeconds = early.reduce(0) { $0 + $1.seconds }
+        while earlySeconds > GraineCallAudioIO.earlyCapSeconds, early.count > 1 {
+            earlySeconds -= early.removeLast().seconds
+        }
+        interruptedAt = nil
+        let tokens = observers
+        observers = []
+        onFrame = nil
+        lock.unlock()
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+        oldEngine?.inputNode.removeTap(onBus: 0)
+        oldPlayer?.stop()
+        oldEngine?.stop()
+    }
+
     func stop() {
         lock.lock()
         let oldEngine = engine
@@ -121,6 +159,7 @@ final class GraineCallAudioIO: CallAudioIO {
         policy.clear(now: Self.clock())
         early = []
         earlySeconds = 0
+        interruptedAt = nil
         let tokens = observers
         observers = []
         onFrame = nil
@@ -211,13 +250,15 @@ final class GraineCallAudioIO: CallAudioIO {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] note in
             let changed = note.object as AnyObject?
+            // The engine stopped here: what had not been heard by now plays on the rebuilt one.
+            let at = GraineCallAudioIO.clock()
             self?.timers.async {
                 guard let self = self else { return }
                 self.lock.lock()
                 let ours = changed === self.engine
                 self.lock.unlock()
                 // The engine stopped itself (a new route, a new format): rebuild it on the new hardware.
-                if ours { self.rebuild() }
+                if ours { self.rebuild(since: at) }
             }
         })
         observers.append(center.addObserver(
@@ -227,10 +268,23 @@ final class GraineCallAudioIO: CallAudioIO {
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             switch type {
             case .began:
-                // The system has paused the engine; nothing to do until it ends.
-                break
+                // The system has paused the engine; nothing plays until it ends — remembered for the rebuild then.
+                let at = GraineCallAudioIO.clock()
+                self?.timers.async {
+                    guard let self = self else { return }
+                    self.lock.lock()
+                    if self.interruptedAt == nil { self.interruptedAt = at }
+                    self.lock.unlock()
+                }
             case .ended:
-                self?.timers.async { self?.rebuild() }
+                self?.timers.async {
+                    guard let self = self else { return }
+                    self.lock.lock()
+                    let since = self.interruptedAt
+                    self.interruptedAt = nil
+                    self.lock.unlock()
+                    self.rebuild(since: since)
+                }
             @unknown default:
                 break
             }
@@ -238,12 +292,17 @@ final class GraineCallAudioIO: CallAudioIO {
         observers.append(center.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil
         ) { [weak self] _ in
-            self?.timers.async { self?.rebuild() }
+            let at = GraineCallAudioIO.clock()
+            self?.timers.async { self?.rebuild(since: at) }
         })
     }
 
-    /// Tear the engine down and build it again; what was queued is lost, the call goes on. Fails the call if it cannot.
-    private func rebuild() {
+    /**
+     * Tear the engine down and build it again, the call going on; fails the call if it cannot. What had not been
+     * heard by `at` — when the old engine stopped (now, without one) — is played again on the new engine, from where
+     * it stopped: the agent's words, the greeting above all, are never cut by a route change.
+     */
+    private func rebuild(since at: Double? = nil) {
         lock.lock()
         guard running else {
             lock.unlock()
@@ -256,12 +315,15 @@ final class GraineCallAudioIO: CallAudioIO {
         }
         engine = nil
         player = nil
-        policy.clear(now: Self.clock())
+        let unheard = policy.takeUnplayed(at: min(at ?? Self.clock(), Self.clock()))
         drainItem?.cancel()
         drainItem = nil
         var failure: String?
         do {
             try build()
+            let now = Self.clock()
+            for chunk in unheard { hand(policy.push(chunk, now: now)) }
+            armDrain()
         } catch {
             running = false
             failure = "The call's audio could not restart: \(GraineInApp.describe(error))"

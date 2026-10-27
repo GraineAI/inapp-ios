@@ -19,10 +19,11 @@ import Foundation
  * in, JSON text out, with times as epoch milliseconds.
  *
  * Errors are NSErrors in `GraineObjC.errorDomain`: `userInfo[@"code"]` is the
- * stable code (`identity_required`, `too_soon`, `network`… — branch on it),
- * `userInfo[@"retryAfterSeconds"]` how long a rate limit asked to wait (when
- * it said), `localizedDescription` the sentence, and `code` the HTTP status (0
- * when no answer came back).
+ * stable code (`identity_required`, `too_soon`, `network`, `token_scope`… —
+ * branch on it), `userInfo[@"reason"]` the server's one word beside it when it
+ * gave one (`scope`, `signature`…), `userInfo[@"retryAfterSeconds"]` how long
+ * a rate limit asked to wait (when it said), `localizedDescription` the
+ * sentence, and `code` the HTTP status (0 when no answer came back).
  *
  * Several agents: `configureWithBaseUrl:…name:` starts one under its own name
  * and key, `named:` finds it; each facade is its agent's (`chat`, `voice`, its
@@ -42,7 +43,14 @@ enum ObjCBridge {
             ?? GraineServiceError(code: .unknown("server_error"), message: GraineInApp.describe(error))
         var info: [String: Any] = [NSLocalizedDescriptionKey: service.message, "code": service.code.wire]
         if let wait = service.retryAfterSeconds { info["retryAfterSeconds"] = wait }
+        if let reason = service.reason { info["reason"] = reason }
         return NSError(domain: errorDomain, code: service.status, userInfo: info)
+    }
+
+    /// The facade's token block — `done` answered once, from any thread — as the SDK's provider; nil for none.
+    static func tokenFetch(_ block: ((@escaping (String?) -> Void) -> Void)?) -> ClientTokens.Fetch? {
+        guard let block = block else { return nil }
+        return { done in block { token in done(token) } }
     }
 
     /// A JSON object from text; nil for nil, blank or anything that is not an object.
@@ -123,6 +131,11 @@ enum ObjCBridge {
 
     // MARK: What the SDK answers, as the facade's JSON
 
+    /// The verification as the facade's JSON: `{app, appReason, user, userReason}` (null reasons when there are none).
+    static func verification(_ v: GraineVerification) -> [String: Any] {
+        ["app": v.app.rawValue, "appReason": v.appReason ?? NSNull(), "user": v.user.rawValue, "userReason": v.userReason ?? NSNull()]
+    }
+
     static func memory(_ m: GraineMemory) -> [String: Any] {
         ["id": m.id, "text": m.text, "createdAt": millis(m.createdAt), "updatedAt": millis(m.updatedAt)]
     }
@@ -134,6 +147,15 @@ enum ObjCBridge {
             "status": c.status.wire,
             "source": c.source.map { $0.wire as Any } ?? NSNull(),
             "reason": c.reason.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+
+    /// A run `startWorkflow` answered, for a bridge: `{runId, workflowId, alreadyRunning}`.
+    static func workflowRun(_ r: GraineWorkflowRun) -> [String: Any] {
+        [
+            "runId": r.runId,
+            "workflowId": r.workflowId.map { $0 as Any } ?? NSNull(),
+            "alreadyRunning": r.alreadyRunning,
         ]
     }
 
@@ -569,6 +591,8 @@ public final class GraineObjC: NSObject {
     private let events = ObjCObservers<GraineObjCListener>()
     private var eventBlocks: [UUID: (String, String) -> Void] = [:]
     private lazy var relay = ObjCEventRelay(self)
+    /// The `verification` event's subscription, for the facade's life.
+    private var verificationWatch: AnyCancellable?
 
     /// The chat.
     @objc public private(set) lazy var chat = GraineObjCChat(graine: graine)
@@ -581,6 +605,10 @@ public final class GraineObjC: NSObject {
         self.graine = graine
         super.init()
         graine.addListener(relay)
+        // Every change of what Graine made of the app and the user, as the `verification` event.
+        verificationWatch = graine.$verification.dropFirst().removeDuplicates().sink { [weak self] next in
+            self?.onMain { self?.emit("verification", ObjCBridge.verification(next)) }
+        }
     }
 
     private static let lock = NSLock()
@@ -672,6 +700,33 @@ public final class GraineObjC: NSObject {
         ), name: name)
     }
 
+    /**
+     * `configure…name:chatSize:chatCloseDelaySeconds:` with server tokens
+     * (`GraineConfig.tokenProvider`), for a bridge: `tokenProvider` fetches a
+     * fresh token from the app's server — which mints it with
+     * `POST /v2/client-tokens` and its secret API key for the signed-in user —
+     * and hands it to `done` once, from any thread, or nil when none can be had
+     * right now. Called on a background thread and never given anything; no
+     * answer within 15 seconds counts as nil, and a later answer is ignored.
+     * The SDK asks at start, shortly before the token expires, when a call
+     * rings and when Graine refuses a token; every request to Graine carries
+     * the newest one. Nil: no server tokens, as the other selectors. A second
+     * call for a name already configured returns that agent unchanged. Never
+     * nil. New in 0.14.4.
+     */
+    @objc(configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:chatCloseDelaySeconds:tokenProvider:)
+    public static func configure(
+        baseUrl: String, publishableKey: String, appVersion: String?, debug: Bool, endOnBackground: Bool,
+        captureTaps: Bool, transport: String?, variablesJSON: String?, name: String, chatSize: String?, chatCloseDelaySeconds: Int,
+        tokenProvider: ((@escaping (String?) -> Void) -> Void)?
+    ) -> GraineObjC? {
+        configure(config(
+            baseUrl: baseUrl, publishableKey: publishableKey, appVersion: appVersion, debug: debug,
+            endOnBackground: endOnBackground, captureTaps: captureTaps, transport: transport, variablesJSON: variablesJSON,
+            chatSize: chatSize, chatCloseDelaySeconds: chatCloseDelaySeconds, tokenProvider: tokenProvider
+        ), name: name)
+    }
+
     static func configure(_ config: GraineConfig, name: String = GraineAgentRegistry.defaultName) -> GraineObjC {
         facade(for: GraineInApp.configure(config, name: agentName(name)))
     }
@@ -679,9 +734,9 @@ public final class GraineObjC: NSObject {
     static func config(
         baseUrl: String, publishableKey: String, appVersion: String?, debug: Bool, endOnBackground: Bool,
         captureTaps: Bool, transport: String?, variablesJSON: String?, chatSize: String? = nil,
-        chatCloseDelaySeconds: Int = ChatWire.closeDelaySeconds
+        chatCloseDelaySeconds: Int = ChatWire.closeDelaySeconds, tokenProvider: ((@escaping (String?) -> Void) -> Void)? = nil
     ) -> GraineConfig {
-        GraineConfig(
+        var made = GraineConfig(
             baseUrl: baseUrl,
             publishableKey: publishableKey,
             variables: ObjCBridge.object(variablesJSON) ?? [:],
@@ -693,6 +748,9 @@ public final class GraineObjC: NSObject {
             chatSize: chatSize.flatMap { GraineChatSize(rawValue: $0) },
             chatCloseDelaySeconds: chatCloseDelaySeconds
         )
+        // The block answers through `done`, straight to the token manager: the first answer counts, a late one is ignored.
+        made.tokenFetch = ObjCBridge.tokenFetch(tokenProvider)
+        return made
     }
 
     /// The facade over the agent configured under `name` (here or from Swift), or nil.
@@ -760,6 +818,119 @@ public final class GraineObjC: NSObject {
     public func setMemory(_ enabled: Bool) {
         graine.setMemory(enabled)
     }
+
+    // MARK: Your app and your users
+
+    /**
+     * Who is signed in, with the identity token that proves it to an agent
+     * that verifies users (`GraineInApp.identify(_:memory:identityToken:)`):
+     * the HMAC your server computes, or your sign-in's ID token. Held in
+     * memory only, sent only with that identity. nil traits sign out.
+     */
+    @objc(identify:identityToken:)
+    public func identify(_ traits: [String: Any]?, identityToken: String?) {
+        graine.identify(traits.map { $0.mapValues { Optional($0) } }, identityToken: identityToken)
+    }
+
+    @objc(identify:memory:identityToken:)
+    public func identify(_ traits: [String: Any]?, memory: Bool, identityToken: String?) {
+        graine.identify(traits.map { $0.mapValues { Optional($0) } }, memory: memory, identityToken: identityToken)
+    }
+
+    /// `identify:identityToken:` for a bridge: the traits as a JSON object; nil or `null` signs out.
+    @objc(identifyJSON:identityToken:)
+    public func identifyJSON(_ traitsJSON: String?, identityToken: String?) {
+        identify(ObjCBridge.object(traitsJSON), identityToken: identityToken)
+    }
+
+    @objc(identifyJSON:memory:identityToken:)
+    public func identifyJSON(_ traitsJSON: String?, memory: Bool, identityToken: String?) {
+        identify(ObjCBridge.object(traitsJSON), memory: memory, identityToken: identityToken)
+    }
+
+    /// Replace the identity token for the identity that is signed in (`GraineInApp.setIdentityToken`); nil clears it.
+    @objc(setIdentityToken:)
+    public func setIdentityToken(_ token: String?) {
+        graine.setIdentityToken(token)
+    }
+
+    /**
+     * The identity-token refresher for a bridge (`GraineInApp.identityTokenRefresher`):
+     * the block is handed a completion to call once — from any thread — with a
+     * fresh token, or nil to keep the one held. Asked at most once every 30
+     * seconds and never twice at once. nil removes it.
+     */
+    @objc(setIdentityTokenRefresher:)
+    public func setIdentityTokenRefresher(_ refresher: ((@escaping (String?) -> Void) -> Void)?) {
+        guard let refresher = refresher else {
+            graine.identityTokenRefresher = nil
+            return
+        }
+        graine.identityTokenRefresher = {
+            await withCheckedContinuation { continuation in
+                let once = Once<String?> { continuation.resume(returning: $0) }
+                DispatchQueue.main.async { refresher { once.call($0) } }
+            }
+        }
+    }
+
+    /// Whether a refresher is set.
+    @objc public var hasIdentityTokenRefresher: Bool { graine.identityTokenRefresher != nil }
+
+    /**
+     * Prove this app now (`GraineInApp.prepareAppVerification`). The block
+     * hears the verdict on the main thread: `off`, `verified`, `testBuild`,
+     * `debugToken` or `unverified`.
+     */
+    @objc(prepareAppVerificationWithCompletion:)
+    public func prepareAppVerification(completion: @escaping (String) -> Void) {
+        Task { [graine] in
+            let verdict = await graine.prepareAppVerification()
+            await MainActor.run { completion(verdict.rawValue) }
+        }
+    }
+
+    /// What Graine made of this app (`GraineInApp.verification.app`): `off`, `checking`, `verified`, `testBuild`, `debugToken`, `unverified`.
+    @objc public var verificationApp: String { objcOnMainSync { self.graine.verification.app.rawValue } }
+
+    /// Why the app is `unverified`, as the server said it; nil otherwise.
+    @objc public var verificationAppReason: String? { objcOnMainSync { self.graine.verification.appReason } }
+
+    /// What Graine made of the identity (`GraineInApp.verification.user`): `off`, `verified`, `testUser`, `unverified`, `invalid`.
+    @objc public var verificationUser: String { objcOnMainSync { self.graine.verification.user.rawValue } }
+
+    /// Why the identity is `unverified` or `invalid`, as the server said it (`missing`, `expired`, `signature`…); nil otherwise.
+    @objc public var verificationUserReason: String? { objcOnMainSync { self.graine.verification.userReason } }
+
+    /// The verification as JSON `{app, appReason, user, userReason}`, for a bridge.
+    @objc public var verificationJSON: String { objcOnMainSync { ObjCBridge.text(ObjCBridge.verification(self.graine.verification)) } }
+
+    /// For a bridge: `observer` hears the verification's JSON on the main thread after every change, until the registration is stopped.
+    @objc(observeVerification:)
+    public func observeVerification(_ observer: @escaping (String) -> Void) -> GraineObjCRegistration {
+        let watching = graine.$verification.dropFirst().removeDuplicates().sink { next in
+            let json = ObjCBridge.text(ObjCBridge.verification(next))
+            DispatchQueue.main.async { observer(json) }
+        }
+        return GraineObjCRegistration { watching.cancel() }
+    }
+
+    /**
+     * Development mode (`GraineInApp.debugTokenMode`): `automatic` (a debug
+     * build sends its debug token instead of proving itself; a release build
+     * never), `always` (a release build too), `never` (a debug build proves
+     * itself like a release one). A word it does not know is ignored.
+     */
+    @objc public var debugTokenMode: String {
+        get { graine.debugTokenMode.rawValue }
+        set {
+            guard let mode = GraineDebugTokenMode(rawValue: newValue.trimmingCharacters(in: .whitespaces).lowercased()) else { return }
+            graine.debugTokenMode = mode
+        }
+    }
+
+    /// This install's debug token while development mode is on, else nil (`GraineInApp.debugToken`).
+    @objc public var debugToken: String? { graine.debugToken }
 
     /**
      * Forget everything the agent remembers about the signed-in user. The
@@ -868,6 +1039,18 @@ public final class GraineObjC: NSObject {
         graine.track(name, data: ObjCBridge.object(dataJSON) ?? [:])
     }
 
+    /// Something worth speaking up about: the agent may speak first, on the live chat or call (`GraineInApp.reportEvent`).
+    @objc(reportEvent:detail:data:)
+    public func reportEvent(_ name: String, detail: String?, data: [String: Any]?) {
+        graine.reportEvent(name, detail: detail, data: data ?? [:])
+    }
+
+    /// `reportEvent:detail:data:` for a bridge: the data as a JSON object.
+    @objc(reportEvent:detail:dataJSON:)
+    public func reportEvent(_ name: String, detail: String?, dataJSON: String?) {
+        graine.reportEvent(name, detail: detail, data: ObjCBridge.object(dataJSON) ?? [:])
+    }
+
     @objc(tap:)
     public func tap(_ name: String) {
         graine.tap(name)
@@ -974,6 +1157,26 @@ public final class GraineObjC: NSObject {
             do {
                 let status = try await graine.cancelScheduledCall(id: callId)
                 await MainActor.run { completion(status.wire, nil) }
+            } catch {
+                await MainActor.run { completion(nil, ObjCBridge.nsError(error)) }
+            }
+        }
+    }
+
+    /**
+     * Start one of your outreach workflows for the signed-in user (0.14.4) —
+     * `GraineInApp.startWorkflow`, for Objective-C and a bridge: `dataJSON`
+     * is a JSON object of the workflow's fields (nil for none), and the block
+     * hears the run as JSON `{runId, workflowId, alreadyRunning}`, or the
+     * error (`not_allowed`, `identity_required`, `not_verified`,
+     * `rate_limited`, `unavailable`, `invalid_request`, `network`).
+     */
+    @objc(startWorkflowJSON:dataJSON:idempotencyKey:completion:)
+    public func startWorkflowJSON(_ workflow: String, dataJSON: String?, idempotencyKey: String?, completion: @escaping (String?, NSError?) -> Void) {
+        Task { [graine] in
+            do {
+                let run = try await graine.startWorkflow(workflow, data: ObjCBridge.object(dataJSON) ?? [:], idempotencyKey: idempotencyKey)
+                await MainActor.run { completion(ObjCBridge.text(ObjCBridge.workflowRun(run)), nil) }
             } catch {
                 await MainActor.run { completion(nil, ObjCBridge.nsError(error)) }
             }

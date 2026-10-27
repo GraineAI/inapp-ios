@@ -99,6 +99,19 @@ public final class GraineChat: ObservableObject {
     @Published public private(set) var disconnected = false
 
     /**
+     * Why the chat could not connect, when Graine refused it for the server
+     * token or the publishable key — `tokenRequired`, `tokenInvalid`,
+     * `tokenExpired` (the SDK already asked `GraineConfig.tokenProvider` again
+     * and tried once more), `tokenScope`, `keyRevoked`;
+     * `GraineServiceError.reason` says which part failed. Nil otherwise. Such
+     * a refusal is final for that try: `status` is `.offline`, nothing
+     * reconnects by itself, and the messages that were waiting are marked
+     * failed and go with the next try (`open()`, `retry()`, a message).
+     * `GraineListener.onError` hears its sentence too. New in 0.14.4.
+     */
+    @Published public private(set) var error: GraineServiceError?
+
+    /**
      * The ids of the turns a "Disconnected · new conversation" row goes before,
      * in the order of `turns` — Graine began a new conversation under earlier
      * lines; empty when none. The window's own rows, never turns and never
@@ -218,7 +231,12 @@ public final class GraineChat: ObservableObject {
                 guard let graine = graine else { return done(nil) }
                 graine.loadSessionOrCached(done)
             },
-            runAction: CallEngine.actionRunner(graine)
+            runAction: CallEngine.actionRunner(graine),
+            sameCustomer: { [weak graine] a, b in graine?.identity.sameCustomer(a, b) ?? (a == b) },
+            // The app's declaration and the identity's proof on the ticket (APP-IDENTITY.md).
+            security: graine.security,
+            // The ticket carries the agent's server token; checked only here, never on the open socket.
+            tokens: graine.clientTokens
         )
         connection = ChatConnection(setup: setup, network: network, scheduler: scheduler, closeDelaySeconds: closeDelay) { [weak self] event in
             self?.event(event)
@@ -487,16 +505,17 @@ public final class GraineChat: ObservableObject {
      * identified customer's own: another customer's session, or one Graine
      * does not know, is `notFound` — as is an answer that arrives after the
      * identity changed. Throws `GraineServiceError`: `invalidRequest` for a
-     * blank id and `identityRequired` with nobody identified (nothing is
-     * sent), `notFound`, `deviceLimit`, `rateLimited`, `unavailable`, `network`.
+     * blank id and `identityRequired` with nobody identified, or someone else
+     * identified while the agent's settings loaded (nothing is sent),
+     * `notFound`, `deviceLimit`, `rateLimited`, `unavailable`, `network`.
      */
     public func sessionTranscript(id: String) async throws -> GraineSessionTranscript {
         let wanted = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { throw GraineServiceError(code: .invalidRequest, message: "No session id.") }
-        // Who the customer is waits for the agent's settings (they name the trait), as `memories()` does.
-        _ = await graine.sessionNow()
-        guard let value = graine.identity.snapshot().value else {
-            throw GraineServiceError(code: .identityRequired, message: "Nobody is identified: call identify() with the customer's identifier first.")
+        // Who the customer is waits for the agent's settings (they name the trait), as `memories()` does; a session that
+        // could not be loaded is its own refusal, and a customer replaced while it loaded is never asked for.
+        guard let value = try await graine.customerAfterSession().value else {
+            throw GraineServiceError(code: .identityRequired, message: graine.identity.missingIdentityMessage)
         }
         let body = try await graine.requests.post(PastSessionsWire.transcriptPath, [
             ("installId", .string(graine.installId)),
@@ -504,7 +523,7 @@ public final class GraineChat: ObservableObject {
             ("id", .string(wanted)),
         ])
         // Asked for someone who is no longer the one signed in: not this customer's session.
-        guard graine.identity.snapshot().value == value else {
+        guard graine.identity.sameCustomer(graine.identity.snapshot().value, value) else {
             throw GraineServiceError(code: .notFound, message: "That session is not this user's.")
         }
         return PastSessionsWire.transcript(body, id: wanted)
@@ -523,8 +542,14 @@ public final class GraineChat: ObservableObject {
         let generation = pastGeneration
         setPastSessions(GrainePastSessions(sessions: pastSessions.sessions, loading: true, hasMore: pastSessions.hasMore, error: nil))
         // Who the customer is waits for the agent's settings (they name the trait), as `memories()` does.
-        graine.loadSession { [weak self] _ in
+        graine.loadSession { [weak self] session in
             guard let self = self, self.pastGeneration == generation else { return }
+            guard session != nil else {
+                // Not "nobody is identified": the agent's settings could not be loaded, and the next refresh loads them again.
+                self.pastCursor = nil
+                self.setPastSessions(GrainePastSessions(error: self.graine.sessionRefusal().code.wire))
+                return
+            }
             guard let value = self.graine.identity.snapshot().value else {
                 self.pastCursor = nil
                 self.setPastSessions(GrainePastSessions(error: GraineErrorCode.identityRequired.wire))
@@ -599,7 +624,8 @@ public final class GraineChat: ObservableObject {
      */
     func identityChanged(from previous: String?, to current: String?) {
         connection.identityChanged(to: current)
-        guard previous != current else { return }
+        // The same customer written another way keeps their booked calls and past sessions on screen.
+        guard !graine.identity.sameCustomer(previous, current) else { return }
         upcomingEpoch += 1
         lastUpcomingFetch = nil
         if !upcomingCalls.isEmpty { upcomingCalls = [] }
@@ -636,6 +662,7 @@ public final class GraineChat: ObservableObject {
             if rating != connection.rating { rating = connection.rating }
             if wasOnline != connection.wasOnline { wasOnline = connection.wasOnline }
             if disconnected != connection.disconnected { disconnected = connection.disconnected }
+            if error != connection.refusal { error = connection.refusal }
             let marked = connection.transcript.marks
             let before = marked.isEmpty ? [] : connection.transcript.turns.map(\.id).filter { marked.contains($0) }
             if newConversationBefore != before { newConversationBefore = before }
@@ -648,6 +675,10 @@ public final class GraineChat: ObservableObject {
             openedSize = nil
         case .rated(let answer):
             onRated?(answer)
+        case .refused(let refusal):
+            // Loud for the app: an app to list or prove, a key to replace, a provider to fix — never the customer's problem.
+            GraineLog.warning("The chat was refused (\(refusal.code.wire)\(refusal.reason.map { ", \($0)" } ?? "")): \(refusal.message)")
+            graine.notifyListeners { $0.onError(refusal.message) }
         case .opened:
             graine.conversationLive(chat: true)
         case .closed:

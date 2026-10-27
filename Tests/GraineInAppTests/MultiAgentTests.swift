@@ -135,6 +135,41 @@ private final class AgentPair {
         #expect(care.hasScreen)
     }
 
+    @Test func anAgentConfiguredLaterNeverGivesTheNextCustomerTheLastOnesChoice() throws {
+        let pair = AgentPair()
+        pair.sessions()
+        // B said "don't remember me" on an earlier launch, on this phone.
+        MemoryChoices(defaults: pair.sandbox.defaults).remember(false, field: "user_id", value: "B")
+        pair.support.identify(["user_id": "A"], memory: true)
+        pair.support.identify(nil)
+        pair.support.identify(["user_id": "B"])
+        #expect(pair.support.memoryChoice == false, "B's own choice")
+        let care = GraineInApp(
+            config: GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_test_care"),
+            installIds: MemoryInstallIdStore(), defaults: pair.sandbox.defaults,
+            sessionCache: SessionCache(directory: pair.sandbox.folder, agent: "care"),
+            network: RoutedNetwork(), chatScheduler: ManualScheduler(), name: "care", registry: pair.registry
+        )
+        pair.registry.add(care)
+        care.adoptShared()
+        care.finishSession(.success(GraineSessionConfig.parse(["agentId": "agent-care"])))
+        #expect(care.identityFields(callId: nil).value == "B")
+        #expect(care.memoryChoice == false, "A's choice is not B's on an agent made later either")
+        #expect(pair.support.memoryChoice == false && pair.sales.memoryChoice == false, "B's kept choice was not overwritten")
+        // The choice made for B, then an agent made later: B's.
+        pair.support.setMemory(true)
+        let billing = GraineInApp(
+            config: GraineConfig(baseUrl: "https://www.graine.ai", publishableKey: "pk_test_billing"),
+            installIds: MemoryInstallIdStore(), defaults: pair.sandbox.defaults,
+            sessionCache: SessionCache(directory: pair.sandbox.folder, agent: "billing"),
+            network: RoutedNetwork(), chatScheduler: ManualScheduler(), name: "billing", registry: pair.registry
+        )
+        pair.registry.add(billing)
+        billing.adoptShared()
+        billing.finishSession(.success(GraineSessionConfig.parse(["agentId": "agent-billing"])))
+        #expect(billing.memoryChoice == true)
+    }
+
     @Test func schedulingAndMemoryGoToTheAgentsOwnRoutes() async throws {
         let pair = AgentPair()
         pair.sessions(sales: ["calls": ["hosted": true, "scheduling": ["usersCanBook": true]]])

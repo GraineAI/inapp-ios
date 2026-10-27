@@ -323,6 +323,13 @@ public final class GraineVoice: NSObject, ObservableObject {
             graine.onForegroundChange { [weak self] foreground in
                 self?.foregroundChanged(foreground)
             },
+            // Every new server token reaches the page for its own requests; a call in progress is never touched by it.
+            graine.clientTokens.onChange { [weak self] token in
+                DispatchQueue.main.async {
+                    guard let self = self, self.ready else { return }
+                    self.postClientToken(token)
+                }
+            },
         ]
         load(idle: true)
         refreshConnectWait()
@@ -480,7 +487,9 @@ public final class GraineVoice: NSObject, ObservableObject {
      * during a call: queued, it would open the NEXT conversation by announcing
      * a failure from the last one. The screen goes first — an event is about
      * the screen it happened on. `data` may carry `quiet`, `cooldown_seconds`
-     * and `max_per_session`, which the runtime reads.
+     * and `max_per_session`, which the runtime reads; everything else rides
+     * under the event's `data` — a `name` or `detail` key there never replaces
+     * the call's own.
      */
     public func reportEvent(_ name: String, detail: String? = nil, data: [String: Any] = [:]) {
         guard Thread.isMainThread else {
@@ -489,9 +498,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         }
         guard connected else { return }
         if let frame = graine.currentContextFrame() { postContext(frame) }
-        var payload = data
-        if let detail = detail { payload["detail"] = detail }
-        post(GraineProtocol.out(GraineProtocol.Out.appEvent, ["name": name, "data": payload]))
+        post(GraineProtocol.appEvent(name: name, detail: detail, data: data))
     }
 
     /// Reload the page and start the retry ladder over. For a "Try again" button.
@@ -570,21 +577,40 @@ public final class GraineVoice: NSObject, ObservableObject {
         engine.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// Who the customer is for memory: `{type: "graine:identity", value, installId, memory, timezone}`, used on the page's next session.
+    /**
+     * Who the customer is for memory: `{type: "graine:identity", value,
+     * installId, memory, timezone, token?}`, used on the page's next session —
+     * with the identity token given for exactly that value (APP-IDENTITY.md
+     * §1.3), which the page puts inside `identity`. Never the page's URL, and
+     * the debug log shows only whether there is an identity.
+     */
     private func postIdentity() {
         let f = graine.identityFields(callId: nil)
-        post(GraineProtocol.out(GraineProtocol.Out.identity, [
+        var fields: [String: Any?] = [
             "value": f.value,
             "installId": f.installId,
             "memory": f.memory,
             "timezone": f.timezone,
-        ]))
+        ]
+        if let value = f.value, let token = graine.identity.proof(for: value).token { fields["token"] = token }
+        post(GraineProtocol.out(GraineProtocol.Out.identity, fields))
     }
 
     private func postContext(_ frame: [String: Any]) {
         var message = frame
         message["type"] = GraineProtocol.Out.appContext
         post(message)
+    }
+
+    /// The server token, for the page's own requests (CLIENT-TOKENS.md §2.2) — only while tokens are in play.
+    private func postClientToken(_ token: String?) {
+        guard graine.clientTokens.inPlay else { return }
+        postClientTokenAnswer(token)
+    }
+
+    /// The answer to the page's `graine:need-client-token`: the newest token — null when there is none, so it stops waiting.
+    private func postClientTokenAnswer(_ token: String?) {
+        post(GraineProtocol.out(GraineProtocol.Out.clientToken, ["token": token]))
     }
 
     // MARK: - What the page says
@@ -616,6 +642,8 @@ public final class GraineVoice: NSObject, ObservableObject {
             // and nothing later can repair it.
             post(GraineProtocol.out(GraineProtocol.Out.variables, ["variables": graine.currentVariables()]))
             postIdentity()
+            // The token the page's own ticket and call session carry, before anything asks for one.
+            postClientToken(graine.clientTokens.newest)
             if let frame = graine.currentContextFrame() { postContext(frame) }
             if pendingStart && GraineVoice.micGranted() {
                 pendingStart = false
@@ -711,6 +739,13 @@ public final class GraineVoice: NSObject, ObservableObject {
             reconnecting = active
             if active { setCall(connected: connected, connecting: true) }
             report { $0.onReconnecting(active: active) }
+
+        case .needClientToken:
+            // Refused for its token: one question at a time, at most one asked anew in 5 s; the page hears the newest
+            // token either way (it waits at most 5 s, then sends that request once more).
+            graine.clientTokens.refreshForPage { [weak self] token in
+                DispatchQueue.main.async { self?.postClientTokenAnswer(token) }
+            }
 
         case .progress(let progress):
             setAttempt(attempt.after(.progress(progress)))

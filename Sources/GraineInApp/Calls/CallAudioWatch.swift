@@ -16,6 +16,13 @@ import Foundation
  * `active` until its audio runs: a call nobody can hear never connected.
  * Foundation only, with the clock handed in, so a Mac proves it; GraineCalls
  * drives it on the main thread.
+ *
+ * Two watches carry on after it, while the call goes on: GraineCalls starts
+ * the audio again when CallKit takes it back mid-call and does not give it
+ * back within half a second (a deactivation is an interruption, not the end —
+ * and CallKit's are not per call), and the WebRTC leg's playout watch starts
+ * it again when audio arrives and nothing plays, ending the call with this
+ * watch's `failure` if that does not help.
  */
 final class CallAudioWatch {
     enum Step: Equatable {
@@ -50,14 +57,16 @@ final class CallAudioWatch {
     var isWaiting: Bool { waiting }
 
     /**
-     * Whether the call's audio already runs as its conversation opens:
-     * CallKit activated it — or the call is on WebRTC, whose media path comes
-     * up only once its audio runs (CallKit's, or the leg's own direct start).
-     * Then there is nothing to wait for: the watch never touches a call that
-     * is carrying the agent's voice.
+     * Whether THIS call's audio already runs as its conversation opens:
+     * CallKit activated it since the call began, or the SDK started it
+     * directly (the WebRTC leg's own rescue, before its dial). Then there is
+     * nothing to wait for. Never the transport's word for it: a WebRTC call's
+     * media can flow while nothing plays — its audio taken back after the
+     * dial, by a deactivation that was the call before's — so a WebRTC call
+     * is watched, and rescued, exactly as a call on the socket is.
      */
-    static func runningAtOpen(callKitActivated: Bool, transport: CallEngine.Transport) -> Bool {
-        callKitActivated || transport == .webrtc
+    static func runningAtOpen(callKitActivated: Bool, startedDirectly: Bool) -> Bool {
+        callKitActivated || startedDirectly
     }
 
     /// The conversation opened. With the audio already running it is connected now; otherwise the wait begins.

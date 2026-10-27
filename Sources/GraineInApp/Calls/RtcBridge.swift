@@ -53,8 +53,46 @@ import Foundation
      * one asked for on its own, so a ring costs the web route one request.
      */
     public var rang: Bool
+    /**
+     * Before each request to the call-session route — a call's mint, a
+     * grant's renewal — what must be ready first is made ready (APP-IDENTITY.md
+     * §2.1, §1.3: a proof of the app the agent requires, an identity token
+     * about to expire), then `go`: within ten seconds, on any thread. Nil: at
+     * once. `mintBody` is read after it, so the body carries what it brought.
+     */
+    public var beforeMint: ((_ go: @escaping () -> Void) -> Void)?
+    /// Every answer of the call-session route — its status and body — for what it says about the app and the user (`verification`).
+    public var mintAnswered: ((_ status: Int, _ body: Data?) -> Void)?
+    /**
+     * A refusal of a call's mint the core may cure — `app_not_verified`
+     * (prove the app), `identity_unverified` (a fresh identity token):
+     * `retry(true)` once it is cured, and the mint is made once more with a
+     * body read again; `retry(false)` and the refusal stands.
+     */
+    public var cure: ((_ code: String, _ retry: @escaping (Bool) -> Void) -> Void)?
 
-    public init(baseUrl: String, controlHost: String, mintBody: @escaping (String) -> Data, sdkVersion: String, budgetSeconds: Double = 12, debug: Bool = false, rang: Bool = false) {
+    /**
+     * The agent's server tokens (CLIENT-TOKENS.md §2.2): the mint and a grant
+     * request to the web route carry the newest one, and a refusal a fresh
+     * token can lift is sent once more with one. Never in `mintBody` — what a
+     * call was prepared with is compared by it, and a refreshed token is not
+     * another call. Nil: no token is in play.
+     */
+    public var clientTokens: GraineRtcTokens?
+
+    public init(
+        baseUrl: String,
+        controlHost: String,
+        mintBody: @escaping (String) -> Data,
+        sdkVersion: String,
+        budgetSeconds: Double = 12,
+        debug: Bool = false,
+        rang: Bool = false,
+        beforeMint: ((@escaping () -> Void) -> Void)? = nil,
+        mintAnswered: ((Int, Data?) -> Void)? = nil,
+        cure: ((String, @escaping (Bool) -> Void) -> Void)? = nil,
+        clientTokens: GraineRtcTokens? = nil
+    ) {
         self.baseUrl = baseUrl
         self.controlHost = controlHost
         self.mintBody = mintBody
@@ -62,6 +100,45 @@ import Foundation
         self.budgetSeconds = budgetSeconds
         self.debug = debug
         self.rang = rang
+        self.beforeMint = beforeMint
+        self.mintAnswered = mintAnswered
+        self.cure = cure
+        self.clientTokens = clientTokens
+    }
+}
+
+/**
+ * ONE AGENT'S SERVER TOKENS, FOR THE MODULE'S OWN REQUESTS TO THE WEB ROUTE —
+ * the call's mint and a grant request (CLIENT-TOKENS.md §2.2). The rules —
+ * when to ask, one question at a time, the waits — stay in the core.
+ */
+@_spi(GraineRTC) public final class GraineRtcTokens {
+    let tokens: ClientTokens
+
+    init(_ tokens: ClientTokens) {
+        self.tokens = tokens
+    }
+
+    /**
+     * One request: `send` posts the body it is handed and answers. The body
+     * carries the newest token as `clientToken` — a new connection's, so it
+     * waits for a usable one first (at most 10 s) — and an answer `refreshable`
+     * says a fresh token can lift is sent once more with the token a refresh
+     * brought, never with the same one. `done` hears the last answer. Any thread.
+     */
+    public func send<Answer>(
+        _ body: Data,
+        refreshable: @escaping (Answer) -> Bool,
+        send: @escaping (Data, @escaping (Answer) -> Void) -> Void,
+        done: @escaping (Answer) -> Void
+    ) {
+        ClientTokenWire.exchange(tokens, body: body, newConnection: true, refreshable: refreshable, send: send, done: done)
+    }
+
+    /// A refusal's code a fresh server token can lift: `token_required`, `token_invalid`, `token_expired`.
+    public static func refreshable(_ code: String?) -> Bool {
+        guard let word = code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return false }
+        return ClientTokenRules.refreshableCodes.contains(word)
     }
 }
 
@@ -108,14 +185,35 @@ import Foundation
     case unreachable(GraineRtcFallback, detail: String)
     /**
      * A gate refused the call itself (`GraineRtcRefusal.codes`: no credit, a
-     * monthly cap, the agent off or deleted). The call ends with the server's
-     * sentence; the WebSocket would refuse it the same way a second later.
+     * monthly cap, the agent off or deleted), or the web route refused it for
+     * the server token or the key (`GraineRtcRefusal.tokenCodes`). The call
+     * ends with the server's sentence; the WebSocket would refuse it the same way.
      */
     case refused(code: String, message: String)
     /// The call is over after its media flowed.
     case ended(GraineRtcEnding)
+    /**
+     * The call cannot be heard: the agent's audio arrives and none of it
+     * reaches the speaker, even after the leg started the phone's audio
+     * again (its playout watch). The core ends the call as its audio watch
+     * ends one (`CallAudioWatch.failure`, cause `audio_watch`).
+     */
+    case playoutFailed(String)
     /// A line for the debug log.
     case log(String)
+}
+
+/**
+ * THE PHONE'S WORD THAT THE CALL'S AUDIO IS PLAYING. Every WebRTC mint says
+ * the phone will send it (`audio_ready_signal: true`, RtcMintBody), so the
+ * agent's greeting waits for it — a few seconds at most — instead of being
+ * played into a phone whose audio has not started. The leg sends it once per
+ * call on its control channel, once the audio was activated (by CallKit, or
+ * started by the SDK itself) and the phone's playout is seen running.
+ */
+@_spi(GraineRTC) public enum GraineRtcSignal {
+    /// `{"type":"audio","state":"ready"}`, exactly.
+    public static let audioReady = #"{"type":"audio","state":"ready"}"#
 }
 
 @_spi(GraineRTC) public enum GraineRtcEnding: Equatable {
@@ -127,7 +225,30 @@ import Foundation
 
 /// The gates' refusals, as the call session's mint names them: these end the call, they never fall back.
 @_spi(GraineRTC) public enum GraineRtcRefusal {
-    public static let codes: Set<String> = ["insufficient_credits", "parent_out_of_credits", "monthly_cap", "agent_off", "agent_deleted"]
+    /**
+     * Credit, the agent's status — and the agent's refusal of this app
+     * (`app_not_allowed`, and `app_not_verified` once the core could not cure
+     * it, APP-IDENTITY.md §2.3): the WebSocket's ticket would be refused the
+     * same way a second later.
+     */
+    public static let codes: Set<String> = [
+        "insufficient_credits", "parent_out_of_credits", "monthly_cap", "agent_off", "agent_deleted",
+        "app_not_allowed", "app_not_verified",
+    ]
+    /// The refusals the core may cure once (`GraineRtcRequest.cure`) before they end the call.
+    public static let curable: Set<String> = ["app_not_verified", "identity_unverified"]
+    /**
+     * Refusals for the server token, the publishable key or the bot check
+     * (CLIENT-TOKENS.md §5): final for the call — the WebSocket's ticket would
+     * meet the same answer, so it ends with the code as its reason.
+     */
+    public static let tokenCodes: Set<String> = ClientTokenRules.refusalCodes
+
+    /// A mint's refusal that ends the call: a gate's, this app's, or one for the token, the key or the bot check.
+    public static func ends(_ code: String?) -> Bool {
+        guard let word = code?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+        return codes.contains(word) || tokenCodes.contains(word.lowercased())
+    }
 }
 
 /// One call's WebRTC leg. Every method may be called from any thread.
@@ -295,14 +416,18 @@ import Foundation
  * variables are exactly the ticket's (`CallWire.ticketVariables`: the call's
  * own first, then the SDK's, at most twelve, 200 characters each, a kilobyte
  * in all), so a call reaches the agent with the same prompt on either road.
+ * Last, `audio_ready_signal: true`: this phone says when the call's audio
+ * plays (GraineRtcSignal.audioReady), and the greeting waits for it.
  */
 enum RtcMintBody {
+    /// The mint's body, sealed with `credentials` (APP-IDENTITY.md §1: the app's declaration; the token and pass inside `identity`).
     static func json(
         publishableKey: String,
         sessionId: String,
         callVariables: [(String, String)],
         variables: [(String, String)],
-        identity: IdentityWire.Fields?
+        identity: IdentityWire.Fields?,
+        credentials: EmbedCredentials? = nil
     ) -> Data {
         var fields: [(String, WireJSON)] = [
             ("publishableKey", .string(publishableKey)),
@@ -312,6 +437,46 @@ enum RtcMintBody {
             fields.append(("variables", .object(metadata.map { ($0.0, .string($0.1)) })))
         }
         if let identity = identity { fields += IdentityWire.pairs(identity) }
-        return Data(WireJSON.object(fields).text.utf8)
+        fields.append(("audio_ready_signal", .bool(true)))
+        return Data(WireJSON.object(EmbedSeal.seal(fields, credentials)).text.utf8)
+    }
+
+    /**
+     * What makes two mints the same call: the body without what renews on
+     * its own — the app's declaration (its pass is renewed daily) and the
+     * user pass (hourly). Who is calling, the identity token included, stays:
+     * a call prepared with another token is not the call placed now.
+     */
+    static func stable(_ body: Data) -> Data {
+        guard var object = JSON.object(from: body) else { return body }
+        object.removeValue(forKey: "app")
+        if var identity = object["identity"] as? [String: Any] {
+            identity.removeValue(forKey: "pass")
+            object["identity"] = identity
+        }
+        return JSON.string(from: object, sortedKeys: true).map { Data($0.utf8) } ?? body
+    }
+
+    /// Two mint bodies place the same call (`stable`).
+    static func sameCall(_ a: Data, _ b: Data) -> Bool {
+        stable(a) == stable(b)
+    }
+}
+
+extension GraineRtcRequest {
+    /**
+     * The call session asked as APP-IDENTITY.md says: before each mint (and
+     * grant renewal) what is worth waiting for is waited for, every answer's
+     * `verification` is kept, and a curable refusal is cured once.
+     */
+    mutating func guarded(by security: EmbedProof?, identityValue: String?) {
+        guard let security = security else { return }
+        beforeMint = { go in security.beforeConversation(go) }
+        mintAnswered = { status, data in
+            security.heard(status: status, body: JSON.object(from: data), identityValue: identityValue)
+        }
+        cure = { code, retry in
+            security.cure(GraineServiceError(code: GraineErrorCode(wire: code), message: code, status: 403), retry)
+        }
     }
 }

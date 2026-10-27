@@ -31,12 +31,21 @@ import Testing
                 // 0.14.0, public state (PUBLIC-STATE.md).
                 "bookingUnavailableReason", "bookingSlotsJSONForDay:",
                 "componentJSON", "componentPending", "componentPendingKind", "observeComponent:",
+                // 0.14.4, workflows the app starts (PUBLIC-STATE.md §7).
+                "startWorkflowJSON:dataJSON:idempotencyKey:completion:",
+                // 0.14.4, your app and your users (APP-IDENTITY.md §4).
+                "identify:identityToken:", "identify:memory:identityToken:", "identifyJSON:identityToken:", "identifyJSON:memory:identityToken:",
+                "setIdentityToken:", "setIdentityTokenRefresher:", "hasIdentityTokenRefresher", "prepareAppVerificationWithCompletion:",
+                "verificationApp", "verificationAppReason", "verificationUser", "verificationUserReason", "verificationJSON",
+                "observeVerification:", "debugTokenMode", "setDebugTokenMode:", "debugToken",
             ], [
                 "errorDomain", "current", "configureWithBaseUrl:publishableKey:", "configureWithBaseUrl:publishableKey:variables:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:",
                 "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:chatCloseDelaySeconds:",
+                // 0.14.4, server tokens: the block the Kotlin Multiplatform library rides.
+                "configureWithBaseUrl:publishableKey:appVersion:debug:endOnBackground:captureTaps:transport:variablesJSON:name:chatSize:chatCloseDelaySeconds:tokenProvider:",
                 "named:",
             ]),
             "GraineObjCChat": ([
@@ -50,6 +59,8 @@ import Testing
                 // 0.14.3, past sessions (PUBLIC-STATE.md "Past sessions"), and how long an unseen chat is kept.
                 "pastSessionsJSON", "refreshPastSessions", "loadMorePastSessions", "sessionTranscriptJSONWithId:completion:",
                 "closeDelaySeconds", "setCloseDelaySeconds:",
+                // 0.14.4, why the chat could not connect (server tokens, a revoked key).
+                "error",
             ], []),
             "GraineObjCQuickReply": (["label", "text", "initWithLabel:text:"], []),
             "GraineObjCChatRating": (["style", "value", "scale", "json"], []),
@@ -251,6 +262,41 @@ import Testing
         #expect(soon?.userInfo["code"] as? String == "too_soon")
         #expect(soon?.code == 0, "refused on the device: no answer from Graine")
         #expect(rig.network.bodies("/api/embed/calls/schedule").count == asked, "nothing was sent")
+    }
+
+    // MARK: Workflows the app starts
+
+    @Test func aWorkflowStartInTheFacadesShapes() async throws {
+        let rig = PlatformRig()
+        defer { rig.sandbox.clean() }
+        rig.session(["identity": ["field": "user_id"]])
+        let graine = GraineObjC(graine: rig.graine)
+        let nobody = await withCheckedContinuation { c in graine.startWorkflowJSON("Welcome call", dataJSON: nil, idempotencyKey: nil) { _, e in c.resume(returning: e) } }
+        #expect(nobody?.userInfo["code"] as? String == "identity_required")
+        #expect(rig.network.bodies("/api/embed/workflows/start").isEmpty, "nobody identified: nothing is asked")
+
+        rig.graine.identify(["user_id": "P-1234"])
+        rig.network.replies["/api/embed/workflows/start"] = (201, #"{"runId":"oex_1","workflowId":"owf_1","alreadyRunning":false}"#)
+        let started = await withCheckedContinuation { c in
+            graine.startWorkflowJSON("Welcome call", dataJSON: #"{"plan":"gold","seats":3,"trial":true,"user_id":"someone-else"}"#, idempotencyKey: "order-1042:welcome") { j, e in c.resume(returning: (j, e)) }
+        }
+        #expect(started.1 == nil)
+        let run = try #require(parse(started.0) as? [String: Any])
+        #expect(run["runId"] as? String == "oex_1")
+        #expect(run["workflowId"] as? String == "owf_1")
+        #expect((run["alreadyRunning"] as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() && !$0.boolValue } == true, "a boolean, not a 0")
+        let body = try #require(rig.network.bodies("/api/embed/workflows/start").first)
+        #expect(body["idempotencyKey"] as? String == "order-1042:welcome")
+        let data = try #require(body["data"] as? [String: Any])
+        #expect(data["plan"] as? String == "gold")
+        #expect((data["seats"] as? NSNumber)?.intValue == 3)
+        #expect(data["trial"] as? Bool == true)
+        #expect(data["user_id"] == nil, "who the run is for never leaves the device in data")
+
+        rig.network.replies["/api/embed/workflows/start"] = (403, #"{"error":"Your app can't start that workflow.","code":"not_allowed"}"#)
+        let refused = await withCheckedContinuation { c in graine.startWorkflowJSON("Off", dataJSON: nil, idempotencyKey: nil) { _, e in c.resume(returning: e) } }
+        #expect(refused?.userInfo["code"] as? String == "not_allowed")
+        #expect(refused?.code == 403)
     }
 
     @Test func errorsCarryTheirWordTheirStatusAndHowLongToWait() {

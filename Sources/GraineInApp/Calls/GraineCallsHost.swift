@@ -28,8 +28,12 @@ import UIKit
  * Permissions and setup: `callPermissions`, `requestCallPermissions`,
  * `openCallSettings` and `callSetupProblems`, as JSON-safe maps.
  *
+ * Server tokens: a wrapper whose own token manager (JavaScript, Dart) holds
+ * the app's server tokens pushes each new one with `setClientToken`, and hears
+ * `needClientToken` when a request of the SDK's was refused for its token.
+ *
  * Events: `state` (the snapshot, at most once per turn of the main loop),
- * `outcome`, `incoming`, `voipToken` and `action`. Main thread: a call from
+ * `outcome`, `incoming`, `voipToken`, `action` and `needClientToken`. Main thread: a call from
  * another thread hops there first (`configure`, `restore`, `snapshot`,
  * `startCall` and `addSink` wait for their answer), and events are sent on it.
  */
@@ -38,7 +42,7 @@ public final class GraineCallsHost: NSObject {
     /// One per process, like the SDK instance it drives.
     @objc public static let shared = GraineCallsHost()
 
-    /// Receives every event: its name (`state`, `outcome`, `incoming`, `voipToken`, `action`) and its payload. Main thread.
+    /// Receives every event: its name (`state`, `outcome`, `incoming`, `voipToken`, `action`, `needClientToken`) and its payload. Main thread.
     public typealias Sink = (_ event: String, _ payload: [String: Any]) -> Void
 
     private let device = CallsHostDevice()
@@ -188,6 +192,22 @@ public final class GraineCallsHost: NSObject {
     /// The screen, as `{screen, title?, journey?, fields?, error?, data?, availableActions?}`; nil, or no screen name, for none.
     public func setScreen(_ screen: [String: Any]?) {
         onMain { self.core.setScreen(screen) }
+    }
+
+    /**
+     * The server token the wrapper's own token manager holds — on every
+     * change; nil when it has none. Every request the SDK makes to Graine
+     * carries it from then on (calls' credentials and tickets, device
+     * registration, call outcomes, …). When one is refused for its token, the
+     * sinks hear `needClientToken` (an empty payload): fetch a fresh token (one
+     * question at a time) and call this again; the request waits at most 5
+     * seconds for it, then goes once more. Before `configure` it is held and
+     * applied then. An agent the app configured natively with its own
+     * `GraineConfig.tokenProvider` keeps its own tokens and ignores this.
+     * New in 0.14.4.
+     */
+    public func setClientToken(_ token: String?) {
+        onMain { self.core.setClientToken(token) }
     }
 
     /**
@@ -377,6 +397,15 @@ private final class CallsHostDevice: NSObject, CallsHostPlatform, GraineCallsLis
 
     func setScreen(_ screen: GraineScreen?) {
         graine?.setScreen(screen)
+    }
+
+    // Server tokens are the app's: every agent sends the one pushed, and asks the wrapper for another when refused.
+    func setClientToken(_ token: String?) {
+        graine?.pushClientToken(token)
+    }
+
+    func askForClientTokens(_ ask: @escaping () -> Void) {
+        graine?.askHostForClientTokens(ask)
     }
 
     /// On every agent: a call with any of them may ask for it.
