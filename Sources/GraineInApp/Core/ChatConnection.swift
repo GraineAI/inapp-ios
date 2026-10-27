@@ -98,7 +98,18 @@ final class ChatConnection {
     private let onEvent: (Event) -> Void
 
     // Everything below is touched on the scheduler's context only.
+    /// The link's own state: idle, connecting, connected, reconnecting or failed (it gave up). What the chat window draws from.
     private(set) var status: Status = .idle
+    /**
+     * The chat's status as every SDK says it (`GraineChatStatus.of`): the link's,
+     * with `disconnected` while Graine's own end of the conversation stands and
+     * `offline` while the customer is in the chat with a message waiting and
+     * nothing connecting it.
+     */
+    var publicStatus: Status {
+        let waiting = wanted && transcript.turns.contains { $0.role == .customer && $0.delivery == .sending }
+        return GraineChatStatus.of(link: status, disconnected: disconnected, waiting: waiting)
+    }
     private(set) var transcript = ChatTranscript()
     /// The customer sent a turn and no reply has started yet.
     private(set) var awaitingReply = false
@@ -501,7 +512,7 @@ final class ChatConnection {
         // A screen set before the chat opened is the whole context for the agent's first words.
         if let frame = setup.contextFrame(), let text = CallWire.appContextFrame(frame) { write(text) }
         schedulePing()
-        setStatus(.online)
+        setStatus(.connected)
         onEvent(.opened(via))
         flushQueue()
     }
@@ -531,7 +542,7 @@ final class ChatConnection {
                 // The other side ended this conversation. The next message starts another. When it was the agent that
                 // ended it (`conversation_end`), the chat is over rather than offline: idle, as every SDK says it.
                 disconnected = graineEnded
-                setStatus(wanted && !paused && !ended ? .offline : .idle)
+                setStatus(wanted && !paused && !ended ? .failed : .idle)
                 failQueued()
             } else {
                 reconnectOrGiveUp()
@@ -557,7 +568,7 @@ final class ChatConnection {
         attempt = 0
         refusal = error
         for item in queue { transcript.setDelivery(item.id, .failed) }
-        setStatus(.offline)
+        setStatus(.failed)
         onEvent(.refused(error))
         onEvent(.changed)
     }
@@ -569,7 +580,7 @@ final class ChatConnection {
         }
         guard attempt < ChatWire.reconnectDelays.count else {
             attempt = 0
-            setStatus(.offline)
+            setStatus(.failed)
             failQueued()
             return
         }

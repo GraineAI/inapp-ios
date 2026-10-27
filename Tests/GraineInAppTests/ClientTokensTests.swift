@@ -680,7 +680,7 @@ final class TokenAgentRig {
         let socket = try #require(rig.network.socket)
         #expect(socket.protocols == [CallWire.subprotocol, "tkt-1"])
         socket.open()
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(rig.graine.chat.error == nil)
     }
 
@@ -695,7 +695,7 @@ final class TokenAgentRig {
         rig.network.replies["/api/embed/ticket"] = (401, String(decoding: tokenRefusal("key_revoked"), as: UTF8.self))
         rig.graine.chat.shown(true)
         rig.graine.chat.send("Hello")
-        #expect(rig.graine.chat.status == .offline)
+        #expect(rig.graine.chat.status == .failed)
         #expect(rig.graine.chat.error?.code == .keyRevoked)
         #expect(rig.network.sockets.isEmpty, "no direct socket past the refusal")
         #expect(heard.errors.contains("Refused for its key_revoked."))
@@ -715,7 +715,7 @@ final class TokenAgentRig {
         #expect(rig.graine.chat.error == nil)
         let socket = try #require(rig.network.socket)
         socket.open()
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(socket.sent.filter { $0.contains("Hello") }.count == 1)
         #expect(rig.graine.chat.turns.last?.delivery == .sent)
     }
@@ -731,7 +731,7 @@ final class TokenAgentRig {
         #expect(rig.tickets().count == 1 && p.asked == 1)
         #expect(rig.graine.chat.error?.code == .tokenScope && rig.graine.chat.error?.reason == "scope")
         #expect(rig.network.sockets.isEmpty)
-        #expect(rig.graine.chat.status == .offline)
+        #expect(rig.graine.chat.status == .failed)
     }
 
     // MARK: Nothing live is touched
@@ -745,7 +745,7 @@ final class TokenAgentRig {
         rig.graine.chat.shown(true)
         let socket = try #require(rig.network.socket)
         socket.open()
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         // The app's server goes down: the minute's token lapses, and every refresh fails, for ten minutes.
         p.answer = { nil }
         let tickets = rig.tickets().count
@@ -755,7 +755,7 @@ final class TokenAgentRig {
         }
         #expect(p.asked > 2, "the refreshes were tried")
         rig.graine.chat.send("And now?")
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(!socket.closed)
         #expect(!socket.sentTypes.contains("stop"), "no stop frame")
         #expect(socket.sent.contains { $0.contains("And now?") }, "the line went on the live socket")

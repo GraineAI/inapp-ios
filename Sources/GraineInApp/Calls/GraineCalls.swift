@@ -188,6 +188,19 @@ public final class GraineCalls: NSObject, ObservableObject {
      */
     public var speakerByDefault = true
 
+    /**
+     * WHERE THE CALL IS, in one word, as a call screen shows it — the word every
+     * Graine SDK uses (`GraineCallPhase`): `idle`, `ringing`, `calling` (the
+     * customer's call before the agent answers), `connecting`, `active`,
+     * `reconnecting` (a connected call recovering its connection), `ended` — or
+     * `missed`, a ring nobody answered while `missedCall` keeps it (of the last ten
+     * minutes, as `showsCallScreen` says). From `state`, `direction`,
+     * `isReconnecting` and `missedCall`, so it changes with them. New in 0.14.5.
+     */
+    public var phase: GraineCallPhase {
+        GraineCallPhase.of(state, direction: direction, reconnecting: isReconnecting, missed: missedCall?.isRecent() ?? false)
+    }
+
     /// Whether a call screen has something to show: a call, its last second, or a missed ring (of the last ten minutes) to call back.
     public var showsCallScreen: Bool {
         if case .idle = state { return missedCall?.isRecent() ?? false }
@@ -221,6 +234,8 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var levelItem: DispatchWorkItem?
     private var levelSteppedAt: TimeInterval?
     private var unwatchContext: (() -> Void)?
+    /// Stops the call taking its agent's app events (`GraineInApp.reportEvent`).
+    private var unwatchEvents: (() -> Void)?
     private var routeObserver: NSObjectProtocol?
     /// CallKit activated this call's audio session (`didActivate`), and has not taken it back.
     private var audioActive = false
@@ -897,6 +912,12 @@ public final class GraineCalls: NSObject, ObservableObject {
         engine.start()
         if audioActive { engine.startAudio() }
         unwatchContext = graine.onContext { [weak engine] frame in engine?.sendContext(frame) }
+        // The app's events reach the agent on the call, once it is connected — on its own channel (0.14.5).
+        unwatchEvents = graine.onAppEvent { [weak self, weak engine] frame in
+            guard let self = self, let engine = engine, self.callUUID == uuid, self.machine.state == .active else { return false }
+            engine.sendEvent(frame)
+            return true
+        }
     }
 
     private func engineEvent(_ event: CallEngine.Event, uuid: UUID) {
@@ -1164,6 +1185,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         engine = nil
         unwatchContext?()
         unwatchContext = nil
+        unwatchEvents?()
+        unwatchEvents = nil
         if agentSpeaking { agentSpeaking = false }
         setReconnecting(false)
         resetLevel()

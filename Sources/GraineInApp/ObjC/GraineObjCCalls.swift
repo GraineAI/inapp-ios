@@ -317,6 +317,12 @@ public final class GraineObjCCalls: NSObject {
      * `provider_reset` or `failed`; nil otherwise.
      */
     @objc public var endCause: String? { snapshot()["endCause"] as? String }
+    /**
+     * Where the call is, in the word every Graine SDK uses (`GraineCalls.phase`):
+     * `idle`, `ringing`, `calling`, `connecting`, `active`, `reconnecting`,
+     * `ended` or `missed`. New in 0.14.5.
+     */
+    @objc public var phase: String { snapshot()["phase"] as? String ?? GraineCallPhase.idle.rawValue }
     /// How loud the agent's voice is as it is heard, 0–1 (`GraineCalls.agentLevel`): for a visualiser.
     @objc public var agentLevel: Double { (snapshot()["agentLevel"] as? NSNumber)?.doubleValue ?? 0 }
     /// Whether `agentLevel` has been measured on this call; until it has, move a visualiser with `agentSpeaking`.
@@ -337,7 +343,8 @@ public final class GraineObjCCalls: NSObject {
     /**
      * The call as JSON, for a bridge: every field above, plus `caption`,
      * `transcript` (`[{role, text, live}]`, the call's lines so far),
-     * `connection` (as `connectionJSON`, or null) and `missedCall`.
+     * `connection` (as `connectionJSON`, or null), `missedCall` and `phase`
+     * (`GraineCalls.phase`'s word, 0.14.5).
      */
     @objc public var snapshotJSON: String { ObjCBridge.text(snapshot()) }
 
@@ -349,11 +356,13 @@ public final class GraineObjCCalls: NSObject {
                 "agent": NSNull(), "transport": NSNull(), "transportFallbackReason": NSNull(),
                 "reason": NSNull(), "agentLevel": 0.0, "agentLevelHeard": false, "connectedAt": NSNull(),
                 "transcript": [Any](), "connection": NSNull(), "endCause": NSNull(), "speakerByDefault": true,
+                "phase": GraineCallPhase.idle.rawValue,
             ]
             #if os(iOS)
             let c = graine.calls
             let state = ObjCBridge.callState(c.state)
             o["state"] = state.word
+            o["phase"] = c.phase.rawValue
             o["endReason"] = state.endReason ?? NSNull()
             o["callId"] = c.callId ?? NSNull()
             o["callerName"] = c.callerName

@@ -127,7 +127,7 @@ import Testing
         let socket = rig.online()
         socket.frame(welcome)
         socket.frame(["type": "conversation_end"])
-        #expect(rig.chat.ended && rig.chat.status == .online, "the socket stays open a moment, for a rating")
+        #expect(rig.chat.ended && rig.chat.status == .connected, "the socket stays open a moment, for a rating")
         socket.serverClose(1000, reason: "conversation ended")
         #expect(rig.chat.status == .idle, "over, not offline")
         #expect(!rig.chat.disconnected && rig.chat.ended)
@@ -142,7 +142,7 @@ import Testing
         let rig = ChatRig()
         let socket = rig.online()
         socket.serverClose(1000, reason: "closed")
-        #expect(rig.chat.status == .offline, "unchanged: closed with nothing ended")
+        #expect(rig.chat.status == .failed && rig.chat.publicStatus == .failed, "closed with nothing ended: it gave up (0.14.5: failed, where it said offline)")
     }
 }
 

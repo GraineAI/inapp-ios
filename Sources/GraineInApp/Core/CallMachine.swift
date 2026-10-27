@@ -94,6 +94,46 @@ public enum GraineCallState: Equatable, Sendable {
     }
 }
 
+/**
+ * WHERE A NATIVE CALL IS, as a call screen shows it — the one word every Graine
+ * SDK uses for it (sdk/contract/PUBLIC-STATE.md, "Calls"): `GraineCalls.phase`.
+ * Raw values are the words; switch with a `default`, as more may come.
+ * New in 0.14.5.
+ */
+public enum GraineCallPhase: String, Sendable, CaseIterable {
+    /// No call.
+    case idle
+    /// An agent's call is ringing on this device.
+    case ringing
+    /// The customer's call, before the agent answers.
+    case calling
+    /// An answered ring, connecting.
+    case connecting
+    /// On the call.
+    case active
+    /// On the call, its connection being recovered: "Reconnecting…".
+    case reconnecting
+    /// The call is over — its last moment on screen.
+    case ended
+    /// A ring nobody answered (`GraineCalls.missedCall`), until the customer calls back, dismisses it, or another call rings or is placed.
+    case missed
+
+    /**
+     * The phase of a call in `state`: a customer's call not yet answered is
+     * `calling`; a connected call recovering its connection is `reconnecting`;
+     * no call, with a missed ring kept to call back, is `missed`.
+     */
+    static func of(_ state: GraineCallState, direction: GraineCallDirection?, reconnecting: Bool, missed: Bool) -> GraineCallPhase {
+        switch state {
+        case .idle: return missed ? .missed : .idle
+        case .ringing: return .ringing
+        case .connecting: return direction == .outgoing ? .calling : .connecting
+        case .active: return reconnecting ? .reconnecting : .active
+        case .ended: return .ended
+        }
+    }
+}
+
 /// What became of a call — for the app's server.
 public enum GraineCallOutcome: Equatable, Sendable {
     /// The customer answered the agent's call.

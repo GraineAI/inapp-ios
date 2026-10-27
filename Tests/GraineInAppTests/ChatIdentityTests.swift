@@ -36,7 +36,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         rig.graine.chat.shown(true)
         let socket = try #require(rig.network.socket)
         socket.open()
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         return socket
     }
 
@@ -46,7 +46,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         rig.scheduler.advance(CallWire.closeGraceSeconds + 0.05)
         #expect(old.closed, "then closed")
         #expect(!rig.graine.chat.disconnected, "no Disconnected")
-        #expect(rig.graine.chat.status != .offline, "not a failure")
+        #expect(rig.graine.chat.status != .failed, "not a failure")
         #expect(!rig.graine.chat.wasOnline, "no reconnect banner: a first connect for the new identity")
     }
 
@@ -64,7 +64,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         #expect(rig.graine.chat.status == .connecting)
         #expect(whose(tickets(rig).last) == "u-1", "with a ticket for the user")
         try #require(rig.network.socket).open()
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(rig.network.bodies("/api/embed/identity/signout").isEmpty, "signing in signs nobody out")
     }
 
@@ -104,7 +104,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         rig.graine.identify(["email": "asha@example.com", "name": "Asha"])
         #expect(rig.network.sockets.count == 1, "still the one connection")
         #expect(!socket.sentTypes.contains("stop"), "never stopped")
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(rig.graine.chat.turns.map(\.text) == ["Hello Asha."])
         #expect(rig.network.bodies("/api/embed/identity/signout").isEmpty, "the customer still on the phone is never signed out")
     }
@@ -120,7 +120,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         rig.graine.setMemory(true)
         #expect(rig.network.sockets.count == 1, "still the one connection")
         #expect(!socket.sentTypes.contains("stop"), "never stopped")
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
         #expect(rig.graine.chat.turns.map(\.text) == ["Hello Meera."])
     }
 
@@ -244,7 +244,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         rig.network.releaseTickets()
         #expect(rig.network.sockets.count == 1, "the first ticket's answer came too late to be used")
         try #require(rig.network.socket).open()
-        #expect(rig.chat.status == .online)
+        #expect(rig.chat.status == .connected)
     }
 
     @Test func aSocketNotYetOpenIsLetGoAndItsLateOpenIsNotTheChats() throws {
@@ -260,7 +260,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
         let second = try #require(rig.network.socket)
         #expect(second !== first)
         second.open()
-        #expect(rig.chat.status == .online)
+        #expect(rig.chat.status == .connected)
     }
 
     @Test func failedLinesStayAndGoOnTheNextConnectionAsTheSendingOnesDo() throws {
@@ -273,7 +273,7 @@ private func whose(_ ticket: [String: Any]?) -> String? {
             rig.scheduler.advance(delay + 0.1)
         }
         rig.network.socket?.fail("refused")
-        #expect(rig.chat.status == .offline)
+        #expect(rig.chat.status == .failed)
         #expect(rig.chat.transcript.turns.map(\.delivery) == [.failed])
         let sockets = rig.network.sockets.count
 

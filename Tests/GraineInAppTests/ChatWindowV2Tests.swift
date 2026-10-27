@@ -475,17 +475,17 @@ private final class FoldRig {
 
     @Test func theHeaderSaysWhereTheChatIs() throws {
         let online = try tokens().header
-        #expect(ChatWindowRules.headerStatus(online, status: .online, typing: false, subtitle: "", typingText: "") == .words("Online", dot: true))
+        #expect(ChatWindowRules.headerStatus(online, status: .connected, typing: false, subtitle: "", typingText: "") == .words("Online", dot: true))
         #expect(ChatWindowRules.headerStatus(online, status: .connecting, typing: false, subtitle: "", typingText: "") == .waiting("Connecting…"))
         #expect(ChatWindowRules.headerStatus(online, status: .reconnecting(attempt: 2), typing: false, subtitle: "", typingText: "") == .waiting("Reconnecting…"))
         #expect(ChatWindowRules.headerStatus(online, status: .offline, typing: false, subtitle: "Here for you", typingText: "") == .words("Not connected", dot: false))
-        #expect(ChatWindowRules.headerStatus(online, status: .online, typing: true, subtitle: "", typingText: "") == .words("Online", dot: true),
+        #expect(ChatWindowRules.headerStatus(online, status: .connected, typing: true, subtitle: "", typingText: "") == .words("Online", dot: true),
                 "typing shows only where the status says so")
         let typing = try tokens(["header": ["typingStatus": true, "status": "none"]]).header
-        #expect(ChatWindowRules.headerStatus(typing, status: .online, typing: true, subtitle: "", typingText: "Writing…") == .words("Writing…", dot: false))
-        #expect(ChatWindowRules.headerStatus(typing, status: .online, typing: false, subtitle: "", typingText: "") == .none)
+        #expect(ChatWindowRules.headerStatus(typing, status: .connected, typing: true, subtitle: "", typingText: "Writing…") == .words("Writing…", dot: false))
+        #expect(ChatWindowRules.headerStatus(typing, status: .connected, typing: false, subtitle: "", typingText: "") == .none)
         let words = try tokens(["header": ["status": "text"]]).header
-        #expect(ChatWindowRules.headerStatus(words, status: .online, typing: false, subtitle: "We reply fast", typingText: "") == .words("We reply fast", dot: false))
+        #expect(ChatWindowRules.headerStatus(words, status: .connected, typing: false, subtitle: "We reply fast", typingText: "") == .words("We reply fast", dot: false))
         let loader = GraineLoaderText(connecting: "Un momento…")
         #expect(ChatWindowRules.headerStatus(online, status: .connecting, typing: false, subtitle: "", typingText: "", loader: loader) == .waiting("Un momento…"),
                 "the brand's own connecting words")
@@ -556,7 +556,7 @@ private final class FoldRig {
         #expect(ChatWindowRules.banner(status: .reconnecting(attempt: 1), wasOnline: false, turns: []) == nil, "a first connect is the header's to say")
         #expect(ChatWindowRules.banner(status: .offline, wasOnline: true, turns: [waiting]) == .offline)
         #expect(ChatWindowRules.banner(status: .offline, wasOnline: true, turns: []) == nil)
-        #expect(ChatWindowRules.banner(status: .online, wasOnline: true, turns: []) == nil)
+        #expect(ChatWindowRules.banner(status: .connected, wasOnline: true, turns: []) == nil)
         #expect(ChatWindowRules.newCount(0) == nil && ChatWindowRules.newCount(3) == "3 new" && ChatWindowRules.newCount(12) == "9+ new")
         #expect(ChatWindowRules.imageHeight("auto", width: 300, auto: 140) == 140)
         #expect(ChatWindowRules.imageHeight("square", width: 300, auto: 140) == 260, "never past 260")

@@ -27,7 +27,7 @@ private let welcome: [String: Any] = ["type": "text", "data": "<beginning_of_str
     }
 
     private func stillUp(_ socket: FakeSocket, _ rig: PlatformRig) -> Bool {
-        rig.graine.chat.status == .online && rig.graine.chat.isOpen && !socket.sent.contains(CallWire.stopFrame)
+        rig.graine.chat.status == .connected && rig.graine.chat.isOpen && !socket.sent.contains(CallWire.stopFrame)
     }
 
     /// Closed as close() closes it: the stop frame, idle, not Disconnected — and nothing dials it again.

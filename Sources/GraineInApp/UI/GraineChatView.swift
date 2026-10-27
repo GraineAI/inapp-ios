@@ -93,7 +93,7 @@ struct GraineChatScreen: View {
             GraineChatWindow(
                 tokens: t, type: type, accent: accent, onAccent: onAccent,
                 heading: dash.heading, logoUrl: dash.logoUrl, logoPlate: dash.logoPlate,
-                turns: chat.turns, status: chat.status, typing: chat.typing, lifted: keyboard.frame != nil,
+                turns: chat.turns, status: chat.linkStatus, typing: chat.typing, lifted: keyboard.frame != nil,
                 fills: true, collapseLabel: "Close",
                 upcoming: chat.upcomingCalls, cancelling: chat.cancelling, cancelFailed: chat.cancelFailed,
                 callName: graine.sessionOrCached?.calls?.callName,

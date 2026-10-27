@@ -306,7 +306,7 @@ enum ChatWindowRules {
         if disconnected { return .words("Disconnected", dot: false) }
         if typing && header.typingStatus { return .words(typingText.isEmpty ? "Typing…" : typingText, dot: false) }
         if header.status == "none" { return .none }
-        guard status == .online else { return .words("Not connected", dot: false) }
+        guard status == .connected else { return .words("Not connected", dot: false) }
         let words = subtitle.isEmpty ? "Online" : subtitle
         return .words(words, dot: header.status == "online")
     }
@@ -346,7 +346,7 @@ enum ChatWindowRules {
     static func banner(status: GraineChatStatus, wasOnline: Bool, turns: [GraineChatTurn]) -> Banner? {
         if case .reconnecting = status, wasOnline { return .reconnecting }
         let waiting = turns.contains { $0.role == .customer && $0.delivery == .sending }
-        if waiting && (status == .offline || status == .idle) { return .offline }
+        if waiting && (status == .failed || status == .offline || status == .idle) { return .offline }
         return nil
     }
 

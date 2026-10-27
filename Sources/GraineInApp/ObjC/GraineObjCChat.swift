@@ -153,13 +153,23 @@ public final class GraineObjCChat: NSObject {
      * `idle`, `connecting`, `online`, `reconnecting` or `offline` — or
      * `disconnected` while Graine's own end of the conversation stands (idle
      * or its time limit: `disconnected`), until the next open or message.
+     * The words the facade has always used, kept for bridges built on them;
+     * `phase` says the chat's status in the words every Graine SDK uses.
      */
     @objc public var status: String {
-        objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.status, disconnected: self.graine.chat.disconnected).word }
+        objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.linkStatus, disconnected: self.graine.chat.disconnected).word }
     }
 
+    /**
+     * The chat's status in the words every Graine SDK uses (`GraineChat.status`,
+     * `GraineChatStatus.wire`): `idle`, `connecting`, `connected`, `reconnecting`,
+     * `offline` (a message waiting, nothing connecting it), `failed` (it gave up)
+     * or `disconnected` (Graine ended the conversation). New in 0.14.5.
+     */
+    @objc public var phase: String { objcOnMainSync { self.graine.chat.status.wire } }
+
     /// While reconnecting, which attempt this is (of six); 0 otherwise.
-    @objc public var reconnectAttempt: Int { objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.status).attempt } }
+    @objc public var reconnectAttempt: Int { objcOnMainSync { ObjCBridge.chatStatus(self.graine.chat.linkStatus).attempt } }
 
     /**
      * Graine ended the conversation itself (idle, or the session's time limit):
@@ -287,13 +297,14 @@ public final class GraineObjCChat: NSObject {
      * status, attempt, typing, open, upcomingCalls: [{id, at, status, source, reason}], quickReplies: [{label, text}],
      * ended, rating: {value, scale, style} | null, pin: {title, subtitle, imageUrl, badge} | null, disconnected,
      * wasOnline, newConversationBefore: [turn id], sessionId, sessions: [{id, startedAt, endedAt, channel, turns,
-     * current}], error: {code, message, reason} | null}` — `status` as the property says it, `disconnected` included;
+     * current}], error: {code, message, reason} | null, phase}` — `status` as the property says it, `disconnected` included,
+     * and `phase` as `phase` says it (0.14.5);
      * `session` and `sessionId` null when there is none; `error` the refusal for the server token or the key (`error`).
      */
     @objc public var snapshotJSON: String {
         objcOnMainSync {
             let chat = self.graine.chat
-            let status = ObjCBridge.chatStatus(chat.status, disconnected: chat.disconnected)
+            let status = ObjCBridge.chatStatus(chat.linkStatus, disconnected: chat.disconnected)
             return ObjCBridge.text([
                 "disconnected": chat.disconnected,
                 "wasOnline": chat.wasOnline,
@@ -305,6 +316,7 @@ public final class GraineObjCChat: NSObject {
                 "sessions": chat.sessions.map { ObjCBridge.session($0) },
                 "turns": chat.turns.map { ObjCBridge.turn($0) },
                 "status": status.word,
+                "phase": chat.status.wire,
                 "attempt": status.attempt,
                 "typing": chat.typing,
                 "open": chat.isOpen,

@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.4")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.5")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -278,7 +278,8 @@ let graine = GraineInApp.configure(GraineConfig(
   request asks for a fresh token and goes once more — only with a different
   one. `tokenScope` and `keyRevoked` are final. A request throws the code, with
   `GraineServiceError.reason` saying which part failed; a chat that cannot
-  connect is `.offline` with `chat.error` and does not retry by itself; a call
+  connect is `.failed` (0.14.5; `.offline` before) with `chat.error` and does
+  not retry by itself; a call
   that cannot start ends with the code at the start of its error, and never
   moves from WebRTC to the WebSocket.
 - Without a `tokenProvider` nothing is sent and nothing changes.
@@ -655,7 +656,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.4")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.5")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

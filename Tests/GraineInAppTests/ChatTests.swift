@@ -221,7 +221,7 @@ final class ChatRig {
         #expect(!socket.url.absoluteString.contains("P-1"), "the identifier never rides a URL")
 
         socket.open()
-        #expect(rig.chat.status == .online)
+        #expect(rig.chat.status == .connected)
         #expect(socket.sentTypes == ["init", "app_context"])
         rig.scheduler.advance(25.1)
         #expect(socket.sentTypes.last == "ping")
@@ -295,7 +295,7 @@ final class ChatRig {
         rig.scheduler.advance(0.2)
         #expect(rig.network.sockets.count == 2, "again after a second")
         rig.network.socket!.open()
-        #expect(rig.chat.status == .online)
+        #expect(rig.chat.status == .connected)
 
         // Down for good: every attempt fails.
         rig.network.socket!.fail("gone")
@@ -305,7 +305,7 @@ final class ChatRig {
             waited += delay
             rig.network.socket!.fail("still gone")
         }
-        #expect(rig.chat.status == .offline)
+        #expect(rig.chat.status == .failed)
         rig.chat.send("are you there?")
         // Sending reconnects at once rather than sitting offline.
         #expect(rig.chat.status == .connecting)
@@ -314,7 +314,7 @@ final class ChatRig {
             rig.scheduler.advance(delay + 0.01)
             rig.network.socket!.fail("no")
         }
-        #expect(rig.chat.status == .offline)
+        #expect(rig.chat.status == .failed)
         #expect(rig.chat.transcript.turns.last?.delivery == .failed, "never shown as sent, never silently lost")
         rig.chat.retry()
         #expect(rig.chat.transcript.turns.last?.delivery == .sending)
@@ -333,7 +333,7 @@ final class ChatRig {
         rig.chat.clearScreen()
         #expect(rig.chat.transcript.turns.isEmpty)
         #expect(!rig.chat.typing, "the typing indicator was part of the screen")
-        #expect(rig.chat.status == .online, "the conversation goes on")
+        #expect(rig.chat.status == .connected, "the conversation goes on")
         #expect(!socket.sent.contains(CallWire.stopFrame), "nothing was hung up")
         #expect(rig.network.posts.filter { $0.path != "/api/embed/ticket" }.isEmpty, "nothing Graine keeps was touched")
         socket.frame(["type": "text", "data": "Hello again."])
@@ -355,7 +355,7 @@ final class ChatRig {
         let rig = ChatRig()
         let socket = rig.online()
         socket.serverClose()
-        #expect(rig.chat.status == .offline)
+        #expect(rig.chat.status == .failed)
         rig.scheduler.advance(60)
         #expect(rig.network.sockets.count == 1)
         rig.chat.send("hello again")
@@ -386,7 +386,7 @@ final class ChatRig {
         rig.chat.release("native-call")
         #expect(rig.network.sockets.count == 2)
         rig.network.socket!.open()
-        #expect(rig.chat.status == .online)
+        #expect(rig.chat.status == .connected)
     }
 
     @Test func aHoldOnAChatNobodyIsInBringsNothingBack() throws {
@@ -543,7 +543,7 @@ final class ChatRig {
         #expect(heard.messages.map { $0.text } == ["Welcome!"])
         #expect(heard.messages.first?.proactive == true)
         #expect(rig.graine.chat.turns.count == 1)
-        #expect(rig.graine.chat.status == .online)
+        #expect(rig.graine.chat.status == .connected)
     }
 
     @Test func clearEmptiesTheChatOnScreenOnly() throws {
@@ -557,7 +557,7 @@ final class ChatRig {
         #expect(rig.graine.chat.turns.count == 1)
         rig.graine.chat.clear()
         #expect(rig.graine.chat.turns.isEmpty)
-        #expect(rig.graine.chat.status == .online, "the conversation goes on")
+        #expect(rig.graine.chat.status == .connected, "the conversation goes on")
         #expect(rig.graine.chat.isOpen)
         #expect(rig.network.sockets.count == 1, "no new conversation")
     }

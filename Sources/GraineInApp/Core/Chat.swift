@@ -60,6 +60,23 @@ enum ChatWire {
      * from the shape `GraineVoice.reportEvent` takes (name, detail, a data map that may carry those keys).
      */
     static func appEventFrame(name: String, detail: String?, data: [String: Any]) -> String {
+        WireJSON.object([("type", .string("app_event")), ("event", appEvent(name: name, detail: detail, data: data))]).text
+    }
+
+    /**
+     * THE MOST AN APP EVENT MAY WEIGH (PUBLIC-STATE.md §8): the event — its name,
+     * detail, pacing keys and data — as JSON, in UTF-8 bytes. Graine closes a
+     * conversation whose frame passes 32 KB, so an event over this is never sent.
+     */
+    static let appEventMaxBytes = 8_192
+
+    /// The event `appEventFrame` sends, as JSON, in UTF-8 bytes: what `appEventMaxBytes` holds it to.
+    static func appEventBytes(name: String, detail: String?, data: [String: Any]) -> Int {
+        appEvent(name: name, detail: detail, data: data).text.utf8.count
+    }
+
+    /// The event itself, `{name, detail?, pacing keys, data?}`.
+    private static func appEvent(name: String, detail: String?, data: [String: Any]) -> WireJSON {
         var fields: [(String, WireJSON)] = [("name", .string(name))]
         if let detail = detail, !detail.isEmpty { fields.append(("detail", .string(detail))) }
         var rest: [String: Any] = [:]
@@ -74,7 +91,7 @@ enum ChatWire {
         var inner = (JSON.normalize(data["data"]) as? [String: Any]) ?? [:]
         for (k, v) in rest where inner[k] == nil { inner[k] = v }
         if !inner.isEmpty { fields.append(("data", WireJSON.from(inner))) }
-        return WireJSON.object([("type", .string("app_event")), ("event", .object(fields))]).text
+        return .object(fields)
     }
 }
 
@@ -134,16 +151,48 @@ enum ChatInbound {
 
 // MARK: - The connection's state
 
-/// Where the chat's connection is.
+/**
+ * WHERE THE CHAT IS, in the words every Graine SDK uses
+ * (sdk/contract/PUBLIC-STATE.md, "Chat"): `idle` · `connecting` · `connected` ·
+ * `reconnecting` · `offline` · `failed` · `disconnected` — `wire` spells each.
+ * Switch with a `default`, as more may come.
+ *
+ * 0.14.5: `connected` is what `online` was (`online` still compiles, as an alias of
+ * `connected`); a chat that gave up says `failed` and one Graine ended says
+ * `disconnected`, where both said `offline` before; `offline` now means what every SDK
+ * means by it — a message waiting and nothing connecting it.
+ */
 public enum GraineChatStatus: Equatable, Sendable {
     /// Not in the chat: never opened, left, or the app is in the background — or the agent ended the conversation (`ended`); a message starts another.
     case idle
     case connecting
-    case online
-    /// The connection dropped and is being made again; `attempt` of six.
+    /// Connected: a message goes now. (`online` before 0.14.5.)
+    case connected
+    /// The connection dropped — or a try to open it failed — and is being made again; `attempt` of six.
     case reconnecting(attempt: Int)
-    /// It could not reconnect, or the server closed the conversation (with `disconnected` when Graine ended it itself). A message, or `retry()`, connects again.
+    /// In the chat with a message waiting to go, and nothing connecting it (the app in the background, a native call holding the chat): it goes once the chat connects.
     case offline
+    /// The chat gave up: every reconnect was spent, the server closed the conversation, or Graine refused it (`GraineChat.error`). A message, `open()` or `retry()` connects again. Never for a conversation the agent ended (`idle`, with `ended`).
+    case failed
+    /// Graine ended the conversation itself — idle (close 4408) or at the session's time limit (4410): it waits for the customer, and the next `open()`, `shown(true)` or message connects again (`GraineChat.disconnected`).
+    case disconnected
+
+    /// `connected`, by its name before 0.14.5.
+    @available(*, deprecated, renamed: "connected", message: "The chat's status says `connected`, the word every Graine SDK uses.")
+    public static var online: GraineChatStatus { .connected }
+
+    /// The word every Graine SDK uses for it: `idle`, `connecting`, `connected`, `reconnecting`, `offline`, `failed` or `disconnected`.
+    public var wire: String {
+        switch self {
+        case .idle: return "idle"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reconnecting: return "reconnecting"
+        case .offline: return "offline"
+        case .failed: return "failed"
+        case .disconnected: return "disconnected"
+        }
+    }
 
     /// Connecting, or reconnecting: draw "Connecting…".
     public var isConnecting: Bool {
@@ -151,6 +200,24 @@ public enum GraineChatStatus: Equatable, Sendable {
         case .connecting, .reconnecting: return true
         default: return false
         }
+    }
+
+    /**
+     * The chat's status from what its connection knows — the contract's rule, first
+     * match wins: connected; reconnecting; connecting; disconnected (Graine ended it);
+     * failed (it gave up); offline (in the chat, a message waiting, nothing connecting
+     * it); else idle. `link` is the connection's own state, which says only idle,
+     * connecting, connected, reconnecting or failed.
+     */
+    static func of(link: GraineChatStatus, disconnected: Bool, waiting: Bool) -> GraineChatStatus {
+        switch link {
+        case .connected, .reconnecting, .connecting: return link
+        default: break
+        }
+        if disconnected { return .disconnected }
+        if link == .failed { return .failed }
+        if waiting { return .offline }
+        return .idle
     }
 }
 

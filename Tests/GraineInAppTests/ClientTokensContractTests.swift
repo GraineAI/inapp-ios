@@ -199,7 +199,10 @@ import Testing
         #expect(sdk["newConnectionWaitSeconds"] as? Double == ClientTokenRules.connectionWait)
         #expect(sdk["forcedRefreshMinIntervalSeconds"] as? Double == ClientTokenRules.forcedMinInterval)
         #expect(sdk["minSecondsBetweenBackgroundRefreshes"] as? Double == ClientTokenRules.backgroundMinInterval)
-        #expect(contract["sdkVersion"] as? String == GraineVersion.name)
+        // The version server tokens arrived in (CLIENT-TOKENS.md), as Android's and the multiplatform library's tests pin it:
+        // this SDK implements the contract from then on (0.14.5 moved on, the contract did not).
+        #expect(contract["sdkVersion"] as? String == "0.14.4")
+        #expect(GraineVersion.name.compare("0.14.4", options: .numeric) != .orderedAscending)
         // The calls host's event, and the page's message, as the contract names them (CLIENT-TOKENS.md §2.2, §2.4).
         #expect(CallsHostEvent.needClientToken == "needClientToken")
         #expect(GraineProtocol.redactForLog(GraineProtocol.out(GraineProtocol.Out.clientToken, ["token": "eyJ.payload.sig"])) == "token=set",

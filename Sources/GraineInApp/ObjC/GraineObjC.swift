@@ -214,13 +214,21 @@ enum ObjCBridge {
         ]
     }
 
+    /**
+     * The chat's word as the facade has always said it — `idle`, `connecting`, `online`,
+     * `reconnecting`, `offline` — from the link's state (`GraineChat.linkStatus`): a bridge
+     * built before 0.14.5 reads these. The words every SDK uses are `phase`'s.
+     */
     static func chatStatus(_ s: GraineChatStatus) -> (word: String, attempt: Int) {
         switch s {
         case .idle: return ("idle", 0)
         case .connecting: return ("connecting", 0)
-        case .online: return ("online", 0)
+        case .connected: return ("online", 0)
         case .reconnecting(let attempt): return ("reconnecting", attempt)
-        case .offline: return ("offline", 0)
+        case .failed: return ("offline", 0)
+        // Never the link's own; the facade said them as the link was then.
+        case .offline: return ("idle", 0)
+        case .disconnected: return ("disconnected", 0)
         }
     }
 

@@ -120,7 +120,7 @@ struct GraineChatWindow: View {
     private var chat: GraineChatTokens { tokens.chatOrClassic }
     /// The type at the system's text size — capped where a phone's window could still hold the header and composer.
     private var ty: GraineType { type.scaled(min(2, max(0.8, Double(dynamicScale)))) }
-    private var online: Bool { status == .online }
+    private var online: Bool { status == .connected }
     private var pieces: ChatPieces { ChatPieces.of(turns, chat: tokens.chat, upcomingCount: UpcomingCalls.shown(upcoming).count, bookable: bookable) }
     private var trimmed: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var title: String { chat.title.isEmpty ? heading : chat.title }
@@ -604,7 +604,7 @@ struct GraineChatWindow: View {
         if !quickReplies.isEmpty && !ChatWindowRules.repliesDocked(chat.chips) { add(.replies, gap: 8) }
         if typing { add(.typing) }
         if ended && chat.rating.show { add(.rating) }
-        if status == .offline && !ended && banner == nil { add(.offline) }
+        if (status == .failed || status == .offline) && !ended && banner == nil { add(.offline) }
         return out
     }
 

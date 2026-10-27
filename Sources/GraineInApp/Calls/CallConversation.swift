@@ -232,6 +232,21 @@ final class CallConversation {
         }
     }
 
+    /// An app event (`{"type":"app_event",…}`), on the call's own channel: the socket, or WebRTC's control channel.
+    func sendEvent(_ frame: String) {
+        scheduler.run { [self] in
+            switch phase {
+            case .socket:
+                socketEngine?.sendEvent(frame)
+            case .rtc:
+                // Never coalesced with another: each event is its own.
+                rtc?.sendControl(frame, kind: nil)
+            default:
+                break
+            }
+        }
+    }
+
     // MARK: - The choice
 
     private func chose(_ session: GraineSessionConfig?) {

@@ -975,7 +975,7 @@ private func contract() throws -> [String: Any] {
         rig.graine.chat.open()
         #expect(rig.network.bodies("/api/embed/ticket").count == 1, "never asked again")
         #expect(rig.network.sockets.isEmpty, "never the direct socket either")
-        #expect(rig.graine.chat.status == .offline)
+        #expect(rig.graine.chat.status == .failed, "refused: it gave up (0.14.5: failed, where it said offline)")
         #expect(heard.errors == ["This app is not allowed."])
     }
 

@@ -500,6 +500,14 @@ final class CallEngine {
         }
     }
 
+    /// An app event (`{"type":"app_event",…}`) on the open socket; nothing before it opens or after it closes.
+    func sendEvent(_ frame: String) {
+        scheduler.run { [self] in
+            guard phase == .open else { return }
+            send(frame)
+        }
+    }
+
     // MARK: - Opening
 
     private func sessionArrived(_ session: GraineSessionConfig?) {

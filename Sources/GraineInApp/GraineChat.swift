@@ -44,7 +44,17 @@ import Foundation
 public final class GraineChat: ObservableObject {
     /// What has been said, oldest first: the customer's messages and the agent's replies, one bubble each.
     @Published public private(set) var turns: [GraineChatTurn] = []
+    /**
+     * Where the chat is, in the words every Graine SDK uses (`GraineChatStatus`):
+     * `idle`, `connecting`, `connected`, `reconnecting`, `offline` (in the chat, a
+     * message waiting and nothing connecting it), `failed` (it gave up — a message,
+     * `open()` or `retry()` tries again) or `disconnected` (Graine ended the
+     * conversation: idle, or its time limit). 0.14.5: a chat that gave up says
+     * `failed`, and one Graine ended `disconnected`, where both said `offline`.
+     */
     @Published public private(set) var status: GraineChatStatus = .idle
+    /// The connection's own state — idle, connecting, connected, reconnecting or failed — that the SDK's windows draw from.
+    @Published private(set) var linkStatus: GraineChatStatus = .idle
     /// The agent is working on a reply: from the customer's message until its first words.
     @Published public private(set) var typing = false
 
@@ -104,7 +114,7 @@ public final class GraineChat: ObservableObject {
      * `tokenExpired` (the SDK already asked `GraineConfig.tokenProvider` again
      * and tried once more), `tokenScope`, `keyRevoked`;
      * `GraineServiceError.reason` says which part failed. Nil otherwise. Such
-     * a refusal is final for that try: `status` is `.offline`, nothing
+     * a refusal is final for that try: `status` is `.failed`, nothing
      * reconnects by itself, and the messages that were waiting are marked
      * failed and go with the next try (`open()`, `retry()`, a message).
      * `GraineListener.onError` hears its sentence too. New in 0.14.4.
@@ -167,7 +177,7 @@ public final class GraineChat: ObservableObject {
     @Published private(set) var cancelFailed: Set<String> = []
 
     /// Connected: a message goes now.
-    public var online: Bool { status == .online }
+    public var online: Bool { status == .connected }
 
     /**
      * The customer has said nothing yet in this conversation, and it is not one
@@ -589,7 +599,7 @@ public final class GraineChat: ObservableObject {
     // MARK: - For the SDK's own views and routing
 
     /// The chat is the conversation a component's answer and an app event belong to.
-    var carriesConversation: Bool { isOpen && status != .idle }
+    var carriesConversation: Bool { isOpen && linkStatus != .idle }
 
     func submitWidget(widgetId: String, data: [String: Any], summary: String) {
         connection.submitWidget(widgetId: widgetId, data: data, summary: summary)
@@ -655,7 +665,9 @@ public final class GraineChat: ObservableObject {
         switch event {
         case .changed:
             if turns != connection.transcript.turns { turns = connection.transcript.turns }
-            if status != connection.status { status = connection.status }
+            if linkStatus != connection.status { linkStatus = connection.status }
+            let word = connection.publicStatus
+            if status != word { status = word }
             if typing != connection.typing { typing = connection.typing }
             if quickReplies != connection.quickReplies { quickReplies = connection.quickReplies }
             if ended != connection.ended { ended = connection.ended }

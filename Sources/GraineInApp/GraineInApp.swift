@@ -297,6 +297,8 @@ public final class GraineInApp: ObservableObject {
     private var listenerBoxes: [WeakListener] = []
     private var variableWatchers: [UUID: ([String: String]) -> Void] = [:]
     private var contextWatchers: [UUID: ([String: Any]) -> Void] = [:]
+    /// A live native call of this agent's, taking the app's events (`GraineCalls`): true when it took one.
+    private var eventTakers: [UUID: (String) -> Bool] = [:]
     private var contextWindowOpen = false
     private var contextDirty = false
     private var sessionWaiters: [(GraineSessionConfig?) -> Void] = []
@@ -1246,6 +1248,20 @@ public final class GraineInApp: ObservableObject {
         }
     }
 
+    /**
+     * A native call of this agent's takes the app's events while it is live: `take`
+     * hears each one's `app_event` frame and answers whether it sent it on the call.
+     * Main thread. Returns the function that stops it.
+     */
+    func onAppEvent(_ take: @escaping (String) -> Bool) -> () -> Void {
+        let id = UUID()
+        onMain { self.eventTakers[id] = take }
+        return { [weak self] in
+            guard let self = self else { return }
+            self.onMain { self.eventTakers.removeValue(forKey: id) }
+        }
+    }
+
     /// The current frame (`context`, `availableActions`, `seq`), for a transport that has just come up.
     func currentContextFrame() -> [String: Any]? {
         stateLock.lock()
@@ -1390,15 +1406,21 @@ public final class GraineInApp: ObservableObject {
     /**
      * SOMETHING WORTH SPEAKING UP ABOUT: the agent may speak first — "the
      * customer came from the breakfast reminder", and the agent opens with
-     * its check-in. Told to whichever conversation is live: the chat, else
-     * the in-app voice call. Paced by the agent: 20 s apart and 3 per
-     * conversation by default; `data` may carry `cooldown_seconds`,
+     * its check-in. Told to whichever conversation is live: a native call
+     * with this agent (`calls`, once it is connected — 0.14.5), else the
+     * chat, else the in-app voice call. Paced by the agent: 20 s apart and 3
+     * per conversation by default; `data` may carry `cooldown_seconds`,
      * `max_per_session`, or `quiet: true` to record it without speaking (they
      * travel at the event's own level), and anything else rides along as its
-     * data. Neither live: dropped — queued, it would open the next
+     * data. None live: dropped — queued, it would open the next
      * conversation by announcing something from this one — so open the chat
      * and wait for it to be connected first. `track` informs without
      * speaking. Any thread.
+     *
+     * At most `reportEventMaxBytes` (8 KB): the event — name, detail, pacing
+     * keys and data — as JSON, in UTF-8. A bigger one is never sent, on any
+     * conversation: `GraineListener.onError` and the log say so, with its
+     * size (0.14.5). Send an id the agent can look up, not the record.
      */
     public func reportEvent(_ name: String, detail: String? = nil, data: [String: Any] = [:]) {
         guard Thread.isMainThread else {
@@ -1407,6 +1429,18 @@ public final class GraineInApp: ObservableObject {
         }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
+        let size = ChatWire.appEventBytes(name: name, detail: detail, data: data)
+        guard size <= GraineInApp.reportEventMaxBytes else {
+            let message = GraineInApp.eventTooLarge(name: name, bytes: size)
+            GraineLog.warning(message)
+            notifyListeners { $0.onError(message) }
+            return
+        }
+        // A native call with this agent hears it on its own channel; the chat and the bar are down meanwhile.
+        if !eventTakers.isEmpty {
+            let frame = ChatWire.appEventFrame(name: name, detail: detail, data: data)
+            for take in Array(eventTakers.values) where take(frame) { return }
+        }
         if chat.carriesConversation {
             chat.reportEvent(name, detail: detail, data: data)
             return
@@ -1414,6 +1448,21 @@ public final class GraineInApp: ObservableObject {
         #if os(iOS)
         voice.reportEvent(name, detail: detail, data: data)
         #endif
+    }
+
+    /**
+     * THE MOST AN APP EVENT MAY WEIGH, in bytes: 8 KB (8192) — the event that
+     * `reportEvent` sends, `{name, detail, pacing keys, data}`, as JSON in UTF-8,
+     * written as every Graine SDK writes it. Graine closes a conversation whose
+     * frame passes 32 KB; an event over this limit is refused before it is sent.
+     * New in 0.14.5.
+     */
+    public static let reportEventMaxBytes = ChatWire.appEventMaxBytes
+
+    /// What an event over the limit says, to the app and the log.
+    static func eventTooLarge(name: String, bytes: Int) -> String {
+        "reportEvent(\"\(name.prefix(64))\") was not sent: the event is \(bytes) bytes as JSON, over the limit of "
+            + "\(reportEventMaxBytes) (8 KB). Send less in its data — an id the agent can look up, not the record."
     }
 
     /// A component arrived from either conversation: kept until answered, and drawn by every view that shows them. Main thread.

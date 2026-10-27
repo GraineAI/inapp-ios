@@ -113,7 +113,7 @@ private func parse(_ text: String?) -> Any? {
         try #require(rig.network.socket).open()
         chat.shown(false)
         rig.scheduler.advance(Double(chat.closeDelaySeconds) - 1)
-        #expect(chat.status == .online && chat.isOpen, "kept for the close delay with no screen")
+        #expect(chat.status == .connected && chat.isOpen, "kept for the close delay with no screen")
         rig.scheduler.advance(1.1)
         #expect(chat.status == .idle && !chat.isOpen, "closed after")
         chat.shown(true)
