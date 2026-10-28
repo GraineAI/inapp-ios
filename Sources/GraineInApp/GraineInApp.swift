@@ -328,6 +328,10 @@ public final class GraineInApp: ObservableObject {
     /// The call `prepareCall` got ready for this agent, if any: at most one. Under `preparedLock` (a call takes it from its own queue).
     private var preparedCall: PreparedCall?
     private let preparedLock = NSLock()
+    /// The customer the next call's grant waits on a token for, and that wait's mark (`holdGrantForToken`). Main thread.
+    private var grantHold: (customer: String?, mark: UUID)?
+    /// The call `prepareCall` asked for while the customer's token was on its way (`holdPreparationForToken`). Main thread.
+    private var preparationHold: PreparationHold?
     /// The device's light or dark, as the window last reported it; nil until it has. Main thread.
     private var deviceDark: Bool?
     /**
@@ -794,8 +798,12 @@ public final class GraineInApp: ObservableObject {
      * once until it arrives (it is used then) or 30 seconds pass. This
      * device's registration for the calls Graine rings waits for it too, out
      * of sight; one that went without a token is sent again, once, when a token
-     * for the same customer arrives. Answering a call that rings never waits
-     * for it. Nobody identified: never asked.
+     * for the same customer arrives. With GraineInAppRTC in the app, what calls
+     * fetch ahead of the tap — the next call's credential, and the call
+     * `GraineCalls.prepareCall` gets ready — asks for it as well, without
+     * holding anything up: fetched once the token arrives, or as it is once
+     * your refresher answers nil or 10 seconds pass (new in 0.14.7). Answering
+     * a call that rings never waits for it. Nobody identified: never asked.
      *
      * Return nil to keep the token as it is. Asked at most once every 30
      * seconds for the same customer, never twice at once, and its answer
@@ -1919,6 +1927,11 @@ public final class GraineInApp: ObservableObject {
      * `identifyJSON:` and `setMemory:` are `identify` and `setMemory`; the
      * calls' `startCall…` is `startCall`, which takes `nextCallId`).
      *
+     * Not while the customer's identity token is on its way (0.14.7): with
+     * someone identified, no token held, a refresher set and an agent that
+     * verifies users (`AppVerification.missingTokenDue`), the grant waits for
+     * the token (`holdGrantForToken`) rather than go without it.
+     *
      * In the background — never the microphone, never waited on, never a
      * failure: a call without a grant mints the old way. Main thread.
      */
@@ -1926,10 +1939,53 @@ public final class GraineInApp: ObservableObject {
         // An agent that requires a verified app refuses the grant without a pass: asked once the proof brings one (onProven).
         guard !security.awaitingRequiredProof() else { return }
         guard let (module, request) = rtcGrantRequest(callId: nil, session: session) else { return }
-        module.warmUp(request, log: rtcLog)
+        if security.missingTokenDue() {
+            holdGrantForToken()
+        } else {
+            grantHold = nil
+            module.warmUp(request, log: rtcLog)
+        }
         // A call ringing now was asked for under whoever the customer was when it arrived — nobody, perhaps, in an
         // app its push woke before the session said: asked for again under who they are now (asks nothing if unchanged).
+        // A ring never waits for a token, so neither does its grant.
         if let ringing = ringingCallId(self) { warmCalls(ringing: ringing, session: session) }
+    }
+
+    /**
+     * THE NEXT CALL'S GRANT WAITS FOR THE TOKEN THE APP IS STILL FETCHING. A
+     * grant asked for with the customer and without their identity token is
+     * one the agent's Security log notes as an anonymous request — and the
+     * token makes it stale moments later. So nothing is sent yet: the app's
+     * refresher is asked, or the refresh on its way joined — never a second at
+     * once, its 30 s per customer kept — and nobody waits on it
+     * (`AppVerification.askForMissingToken`). The token it brings asks for the
+     * grant with it (`identityProofChanged` → `warmCalls`); a refresh that
+     * ends without one, or ten seconds going by, asks for it as it is, so the
+     * first tap stays fast. Asked again meanwhile for the same customer (the
+     * foreground, their memory choice): the ask on its way answers that too.
+     * Main thread.
+     */
+    private func holdGrantForToken() {
+        let customer = identity.snapshot().value
+        if let held = grantHold, held.customer == customer { return }
+        let mark = UUID()
+        grantHold = (customer, mark)
+        security.askForMissingToken { [weak self] brought in
+            // Later on the main thread, never inside what ended it: an identify that let the ask go has run its course by then.
+            DispatchQueue.main.async {
+                guard let self = self, self.grantHold?.mark == mark else { return }
+                self.grantHold = nil
+                // The token came: identityProofChanged has asked for the grant with it. Someone else, or nobody, since: that change did.
+                guard !brought, self.identity.snapshot().value == customer, self.identity.currentToken() == nil else { return }
+                self.warmNextCall()
+            }
+        }
+    }
+
+    /// The next call's grant, asked for with what is held now: the ask for the token ended without one. Main thread.
+    private func warmNextCall() {
+        guard !security.awaitingRequiredProof(), let (module, request) = rtcGrantRequest(callId: nil, session: session) else { return }
+        module.warmUp(request, log: rtcLog)
     }
 
     // MARK: - A call prepared before the tap
@@ -1953,6 +2009,11 @@ public final class GraineInApp: ObservableObject {
      * the app goes to the background, who is calling changes (identify, sign
      * out, the memory choice, the time zone), four minutes pass, calls go off
      * WebRTC, a call rings, or its socket or registration drops.
+     *
+     * Asked for while the customer's identity token is on its way, it is
+     * prepared once the token comes, with it — or once the refresher's answer,
+     * or ten seconds, says it will not (`holdPreparationForToken`): prepared
+     * without it, the call the customer places then would not be this one.
      */
     private struct PreparedCall {
         let callId: String
@@ -1978,12 +2039,13 @@ public final class GraineInApp: ObservableObject {
      * Get this agent's next outgoing call ready (`GraineCalls.prepareCall`):
      * cheap to ask on every screen. A prepared call younger than four minutes
      * that would mint exactly what this one would is kept, and nothing is
-     * sent; otherwise it is let go and the call prepared afresh. Nothing while
-     * a call rings or is live; without the WebRTC module, on the WebSocket or
-     * before the session, nothing — and a call prepared earlier is let go.
-     * Main thread.
+     * sent; otherwise it is let go and the call prepared afresh — once the
+     * customer's identity token, when one is on its way, has come or will not
+     * (`tokenAsked`: that is settled). Nothing while a call rings or is live;
+     * without the WebRTC module, on the WebSocket or before the session,
+     * nothing — and a call prepared earlier is let go. Main thread.
      */
-    func prepareNextCall(reason: String?, own: [String: String]) {
+    func prepareNextCall(reason: String?, own: [String: String], tokenAsked: Bool = false) {
         guard !callInProgress(self) else { return }
         guard let session = session, let (module, _) = rtcGrantRequest(callId: nil, session: session) else {
             return releasePreparedCall()
@@ -1997,6 +2059,7 @@ public final class GraineInApp: ObservableObject {
             return
         }
         releasePreparedCall()
+        if !tokenAsked, holdPreparationForToken(reason: reason, own: own) { return }
         // The warm grant's id, when there is one: the prepared call then mints at the gateway.
         let id = nextCallId() ?? Self.newCallId()
         let identity = identityFields(callId: id)
@@ -2009,6 +2072,54 @@ public final class GraineInApp: ObservableObject {
         leg.onPrepared = { [weak self] state in self?.preparedCallReported(state, token: token) }
         leg.prepare()
         afterDelay(Self.preparedCallLife) { [weak self] in self?.releasePreparedCall(token: token) }
+    }
+
+    /// A call `prepareCall` asked for while the customer's identity token was on its way: what to prepare, and for whom.
+    private struct PreparationHold {
+        var reason: String?
+        var own: [String: String]
+        /// Who was calling when it was asked for, field by field.
+        let identity: IdentityWire.Fields
+        let mark: UUID
+    }
+
+    /**
+     * A CALL PREPARED AHEAD OF THE TAP WAITS FOR THE TOKEN TOO, as the next
+     * call's grant does (`holdGrantForToken`): with the customer's identity
+     * token on its way (`AppVerification.missingTokenDue`), nothing is
+     * prepared yet — the app's refresher is asked, or the refresh on its way
+     * joined, without anyone waiting — and the call is prepared once that ask
+     * ends: with the token it brought, or as it is when it brought none or
+     * ten seconds went by. True when it is held. Asked again meanwhile for the
+     * same caller: the ask on its way prepares what was asked for last. In
+     * the background by then, or another caller (any field the mint carries):
+     * nothing is prepared — the app asks again when its screen shows. Main
+     * thread.
+     */
+    private func holdPreparationForToken(reason: String?, own: [String: String]) -> Bool {
+        guard security.missingTokenDue() else {
+            preparationHold = nil
+            return false
+        }
+        let identity = identityFields(callId: nil)
+        if var held = preparationHold, held.identity == identity {
+            held.reason = reason
+            held.own = own
+            preparationHold = held
+            return true
+        }
+        let mark = UUID()
+        preparationHold = PreparationHold(reason: reason, own: own, identity: identity, mark: mark)
+        security.askForMissingToken { [weak self] _ in
+            // Later on the main thread, never inside what ended it: an identify that let the ask go has run its course by then.
+            DispatchQueue.main.async {
+                guard let self = self, let held = self.preparationHold, held.mark == mark else { return }
+                self.preparationHold = nil
+                guard self.foreground, self.identityFields(callId: nil) == held.identity else { return }
+                self.prepareNextCall(reason: held.reason, own: held.own, tokenAsked: true)
+            }
+        }
+        return true
     }
 
     /**
@@ -2654,8 +2765,9 @@ public final class GraineInApp: ObservableObject {
             // And the app's pass may have less than six hours left, or an outage's retries were spent (APP-IDENTITY.md §3.3).
             security.foregroundReturned()
         } else {
-            // Away: nobody taps a call in the background. The call prepared for the tap is let go.
+            // Away: nobody taps a call in the background. The call prepared for the tap is let go, and one waiting for a token.
             releasePreparedCall()
+            preparationHold = nil
         }
     }
 

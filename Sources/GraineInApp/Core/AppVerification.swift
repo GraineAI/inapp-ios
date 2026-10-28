@@ -29,9 +29,11 @@ import Security
  * agent that verifies users, the refresher is asked and waited for (10 s at
  * most) — not when the customer answers a ring. A request that acts for the
  * identified user, and the voice bar's call (`awaitMissingToken`), wait for
- * that missing token the same way. A refusal (`cure`): `app_not_verified`
- * proves the app and asks once more; `identity_unverified` asks the app's
- * refresher and asks once more.
+ * that missing token the same way; what nobody waits on — the next call's
+ * grant, a call prepared ahead of the tap — asks for it without waiting
+ * (`askForMissingToken`) and goes once it comes, or once it will not. A
+ * refusal (`cure`): `app_not_verified` proves the app and asks once more;
+ * `identity_unverified` asks the app's refresher and asks once more.
  *
  * Foundation and Security only: App Attest is behind `AppAttesting`, the
  * Keychain behind the stores, the clock behind `Environment`. Thread-safe.
@@ -913,6 +915,24 @@ final class AppVerification: EmbedProof {
     func awaitMissingToken(_ ready: @escaping () -> Void) {
         guard missingTokenDue() else { return ready() }
         awaitRefresh(within: AppVerification.missingTokenWait, ready)
+    }
+
+    /**
+     * For what goes in the background and nobody waits on — the next call's
+     * grant, a call prepared ahead of the tap: a token the app has not given
+     * yet (`missingTokenDue`) is asked for — the refresh on its way joined,
+     * never a second at once, the 30 s per person kept — and `ended(brought)`
+     * heard once the refresher has answered (`brought`: it brought a token,
+     * held by then) or `missingTokenWait` has passed (false), whichever comes
+     * first. Since nobody waited, a refresh that outlives those 10 s is not
+     * one that ran out a wait: a conversation starting meanwhile still waits
+     * for it. Nothing due: `ended(false)` at once. Any thread.
+     */
+    func askForMissingToken(_ ended: @escaping (Bool) -> Void) {
+        guard missingTokenDue(), let refresh = refreshToken else { return ended(false) }
+        let finished = Once<Bool>(ended)
+        _ = refresh { brought in finished.call(brought) }
+        env.after(AppVerification.missingTokenWait) { finished.call(false) }
     }
 
     /**

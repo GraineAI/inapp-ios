@@ -494,7 +494,10 @@ public final class GraineCalls: NSObject, ObservableObject {
      * The prepared call is let go, quietly, when the app goes to the
      * background, the customer changes (identify, sign-out, their memory
      * choice, the time zone), four minutes pass, calls stop using WebRTC, or a
-     * call rings. `startCall` then simply prepares the call at the tap.
+     * call rings. `startCall` then simply prepares the call at the tap. While
+     * the customer's identity token is on its way (`identityTokenRefresher`,
+     * for an agent that verifies users), the call is prepared once the token
+     * arrives, with it — or once the refresher answers nil or 10 seconds pass.
      * `agent` names a configured agent (`GraineInApp.configure(_:name:)`); nil
      * is the default.
      */
