@@ -866,7 +866,10 @@ public final class GraineObjC: NSObject {
      * The identity-token refresher for a bridge (`GraineInApp.identityTokenRefresher`):
      * the block is handed a completion to call once — from any thread — with a
      * fresh token, or nil to keep the one held. Asked at most once every 30
-     * seconds and never twice at once. nil removes it.
+     * seconds for the same customer and never twice at once. While no token is
+     * held, an agent that verifies users has it asked before a conversation or
+     * a request for the customer, which waits up to 10 seconds for the
+     * completion. nil removes it.
      */
     @objc(setIdentityTokenRefresher:)
     public func setIdentityTokenRefresher(_ refresher: ((@escaping (String?) -> Void) -> Void)?) {

@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.5")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.6")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -162,7 +162,9 @@ graine.identify(["user_id": user.id, "name": user.firstName], identityToken: tok
 graine.setIdentityToken(newToken)
 
 // Or let the SDK ask when the token runs out — a JWT with less than a minute left
-// before a conversation, an answer saying it expired, or a refused request (sent again once):
+// before a conversation, an answer saying it expired, or a refused request (sent again once).
+// Signed in without a token yet? For an agent that verifies users the SDK also asks before a
+// conversation (or a request for the customer) while none is held, and waits up to 10 seconds:
 graine.identityTokenRefresher = {
     try? await api.graineIdentityToken()   // nil keeps the token the SDK holds
 }
@@ -656,7 +658,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.5")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.6")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

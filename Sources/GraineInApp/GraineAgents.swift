@@ -143,6 +143,15 @@ final class GraineAgentRegistry {
         lock.unlock()
     }
 
+    /// A token the refresher brought for `asked` (the traits identified when it was asked), for an agent configured after it — only while they are still the ones identified: never another person's.
+    func rememberRefreshedToken(_ token: String, for asked: [String: Any?]?) {
+        lock.lock()
+        if let before = identified, before.traits != nil, IdentityState.sameTraits(before.traits, asked) {
+            identified = (before.traits, before.memory, token)
+        }
+        lock.unlock()
+    }
+
     func rememberMemory(_ enabled: Bool) {
         lock.lock()
         memoryChoice = enabled

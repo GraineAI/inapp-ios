@@ -887,7 +887,10 @@ public final class GraineCalls: NSObject, ObservableObject {
             // The app's declaration and the identity's proof on the ticket and the call session (APP-IDENTITY.md).
             security: graine.security,
             // The ticket or the mint carries the agent's server token; checked only here, never once the call is up.
-            tokens: graine.clientTokens
+            tokens: graine.clientTokens,
+            // An answered ring never waits for an identity token the app has not given (the ring asked for one);
+            // a call the customer places does, 10 s at most.
+            answering: direction == .incoming
         )
         let engine = CallConversation(
             setup: setup,

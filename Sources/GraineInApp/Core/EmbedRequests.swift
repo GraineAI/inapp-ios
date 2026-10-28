@@ -224,6 +224,22 @@ final class EmbedRequests {
     /// This agent's server tokens; nil, or none in play, sends none.
     private let tokens: ClientTokens?
 
+    /**
+     * The routes that act for the identified user — their memory, their past
+     * sessions and transcripts, the conversation the chat continues (let go of
+     * by `chat.newConversation()`), their booked calls (list, book, cancel), a
+     * workflow started for them. One that names a user waits, before it goes,
+     * for an identity token the app has not given yet
+     * (`AppVerification.awaitMissingToken`).
+     */
+    static let userRoutes: Set<String> = [
+        "/api/embed/memory/list", "/api/embed/memory/forget",
+        PastSessionsWire.listPath, PastSessionsWire.transcriptPath,
+        "/api/embed/conversation/new",
+        "/api/embed/calls/list", "/api/embed/calls/schedule", "/api/embed/calls/cancel",
+        Workflows.route,
+    ]
+
     init(baseUrl: String, publishableKey: String, network: CallNetwork, security: AppVerification? = nil, tokens: ClientTokens? = nil) {
         self.baseUrl = GraineProtocol.trimTrailingSlashes(baseUrl)
         self.publishableKey = publishableKey
@@ -286,9 +302,11 @@ final class EmbedRequests {
 
     /**
      * POST `path`; a 2xx answers its JSON object (an empty one for no body),
-     * anything else a GraineServiceError. `cure`: an `app_not_verified` or
-     * `identity_unverified` refusal is cured (the app proven, the identity
-     * token refreshed) and the request sent once more, sealed again.
+     * anything else a GraineServiceError. One of the `userRoutes` that names a
+     * user first waits for an identity token the app has not given yet (10 s
+     * at most). `cure`: an `app_not_verified` or `identity_unverified` refusal
+     * is cured (the app proven, the identity token refreshed) and the request
+     * sent once more, sealed again.
      */
     func post(
         _ path: String,
@@ -310,14 +328,19 @@ final class EmbedRequests {
                 }
             }
         }
-        once { [weak self] result in
-            guard cure, case .failure(let error) = result, error.code == .appNotVerified || error.code == .identityUnverified,
-                  let security = self?.security else { return completion(result) }
-            security.cure(error) { retry in
-                guard retry else { return completion(result) }
-                once(completion)
+        func first() {
+            once { [weak self] result in
+                guard cure, case .failure(let error) = result, error.code == .appNotVerified || error.code == .identityUnverified,
+                      let security = self?.security else { return completion(result) }
+                security.cure(error) { retry in
+                    guard retry else { return completion(result) }
+                    once(completion)
+                }
             }
         }
+        // A request for the identified user goes with the token the app's refresher brings, when none is held yet.
+        guard EmbedRequests.userRoutes.contains(path), EmbedSeal.identityValue(fields) != nil, let security = security else { return first() }
+        security.awaitMissingToken(first)
     }
 
     func post(_ path: String, _ fields: [(String, WireJSON)], cure: Bool = true) async throws -> [String: Any] {

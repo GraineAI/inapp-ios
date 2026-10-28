@@ -108,7 +108,7 @@ final class CallConversation {
             // The mint carries the agent's server token; checked only here, never once the call is up.
             clientTokens: setup.tokens.map { GraineRtcTokens($0) }
         )
-        request.guarded(by: security, identityValue: identity?.value)
+        request.guarded(by: security, identityValue: identity?.value, answering: setup.answering)
         return request
     }
 

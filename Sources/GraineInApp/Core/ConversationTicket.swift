@@ -5,7 +5,8 @@ import Foundation
  * (`mode: "text"`) and the native call on the voice socket alike:
  *
  *   before   what is worth waiting for, waited for (10 s at most): a proof of
- *            the app the agent requires, an identity token about to expire
+ *            the app the agent requires, an identity token about to expire,
+ *            one the app has not given yet (not when answering a ring)
  *   sealed   the body leaves with the app's declaration and, inside
  *            `identity`, the token and pass for exactly that value
  *   heard    the answer's `verification` is kept (the passes, the public state)
@@ -30,11 +31,16 @@ enum ConversationTicket {
     /// The refusals that are about the app or the user: never answered by the direct socket.
     static let securityCodes: Set<String> = ["app_not_allowed", "app_not_verified", "identity_unverified"]
 
-    /// `fields` is read at each attempt (a retry carries the cured proof). `done` once, on any thread.
+    /**
+     * `fields` is read at each attempt (a retry carries the cured proof).
+     * `answering`: the ticket of a ring the customer answered — it never waits
+     * for an identity token the app has not given. `done` once, on any thread.
+     */
     static func ask(
         url: URL,
         fields: @escaping () -> [(String, WireJSON)],
         security: EmbedProof?,
+        answering: Bool = false,
         tokens: ClientTokens? = nil,
         network: CallNetwork,
         done: @escaping (Outcome) -> Void
@@ -64,6 +70,6 @@ enum ConversationTicket {
             }
         }
         guard let security = security else { return attempt(cured: false) }
-        security.beforeConversation { attempt(cured: false) }
+        security.beforeConversation(answering: answering) { attempt(cured: false) }
     }
 }

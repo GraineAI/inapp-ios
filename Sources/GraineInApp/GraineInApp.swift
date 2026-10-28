@@ -741,12 +741,21 @@ public final class GraineInApp: ObservableObject {
      *   was given for — never in the variables, the context or a log. Another
      *   customer, or `identify(nil)`, drops it in the same step; the same
      *   identity without one keeps it. Replace it with `setIdentityToken`.
+     *   Fetching it after `identify`? Set `identityTokenRefresher`: while no
+     *   token is held, an agent that verifies users has the SDK ask it, and
+     *   wait up to 10 seconds, before a conversation starts or a request for
+     *   this customer goes — so the first conversation is verified, not
+     *   anonymous.
      */
     public func identify(_ traits: [String: Any?]?, memory: Bool? = nil, identityToken: String? = nil) {
         let change = GraineInApp.tokenChange(identityToken)
+        let agents = peers
+        // Another person, or nobody — settled before any agent acts on it (a chat reconnects as them at once): the last
+        // person's refresh is let go of, and the 30 s limit starts over, so the new person's first conversation asks.
+        if agents.contains(where: { $0.identity.namesSomeoneElse(traits) }) { tokenRefresh.personChanged() }
         // One person for the whole app: every agent hears it (each reads the trait its own Identity setting names).
         registry?.rememberIdentify(traits, memory: memory, token: change)
-        for agent in peers { agent.applyIdentify(traits, memory: memory, token: change) }
+        for agent in agents { agent.applyIdentify(traits, memory: memory, token: change) }
     }
 
     /**
@@ -771,9 +780,29 @@ public final class GraineInApp: ObservableObject {
      * about to: a JWT with less than a minute left before a conversation
      * starts, an answer saying it expired, or a route refusing an unverified
      * identity (that request is then sent once more with the new token).
+     *
+     * Also asked when no token is held at all — your app identified the
+     * customer and fetches the token afterwards — for an agent that verifies
+     * users: before a conversation starts (the chat, the voice bar, a call the
+     * customer places) and before a request for the customer (memories, past
+     * sessions, `chat.newConversation()`, booked calls and bookings,
+     * `startWorkflow`), the SDK waits up to 10 seconds for it, so that
+     * conversation goes verified instead of anonymous. A token it returns is
+     * used as `setIdentityToken` would set it; nil, or no answer within 10
+     * seconds, lets the conversation go as it is — and an answer still to come
+     * after those 10 seconds is not waited for again: later conversations go at
+     * once until it arrives (it is used then) or 30 seconds pass. This
+     * device's registration for the calls Graine rings waits for it too, out
+     * of sight; one that went without a token is sent again, once, when a token
+     * for the same customer arrives. Answering a call that rings never waits
+     * for it. Nobody identified: never asked.
+     *
      * Return nil to keep the token as it is. Asked at most once every 30
-     * seconds, never twice at once, and its answer applies only while the same
-     * customer is identified. Shared by every agent.
+     * seconds for the same customer, never twice at once, and its answer
+     * applies only while the same customer is identified: when another
+     * customer signs in, an answer still to come for the last one is dropped,
+     * and the new customer's first conversation asks at once. Shared by every
+     * agent.
      */
     public var identityTokenRefresher: (() async -> String?)? {
         get { tokenRefresh.refresher }
@@ -842,6 +871,8 @@ public final class GraineInApp: ObservableObject {
         // Another person: the user's verdict was the last one's.
         if identity.snapshot().value != before || traits == nil { security.identityChanged() }
         identityChanged(previous: before)
+        // A token given with the same customer sends a registration that lacked it again; another customer drops it.
+        onMain { self.registerAgainWithToken() }
     }
 
     /**
@@ -854,20 +885,32 @@ public final class GraineInApp: ObservableObject {
             for watch in Array(self.identityWatchers.values) { watch() }
             self.releasePreparedCallForAnotherCaller()
             self.warmCalls()
+            // A registration that went without the token goes again with it.
+            self.registerAgainWithToken()
         }
     }
 
-    /// Ask the app's refresher for a fresh token for who is identified now, on every agent: `done(changed)`.
-    func refreshIdentityToken(_ done: @escaping (Bool) -> Void) {
+    /**
+     * Ask the app's refresher for a fresh token for who is identified now, on
+     * every agent: `done(changed)`. A token it brings is set as
+     * `setIdentityToken` sets one — on every agent, and kept for an agent
+     * configured later — but only while the identity is still the one it was
+     * asked for. Returns the request joined or started; nil when nothing was asked.
+     */
+    @discardableResult
+    func refreshIdentityToken(_ done: @escaping (Bool) -> Void) -> UUID? {
         let agents = peers
-        tokenRefresh.refresh(capture: {
+        let registry = self.registry
+        return tokenRefresh.refresh(capture: {
             let marks = agents.map { ($0, $0.identity.generation) }
+            let asked = registry?.shared().identified?.traits
             return { token in
                 var changed = false
                 for (agent, generation) in marks where agent.identity.applyRefreshedToken(token, generation: generation) {
                     changed = true
                     agent.identityProofChanged()
                 }
+                if changed { registry?.rememberRefreshedToken(token, for: asked) }
                 return changed
             }
         }, done: done)
@@ -888,9 +931,13 @@ public final class GraineInApp: ObservableObject {
             self.requests.post(path, fields, cure: false, declaration: declaration, completion: done)
         }
         security.refreshToken = { [weak self] done in
-            guard let self = self else { return done(false) }
-            self.refreshIdentityToken(done)
+            guard let self = self else {
+                done(false)
+                return nil
+            }
+            return self.refreshIdentityToken(done)
         }
+        security.refreshTimedOut = { [weak self] round in self?.tokenRefresh.timedOut(round) }
         security.hasRefresher = { [weak self] in self?.tokenRefresh.hasRefresher ?? false }
         security.onChange = { [weak self] next in
             guard let self = self else { return }
@@ -2167,9 +2214,12 @@ public final class GraineInApp: ObservableObject {
     /**
      * This agent's registration (`/api/embed/devices`), when its session says
      * Graine rings this app and one is due (DeviceRegistration): a new token, a
-     * new customer, time zone or version, or a day since the last.
+     * new customer, time zone or version, or a day since the last — or, with
+     * `force`, now (the same registration again, with the identity token it
+     * lacked). An identity token the app has not given yet is waited for
+     * first, in the background (`AppVerification.awaitMissingToken`).
      */
-    func registerDevice(token: String, appId: String, apnsEnvironment: String, now: Date = Date()) {
+    func registerDevice(token: String, appId: String, apnsEnvironment: String, now: Date = Date(), force: Bool = false) {
         guard let calls = sessionOrCached?.calls, calls.ringsThisPlatform else { return }
         let f = identityFields(callId: nil)
         let appVersion = config.appVersion ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
@@ -2179,7 +2229,7 @@ public final class GraineInApp: ObservableObject {
         ])
         let agentName = name
         let store = defaults
-        guard DeviceRegistration.due(last: DeviceRegistration.load(store, agent: agentName), fingerprint: fingerprint, now: now) else { return }
+        guard force || DeviceRegistration.due(last: DeviceRegistration.load(store, agent: agentName), fingerprint: fingerprint, now: now) else { return }
         var fields: [(String, WireJSON)] = [
             ("installId", .string(f.installId ?? installId)),
             ("platform", .string("ios")),
@@ -2192,18 +2242,77 @@ public final class GraineInApp: ObservableObject {
             ("sdkVersion", .string(GraineVersion.name)),
         ]
         if let value = f.value { fields.append(("identity", .object([("value", .string(value))]))) }
-        requests.post("/api/embed/devices", fields) { result in
-            switch result {
-            case .success(let body):
-                DeviceRegistration(fingerprint: fingerprint, at: now).save(store, agent: agentName)
-                // `{ok, trusted?, reason?}`: registered either way, but an untrusted device is not rung for the customer.
-                if JSON.unwrap(body["trusted"]).flatMap({ JSON.bool($0) }) == false {
-                    GraineLog.warning("This device is registered for calls but not linked to the signed-in customer (\(JSON.nonEmpty(body["reason"]) ?? "untrusted")).")
+        // An agent that verifies users takes a registration without the customer's identity token as anonymous — and
+        // unlinks their rings from this phone: one the app has not given yet is asked for first (10 s at most, unseen).
+        security.awaitMissingToken { [weak self] in
+            guard let self = self else { return }
+            // Someone else meanwhile, or nobody: their own registration follows the change; this one is not sent.
+            guard self.identity.snapshot().value == f.value else { return }
+            // Sent without a token for this customer: sent again, once, when one arrives for them (registerAgainWithToken).
+            self.noteRegistration(customer: f.value, pushToken: token, appId: appId, apnsEnvironment: apnsEnvironment)
+            self.requests.post("/api/embed/devices", fields) { result in
+                switch result {
+                case .success(let body):
+                    DeviceRegistration(fingerprint: fingerprint, at: now).save(store, agent: agentName)
+                    // `{ok, trusted?, reason?}`: registered either way, but an untrusted device is not rung for the customer.
+                    if JSON.unwrap(body["trusted"]).flatMap({ JSON.bool($0) }) == false {
+                        GraineLog.warning("This device is registered for calls but not linked to the signed-in customer (\(JSON.nonEmpty(body["reason"]) ?? "untrusted")).")
+                    }
+                case .failure(let error):
+                    GraineLog.warning("This device could not be registered for calls: \(error.message)")
                 }
-            case .failure(let error):
-                GraineLog.warning("This device could not be registered for calls: \(error.message)")
             }
         }
+    }
+
+    /// A registration that named a customer and carried no identity token for them: what to send again once one arrives.
+    private struct TokenlessRegistration {
+        let customer: String
+        let pushToken: String
+        let appId: String
+        let apnsEnvironment: String
+    }
+
+    /// This agent's last registration, when it went without the customer's identity token. Under `registrationLock`.
+    private var tokenlessRegistration: TokenlessRegistration?
+    private let registrationLock = NSLock()
+
+    /// What the registration about to go says of the customer: named without their token, it is kept to be sent again; anything else clears it.
+    private func noteRegistration(customer value: String?, pushToken: String, appId: String, apnsEnvironment: String) {
+        let lacking = value.flatMap { identity.proof(for: $0).token == nil ? $0 : nil }
+        registrationLock.lock()
+        tokenlessRegistration = lacking.map {
+            TokenlessRegistration(customer: $0, pushToken: pushToken, appId: appId, apnsEnvironment: apnsEnvironment)
+        }
+        registrationLock.unlock()
+    }
+
+    /**
+     * The identity token changed — given with `identify`, by `setIdentityToken`
+     * or by the refresher. When this agent's last registration named this same
+     * customer without a token (an agent that verifies users took it as
+     * anonymous, unlinking their rings from this phone), it is sent again now,
+     * once, with the token. Another customer since, or nobody: nothing is ever
+     * sent for the last one.
+     */
+    private func registerAgainWithToken() {
+        registrationLock.lock()
+        guard let last = tokenlessRegistration else {
+            registrationLock.unlock()
+            return
+        }
+        guard identity.snapshot().value == last.customer else {
+            tokenlessRegistration = nil
+            registrationLock.unlock()
+            return
+        }
+        guard identity.proof(for: last.customer).token != nil else {
+            registrationLock.unlock()
+            return
+        }
+        tokenlessRegistration = nil
+        registrationLock.unlock()
+        registerDevice(token: last.pushToken, appId: last.appId, apnsEnvironment: last.apnsEnvironment, force: true)
     }
 
     // MARK: - Calls the agent will make (contract §4.2)

@@ -147,6 +147,14 @@ final class CallEngine {
         var security: EmbedProof? = nil
         /// The call's agent's server tokens: the ticket (and a WebRTC mint) carries one when they are in play (CLIENT-TOKENS.md); nil sends none.
         var tokens: ClientTokens? = nil
+        /**
+         * The customer answered a ring (or its WebRTC leg is prepared while it
+         * rings): the ticket and the mint never wait for an identity token the
+         * app has not given — the ring asked the refresher when it arrived, and
+         * an answer must not wait on it. A call the customer places waits for
+         * one (`AppVerification.missingTokenWait`).
+         */
+        var answering: Bool = false
     }
 
     /// How a call's conversation ended.
@@ -527,7 +535,8 @@ final class CallEngine {
             return
         }
         ticketAskedAt = scheduler.now
-        ConversationTicket.ask(url: url, fields: { fields }, security: setup.security, tokens: setup.tokens, network: network) { [weak self] outcome in
+        ConversationTicket.ask(url: url, fields: { fields }, security: setup.security, answering: setup.answering, tokens: setup.tokens,
+                               network: network) { [weak self] outcome in
             self?.scheduler.run { self?.ticketArrived(session: session, outcome: outcome) }
         }
     }

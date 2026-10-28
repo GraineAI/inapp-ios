@@ -24,9 +24,14 @@ import Security
  *
  * Before a ticket or a call session (`beforeConversation`): under "Require a
  * verified app" with no pass, a proof is waited for (10 s at most); a JWT
- * identity token less than a minute from its `exp` is refreshed first. A
- * refusal (`cure`): `app_not_verified` proves the app and asks once more;
- * `identity_unverified` asks the app's refresher and asks once more.
+ * identity token less than a minute from its `exp` is refreshed first; and
+ * with someone identified, no identity token held, a refresher set and an
+ * agent that verifies users, the refresher is asked and waited for (10 s at
+ * most) — not when the customer answers a ring. A request that acts for the
+ * identified user, and the voice bar's call (`awaitMissingToken`), wait for
+ * that missing token the same way. A refusal (`cure`): `app_not_verified`
+ * proves the app and asks once more; `identity_unverified` asks the app's
+ * refresher and asks once more.
  *
  * Foundation and Security only: App Attest is behind `AppAttesting`, the
  * Keychain behind the stores, the clock behind `Environment`. Thread-safe.
@@ -207,8 +212,14 @@ enum DebugTokenVault {
 
 /// The app's and the user's proofs, for the requests that start a conversation and the routes that need the customer.
 protocol EmbedProof: EmbedCredentials {
-    /// Before a ticket or call-session request: what is worth waiting for, waited for (10 s at most). `ready` once; any thread.
-    func beforeConversation(_ ready: @escaping () -> Void)
+    /**
+     * Before a ticket or call-session request: what is worth waiting for,
+     * waited for (10 s at most). `answering`: the customer answered a ring —
+     * an identity token the app has not given is then not waited for (the ring
+     * asked the refresher when it arrived; an answer never waits on it).
+     * `ready` once; any thread.
+     */
+    func beforeConversation(answering: Bool, _ ready: @escaping () -> Void)
     /// An answer (or a refusal) from Graine: its `verification` kept. `identityValue`: who the request named.
     func heard(status: Int, body: [String: Any]?, identityValue: String?)
     /// A refusal that proving the app or a fresh identity token may cure: `retry(true)` once it is cured — then the request goes once more.
@@ -241,6 +252,16 @@ final class AppVerification: EmbedProof {
     static let outageDelays: [TimeInterval] = [30, 120, 600]
     /// How long a conversation's start waits for a proof or a fresh token.
     static let conversationWait: TimeInterval = 10
+    /**
+     * HOW LONG A CONVERSATION'S START, OR A REQUEST FOR THE IDENTIFIED USER,
+     * WAITS FOR THE APP'S REFRESHER WHEN NO IDENTITY TOKEN IS HELD
+     * (`missingTokenDue`): 10 s at most. An app that identifies the user and
+     * fetches the token afterwards then has its first conversation verified
+     * instead of anonymous. A refresher that answers nil, fails or takes longer
+     * lets the conversation go as it would have — never later than this — and
+     * a refresh that ran out a wait is not waited for again (`awaitRefresh`).
+     */
+    static let missingTokenWait: TimeInterval = 10
     /// A pass with less than this left is renewed in the background (on launch, the foreground, a ring).
     static let refreshWithin: TimeInterval = 21_600
     /// A rate limit that did not say for how long.
@@ -257,8 +278,10 @@ final class AppVerification: EmbedProof {
 
     /// The routes app-verify is asked on. Set by the agent, which owns the network.
     var send: Send?
-    /// Ask the app's identity-token refresher (shared by every agent): `done(changed)`. Set by the agent.
-    var refreshToken: ((@escaping (Bool) -> Void) -> Void)?
+    /// Ask the app's identity-token refresher (shared by every agent): `done(changed)`; the request joined or started, nil when nothing was asked. Set by the agent.
+    var refreshToken: ((@escaping (Bool) -> Void) -> UUID?)?
+    /// A wait for that request ran out before it answered: later conversations do not wait for it again. Set by the agent.
+    var refreshTimedOut: ((UUID) -> Void)?
     /// The app has a refresher to ask.
     var hasRefresher: () -> Bool = { false }
     /// The public state changed. Any thread.
@@ -861,23 +884,79 @@ final class AppVerification: EmbedProof {
         prove(force: true, done)
     }
 
+    // MARK: - The identity token the app has not given yet
+
+    /**
+     * The app's refresher is worth asking — and waiting for — though no token
+     * is about to expire, because none is held: someone is identified (by the
+     * trait the agent names), no identity token is held for them, the app set
+     * `identityTokenRefresher`, and the agent verifies users (report or
+     * enforce). Nobody identified, a token held, no refresher, or an agent that
+     * does not verify users: false, and the refresher is not asked.
+     */
+    func missingTokenDue() -> Bool {
+        lock.lock()
+        let verifiesUsers = securityKnown && security.userVerify != .off
+        lock.unlock()
+        guard verifiesUsers, hasRefresher(), identity.snapshot().value != nil else { return false }
+        return identity.currentToken() == nil
+    }
+
+    /**
+     * Before a request that acts for the identified user — their memory, their
+     * past sessions, their booked calls, a workflow for them, this device's
+     * registration for their rings — or a call the voice bar places: a token
+     * the app has not given yet (`missingTokenDue`) is asked for and waited
+     * for, `missingTokenWait` at most. `ready` once — at once when nothing is
+     * due; else on any thread.
+     */
+    func awaitMissingToken(_ ready: @escaping () -> Void) {
+        guard missingTokenDue() else { return ready() }
+        awaitRefresh(within: AppVerification.missingTokenWait, ready)
+    }
+
+    /**
+     * Ask the app's refresher — or join the refresh already on its way, so it
+     * is never asked twice at once (IdentityTokenRefresh) — and `done` once it
+     * has answered or `seconds` have passed, whichever comes first. A token it
+     * brings is already held by then. A wait that runs out says so: later
+     * conversations then go at once instead of waiting for that refresh again,
+     * until it answers or its place is freed. The expiring token and the
+     * missing one share it. No refresher: at once.
+     */
+    private func awaitRefresh(within seconds: TimeInterval, _ done: @escaping () -> Void) {
+        guard let refresh = refreshToken else { return done() }
+        // Heard once: nil when the refresher answered first, the refresh's id when this wait ran out on it.
+        let finished = Once<UUID?> { [weak self] ranOut in
+            if let round = ranOut { self?.refreshTimedOut?(round) }
+            done()
+        }
+        let joined = refresh { _ in finished.call(nil) }
+        env.after(seconds) { finished.call(joined) }
+    }
+
     // MARK: - EmbedProof
 
-    func beforeConversation(_ ready: @escaping () -> Void) {
+    func beforeConversation(answering: Bool, _ ready: @escaping () -> Void) {
         let now = env.now()
         lock.lock()
         let waitProof = securityKnown && security.waitsForProof && validPassLocked(now) == nil
         lock.unlock()
         let proofDue = waitProof && attestSupported && !developmentMode
-        let tokenDue = hasRefresher() && IdentityTokenRules.expiresSoon(identity.currentToken(), now: now)
-        guard proofDue || tokenDue else { return ready() }
-        let gate = Countdown(proofDue && tokenDue ? 2 : 1, ready)
-        env.after(AppVerification.conversationWait) { gate.fire() }
-        if proofDue { prove(force: true) { _ in gate.tick() } }
-        if tokenDue, let refresh = refreshToken {
-            refresh { _ in gate.tick() }
-        } else if tokenDue {
-            gate.tick()
+        // A JWT about to expire is refreshed first, as before; and a conversation the customer starts asks for the token
+        // the app has not given yet. An answered ring never waits for that one: the ring asked for it when it arrived.
+        let expiring = hasRefresher() && IdentityTokenRules.expiresSoon(identity.currentToken(), now: now)
+        let missing = !answering && missingTokenDue()
+        guard proofDue || expiring || missing else { return ready() }
+        let gate = Countdown(proofDue && (expiring || missing) ? 2 : 1, ready)
+        if proofDue {
+            let proven = Once<Void> { _ in gate.tick() }
+            env.after(AppVerification.conversationWait) { proven.call(()) }
+            prove(force: true) { _ in proven.call(()) }
+        }
+        // Never both: an expiring token is one that is held.
+        if expiring || missing {
+            awaitRefresh(within: missing ? AppVerification.missingTokenWait : AppVerification.conversationWait) { gate.tick() }
         }
     }
 
@@ -924,7 +1003,7 @@ final class AppVerification: EmbedProof {
         publish()
         // The token ran out: a fresh one is asked for in the background, for the next conversation.
         if answer.user == "invalid", answer.userReason == "expired", let refresh = refreshToken {
-            refresh { _ in }
+            _ = refresh { _ in }
         }
     }
 
@@ -956,7 +1035,7 @@ final class AppVerification: EmbedProof {
             guard let refresh = refreshToken, hasRefresher() else { return retry(false) }
             let once = Once(retry)
             env.after(AppVerification.conversationWait) { once.call(false) }
-            refresh { changed in once.call(changed) }
+            _ = refresh { changed in once.call(changed) }
         default:
             retry(false)
         }
@@ -983,7 +1062,7 @@ final class Once<Value>: @unchecked Sendable {
     }
 }
 
-/// `done` once `count` ticks have arrived, or at the first `fire()`. Thread-safe (its lock).
+/// `done` once `count` ticks have arrived — each wait it counts has a deadline of its own. Thread-safe (its lock).
 final class Countdown: @unchecked Sendable {
     private let lock = NSLock()
     private var left: Int
@@ -999,14 +1078,6 @@ final class Countdown: @unchecked Sendable {
         left -= 1
         let run = left <= 0 ? done : nil
         if run != nil { done = nil }
-        lock.unlock()
-        run?()
-    }
-
-    func fire() {
-        lock.lock()
-        let run = done
-        done = nil
         lock.unlock()
         run?()
     }

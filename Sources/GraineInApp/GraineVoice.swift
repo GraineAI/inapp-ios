@@ -190,6 +190,9 @@ public final class GraineVoice: NSObject, ObservableObject {
     private var progressObservation: NSKeyValueObservation?
 
     private var pendingStart = false
+    /// A start held for the identity token the app's refresher is fetching (`beginCall`); `tokenWait` names the latest, so only it goes.
+    private var awaitingToken = false
+    private var tokenWait = 0
     private var startedCall = false
     private var endNotified = true
     private var cacheKey = String(GraineInApp.wallClockMs())
@@ -557,7 +560,34 @@ public final class GraineVoice: NSObject, ObservableObject {
         }
     }
 
+    /**
+     * Place the call. With a customer identified and no identity token held,
+     * for an agent that verifies users, the app's refresher is asked first and
+     * the call placed with what it brings — 10 s at most
+     * (`AppVerification.missingTokenWait`), then as it is. The start is held
+     * meanwhile, as one waiting for the page is: an end cancels it.
+     */
     private func beginCall() {
+        guard graine.security.missingTokenDue() else { return placeCall() }
+        tokenWait += 1
+        let mine = tokenWait
+        awaitingToken = true
+        pendingStart = true
+        graine.security.awaitMissingToken { [weak self] in
+            DispatchQueue.main.async {
+                guard let self = self, self.tokenWait == mine else { return }
+                self.awaitingToken = false
+                // Ended meanwhile; or the page reloaded, and its ready places the call.
+                guard self.pendingStart, self.ready, GraineVoice.micGranted() else { return }
+                self.pendingStart = false
+                // The token it brought reaches the page before the start: the page mints with what it holds.
+                self.postIdentity()
+                self.placeCall()
+            }
+        }
+    }
+
+    private func placeCall() {
         startedCall = true
         endNotified = true
         configureAudioSession()
@@ -645,7 +675,8 @@ public final class GraineVoice: NSObject, ObservableObject {
             // The token the page's own ticket and call session carry, before anything asks for one.
             postClientToken(graine.clientTokens.newest)
             if let frame = graine.currentContextFrame() { postContext(frame) }
-            if pendingStart && GraineVoice.micGranted() {
+            // A start still waiting for the identity token is placed when the token comes (`beginCall`).
+            if pendingStart && !awaitingToken && GraineVoice.micGranted() {
                 pendingStart = false
                 beginCall()
             } else if !startedCall {

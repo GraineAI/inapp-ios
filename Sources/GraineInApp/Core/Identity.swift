@@ -469,20 +469,11 @@ final class IdentityState {
     func identify(_ next: [String: Any?]?, memory: Bool?, token change: TokenChange = .keep) {
         lock.lock()
         defer { lock.unlock() }
-        let previousTraits = traits
-        let previousValue = resolved
+        let someoneElse = someoneElseLocked(next)
         traits = next
         memoryOverride = nil
         resolveLocked()
         if let memory = memory { fileMemoryLocked(memory) }
-        let someoneElse: Bool
-        if next == nil {
-            someoneElse = true
-        } else if field != nil {
-            someoneElse = previousValue != resolved
-        } else {
-            someoneElse = !IdentityState.sameTraits(previousTraits, next)
-        }
         if someoneElse { dropProofLocked() }
         guard next != nil else { return }
         switch change {
@@ -495,6 +486,24 @@ final class IdentityState {
             token = nil
             generationValue += 1
         }
+    }
+
+    /// Whether `identify(next)` would name another person, or nobody — asked before anything acts on it (the refresher's limit is per person).
+    func namesSomeoneElse(_ next: [String: Any?]?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return someoneElseLocked(next)
+    }
+
+    /**
+     * `next` names another person than who is identified now, or nobody: by
+     * the value of the trait the session names; before the session, by the
+     * traits themselves (who they name cannot be told yet). Under the lock.
+     */
+    private func someoneElseLocked(_ next: [String: Any?]?) -> Bool {
+        guard next != nil else { return true }
+        guard let f = field else { return !IdentityState.sameTraits(traits, next) }
+        return resolved != IdentityRules.value(in: next, field: f)
     }
 
     /// What `identify` does to the token: keeps it (none given), sets it, or clears it (one given that cannot be sent).

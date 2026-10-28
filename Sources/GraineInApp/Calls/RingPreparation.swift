@@ -135,7 +135,9 @@ extension GraineCalls {
             callVariables: CallEngine.variables(sdk: [:], whoCalled: whoCalled, reason: call.reason, own: own),
             identity: agent.identityFields(callId: call.callId),
             security: agent.security,
-            tokens: agent.clientTokens
+            tokens: agent.clientTokens,
+            // The answer takes this leg: its mint never waits for an identity token the app has not given.
+            answering: true
         )
         let debug = agent.config.debug
         RingPreparation.shared.watch(self)

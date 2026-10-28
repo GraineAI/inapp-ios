@@ -57,8 +57,9 @@ import Foundation
      * Before each request to the call-session route — a call's mint, a
      * grant's renewal — what must be ready first is made ready (APP-IDENTITY.md
      * §2.1, §1.3: a proof of the app the agent requires, an identity token
-     * about to expire), then `go`: within ten seconds, on any thread. Nil: at
-     * once. `mintBody` is read after it, so the body carries what it brought.
+     * about to expire or, for a call the customer places, one the app has not
+     * given yet), then `go`: within ten seconds, on any thread. Nil: at once.
+     * `mintBody` is read after it, so the body carries what it brought.
      */
     public var beforeMint: ((_ go: @escaping () -> Void) -> Void)?
     /// Every answer of the call-session route — its status and body — for what it says about the app and the user (`verification`).
@@ -468,10 +469,12 @@ extension GraineRtcRequest {
      * The call session asked as APP-IDENTITY.md says: before each mint (and
      * grant renewal) what is worth waiting for is waited for, every answer's
      * `verification` is kept, and a curable refusal is cured once.
+     * `answering`: a ring the customer answers (or its leg prepared while it
+     * rings) — never held up by an identity token the app has not given.
      */
-    mutating func guarded(by security: EmbedProof?, identityValue: String?) {
+    mutating func guarded(by security: EmbedProof?, identityValue: String?, answering: Bool = false) {
         guard let security = security else { return }
-        beforeMint = { go in security.beforeConversation(go) }
+        beforeMint = { go in security.beforeConversation(answering: answering, go) }
         mintAnswered = { status, data in
             security.heard(status: status, body: JSON.object(from: data), identityValue: identityValue)
         }
