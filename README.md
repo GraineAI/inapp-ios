@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.7")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.8")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -370,6 +370,32 @@ one yourself (from `onWidget`)? Answer it with
 `graine.answerComponent(widgetId:data:summary:)` — the structured answer and the
 sentence that is the customer's turn, on the conversation that is live.
 
+A component made with **Start blank** in the dashboard (kind `blank`) is drawn
+from its blocks: a heading, text, a picture as wide as the card, a divider and
+buttons, in order and in the component's look (its accent, corners, density,
+image size and button style). A tap on a button answers the agent with
+`["action": content]` and the button's words as the customer's sentence. To
+draw one in your own design, read `widget.blocks` (`[GraineWidgetBlock]`, new
+in 0.14.8): only what can be drawn arrives, each block carries only its own
+field — `content` for a heading, text or button, `imageUrl` for an image, a
+full URL on the agent's origin — and every `id` is unique.
+
+```swift
+ForEach(widget.blocks) { block in
+    switch block.type {
+    case .heading: Text(block.content ?? "").font(.headline)
+    case .text: Text(block.content ?? "")
+    case .image: MyPicture(url: block.imageUrl)
+    case .divider: Divider()
+    case .button:
+        Button(block.content ?? "") {
+            let words = block.content ?? ""
+            graine.answerComponent(widgetId: widget.id, data: ["action": words], summary: words)
+        }
+    }
+}
+```
+
 ## The chat
 
 The bar offers what the dashboard offers (Embed & Widgets → What visitors
@@ -658,7 +684,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.7")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.8")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

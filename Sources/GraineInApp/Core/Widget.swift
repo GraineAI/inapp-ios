@@ -24,6 +24,46 @@ public enum GraineWidgetPreset: String {
     case compact
 }
 
+/**
+ * What one block of a component built from blocks is (`GraineWidgetBlock.type`)
+ * — a component made with "Start blank" in the dashboard. Raw values are the
+ * dashboard's words. New in 0.14.8.
+ */
+public enum GraineWidgetBlockType: String {
+    /// A heading: the block's `content`.
+    case heading
+    /// A paragraph: the block's `content`.
+    case text
+    /// A picture as wide as the component: the block's `imageUrl`.
+    case image
+    /// A line between blocks.
+    case divider
+    /**
+     * A button labelled with the block's `content`. A tap answers the
+     * component as the dashboard's preview does — `{"action": content}`, and
+     * `content` as the customer's sentence:
+     * `answerComponent(widgetId: widget.id, data: ["action": content], summary: content)`.
+     */
+    case button
+}
+
+/**
+ * ONE BLOCK OF A COMPONENT BUILT FROM BLOCKS — a component made with "Start
+ * blank" in the dashboard (kind `blank`): a heading, text, an image, a divider
+ * or a button, in the order `GraineWidget.blocks` lists them. Each block keeps
+ * only the field its type uses. New in 0.14.8.
+ */
+public struct GraineWidgetBlock: Identifiable, Equatable {
+    /// Its id: the dashboard's own, else `block-<n>` (its place in the list). Unique within the component — a key for your list.
+    public let id: String
+    /// What it is: a heading, text, an image, a divider or a button.
+    public let type: GraineWidgetBlockType
+    /// The words of a heading, a text or a button; nil for an image or a divider.
+    public let content: String?
+    /// An image's picture — a full URL: one the dashboard gave as a path on its own site is on the agent's origin. Nil for any other block.
+    public let imageUrl: String?
+}
+
 enum WidgetImageSize: String { case small, medium, large }
 enum WidgetDensity: String { case comfortable, compact }
 enum WidgetButtonStyle: String { case filled, outline, row }
@@ -385,6 +425,97 @@ enum WidgetRules {
         return GraineProtocol.trimTrailingSlashes(base) + s
     }
 
+    /**
+     * A PICTURE AS WIDE AS THE COMPONENT — a row's large image, an image
+     * block: its own height by the look's image size (100, 140 or 180
+     * points), or, when the design shapes the large image (`cards.image`:
+     * square, landscape, wide), that shape for its width, 100–260.
+     */
+    static func pictureHeight(_ size: WidgetImageSize, shape: String? = nil, width: Double = 0) -> Double {
+        let own: Double
+        switch size {
+        case .small: own = 100
+        case .medium: own = 140
+        case .large: own = 180
+        }
+        guard let shape = shape, shape != "auto", width > 0 else { return own }
+        return ChatWindowRules.imageHeight(shape, width: width, auto: own)
+    }
+
+    // MARK: - Blocks ("Start blank")
+
+    /// The kind "Start blank" makes in the dashboard.
+    static let blankKind = "blank"
+
+    /// A component's blocks: those of its data when it was built from blocks (kind `blank`, read as the surface rule reads a kind), else none.
+    static func blocks(kind: String?, data: Any?, baseUrl: String?) -> [GraineWidgetBlock] {
+        guard (kind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == blankKind else { return [] }
+        return normaliseBlankBlocks(data, baseUrl: baseUrl)
+    }
+
+    /**
+     * A COMPONENT BUILT FROM BLOCKS, AS THE DASHBOARD MAKES IT — its
+     * `data.blocks`, `{id, type: heading | text | image | divider | button,
+     * content?, imageUrl?}`, read as every Graine SDK reads it (protocol.ts
+     * `normaliseBlankBlocks`, word for word):
+     *
+     *   - a row that is not an object, or whose type (trimmed, in any case)
+     *     is not one of the five, is dropped;
+     *   - a heading, text or button without words, and an image without a
+     *     picture, are dropped;
+     *   - each block keeps only the field its type uses, trimmed;
+     *   - its id is its own (a string that is not blank, kept as written),
+     *     unless it has none or an earlier block took it — then `block-<n>`,
+     *     its place in the list as sent, made unique;
+     *   - a picture is resolved as every component picture is (`resolveImages`,
+     *     on the value as sent: a root-relative path goes on `baseUrl`, the
+     *     agent's origin), then trimmed.
+     *
+     * Kind-blind, as the contract's is: `blocks(kind:data:baseUrl:)` asks the
+     * kind. Pure; never throws.
+     */
+    static func normaliseBlankBlocks(_ data: Any?, baseUrl: String? = nil) -> [GraineWidgetBlock] {
+        guard let object = JSON.unwrap(data) as? [String: Any], let rows = JSON.unwrap(object["blocks"]) as? [Any] else { return [] }
+        let base = (baseUrl ?? "").isEmpty ? nil : baseUrl
+        var out: [GraineWidgetBlock] = []
+        var used = Set<String>()
+        for (at, entry) in rows.enumerated() {
+            guard let row = JSON.unwrap(entry) as? [String: Any],
+                  let word = JSON.unwrap(row["type"]) as? String,
+                  let type = GraineWidgetBlockType(rawValue: word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            else { continue }
+            let content: String?
+            let imageUrl: String?
+            switch type {
+            case .heading, .text, .button:
+                guard let words = trimmedText(row["content"]) else { continue }
+                (content, imageUrl) = (words, nil)
+            case .image:
+                var sent = JSON.unwrap(row["imageUrl"])
+                if let b = base, let s = sent { sent = resolveOne(s, b) }
+                guard let picture = trimmedText(sent) else { continue }
+                (content, imageUrl) = (nil, picture)
+            case .divider:
+                (content, imageUrl) = (nil, nil)
+            }
+            let own = (JSON.unwrap(row["id"]) as? String).flatMap { id -> String? in
+                id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || used.contains(id) ? nil : id
+            }
+            var id = own ?? "block-\(at)"
+            while used.contains(id) { id = "\(id)-\(at)" }
+            used.insert(id)
+            out.append(GraineWidgetBlock(id: id, type: type, content: content, imageUrl: imageUrl))
+        }
+        return out
+    }
+
+    /// A string, trimmed; nil when it is not a string or holds only spaces.
+    private static func trimmedText(_ value: Any?) -> String? {
+        guard let s = JSON.unwrap(value) as? String else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
     // MARK: - Helpers
 
     private static func pick<T: RawRepresentable>(_ value: Any?) -> T? where T.RawValue == String {
@@ -437,6 +568,20 @@ public struct GraineWidget {
     public let fallbackText: String
     /// The frame exactly as it arrived.
     public let raw: [String: Any]
+    /**
+     * ITS BLOCKS, for a component built from blocks — "Start blank" in the
+     * dashboard (kind `blank`): its headings, text, images, dividers and
+     * buttons, in order. Empty for any other kind. Only what can be drawn is
+     * kept: a block of a type this version does not know, a heading, text or
+     * button without words, an image without a picture, and anything that is
+     * not a block are left out. Each id is unique — a key for your list. An
+     * image's picture is a full URL: a path on the dashboard's own site is on
+     * the agent's origin (`baseUrl`). `GraineWidgetView` draws them in the
+     * component's look; a button answers with
+     * `answerComponent(widgetId: id, data: ["action": content], summary: content)`.
+     * New in 0.14.8.
+     */
+    public let blocks: [GraineWidgetBlock]
     let style: WidgetStyle
     let onSelect: WidgetSelectAction
 
@@ -447,6 +592,7 @@ public struct GraineWidget {
         self.data = WidgetRules.resolveImages(frame["data"] as? [String: Any] ?? [:], baseUrl: baseUrl)
         self.fallbackText = JSON.nonEmpty(frame["fallback_text"]) ?? JSON.string(frame["fallbackText"])
         self.raw = frame
+        self.blocks = WidgetRules.blocks(kind: self.kind, data: frame["data"], baseUrl: baseUrl)
         self.style = WidgetRules.normaliseStyle(frame["style"])
         self.onSelect = WidgetRules.normaliseSelectAction(frame["on_select"] ?? frame["onSelect"])
     }
@@ -484,6 +630,8 @@ enum WidgetBody: Equatable {
     case calendar(note: String?, days: [WidgetDay])
     case rows([WidgetRow])
     case chips([WidgetChip])
+    /// A component built from blocks ("Start blank"), in the dashboard's order.
+    case blocks([GraineWidgetBlock])
     case fallback(String)
 }
 
@@ -591,8 +739,12 @@ struct WidgetContent {
         let isChips = (widget.kind == "choices" || isQuickActions) && !options.isEmpty
         let days = widget.kind == "calendar_slots" ? (data["days"] as? [Any] ?? []) : []
         let isCalendar = !days.isEmpty
+        // Built from blocks ("Start blank"), with something to draw: the blocks are the component.
+        let isBlocks = !widget.blocks.isEmpty
 
-        if isCalendar {
+        if isBlocks {
+            body = .blocks(widget.blocks)
+        } else if isCalendar {
             var parsed: [WidgetDay] = []
             for (di, entry) in days.prefix(4).enumerated() {
                 let d = entry as? [String: Any] ?? [:]
@@ -622,9 +774,10 @@ struct WidgetContent {
             body = .fallback(fallback)
         }
 
-        let drawable = isProducts || isChips || isCalendar
+        let drawable = isProducts || isChips || isCalendar || isBlocks
         surface = drawable ? look.surface : .card
-        many = look.select == .many && drawable
+        // A block's button answers at once: there is no row to tick.
+        many = look.select == .many && drawable && !isBlocks
         maxSelect = look.maxSelect
         title = JSON.truthy(data["title"]) ? (JSON.text(data["title"]) ?? "") : ""
         prompt = JSON.truthy(data["prompt"]) ? (JSON.text(data["prompt"]) ?? "") : ""
@@ -685,5 +838,11 @@ struct WidgetContent {
 
     func answer(day: String, slot: String) -> (data: [String: Any], summary: String) {
         (["day": day, "slot": slot], "\(day) at \(slot), please.")
+    }
+
+    /// A button block, as the dashboard's preview answers it: `{"action": its words}`, and its words as the sentence. Nil for a block that is not a button.
+    func answer(block: GraineWidgetBlock) -> (data: [String: Any], summary: String)? {
+        guard block.type == .button, let words = block.content, !words.isEmpty else { return nil }
+        return (["action": words], words)
     }
 }

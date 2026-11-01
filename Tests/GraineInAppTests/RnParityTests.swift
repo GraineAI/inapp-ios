@@ -123,6 +123,20 @@ import Testing
         }
     }
 
+    @Test func readsTheSameBlocksFromAComponentBuiltFromBlocks() throws {
+        for c in try cases("blankBlocks") {
+            let baseUrl = c["baseUrl"] as? String
+            let got = WidgetRules.normaliseBlankBlocks(c["data"], baseUrl: baseUrl)
+            #expect(Canon(c["output"]) == Canon(got.map(blockMap)), "case: \(Canon(c))")
+            // As an app receives them: a `blank` component carries exactly these, any other kind none.
+            let data = c["data"] ?? NSNull()
+            let blank = try #require(GraineWidget(frame: ["widget_id": "w1", "kind": "blank", "data": data], baseUrl: baseUrl))
+            #expect(Canon(c["output"]) == Canon(blank.blocks.map(blockMap)), "GraineWidget.blocks, case: \(Canon(c))")
+            let other = try #require(GraineWidget(frame: ["widget_id": "w1", "kind": "product_list", "data": data], baseUrl: baseUrl))
+            #expect(other.blocks.isEmpty, "not built from blocks, case: \(Canon(c))")
+        }
+    }
+
     // MARK: - the loader
 
     @Test func resolvesTheSameLoader() throws {
@@ -302,6 +316,14 @@ import Testing
         ]
         if let v = l.radius { m["radius"] = v }
         if let v = l.accent { m["accent"] = v }
+        return m
+    }
+
+    /// A block as the contract writes one: only the field its type uses.
+    private func blockMap(_ b: GraineWidgetBlock) -> [String: Any] {
+        var m: [String: Any] = ["id": b.id, "type": b.type.rawValue]
+        if let v = b.content { m["content"] = v }
+        if let v = b.imageUrl { m["imageUrl"] = v }
         return m
     }
 }

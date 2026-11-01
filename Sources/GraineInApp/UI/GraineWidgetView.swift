@@ -14,6 +14,8 @@ import SwiftUI
  *   info_card                 one row, from the card's title and summary
  *   choices / quick_actions   a set of buttons
  *   calendar_slots            a day, then its times
+ *   blank                     built from blocks ("Start blank"): headings,
+ *                             text, pictures, dividers and buttons, in order
  *
  * and, for anything else, the agent's fallback sentence — guessing at an
  * unknown shape produces something worse than words. The dashboard's preset
@@ -389,6 +391,31 @@ struct GraineWidgetTheme {
             fill: c.buttonFill.map(paint), text: paint(c.buttonText), border: c.buttonBorder.map(paint), strong: c.button == "text"
         )
     }
+
+    /// How one of a component's buttons is painted (`buttonPaint`).
+    struct ButtonPaint {
+        let text: Color
+        let fill: Color
+        let stroke: Color
+        let lineWidth: CGFloat
+    }
+
+    /**
+     * A component's button in the look's style — a row's button and a block's
+     * alike: "filled" is drawn as the design's main button (`mainButton`),
+     * "outline" as the accent's outline, and one that cannot be pressed as an
+     * outline in the border colour with its words muted.
+     */
+    func buttonPaint(outlined: Bool, ownAccent: Bool, unavailable: Bool = false) -> ButtonPaint {
+        let main = mainButton(ownAccent: ownAccent)
+        let hollow = unavailable || outlined || main.fill == nil
+        return ButtonPaint(
+            text: unavailable ? muted : (outlined ? accent : main.text),
+            fill: unavailable || outlined ? .clear : (main.fill ?? .clear),
+            stroke: unavailable ? border : (outlined ? accent : (main.border ?? .clear)),
+            lineWidth: hollow ? (designed ? max(1, borderWidth) : 1.5) : 0
+        )
+    }
 }
 
 struct GraineWidgetHost: View {
@@ -701,6 +728,8 @@ struct GraineWidgetCard: View {
             rowsView(rows)
         case .chips(let chips):
             chipsView(chips)
+        case .blocks(let blocks):
+            blocksView(blocks)
         case .fallback(let text):
             Text(text)
                 .font(theme.font(.body, .system(size: 14)))
@@ -856,6 +885,20 @@ struct GraineWidgetCard: View {
         }
         .buttonStyle(PlainButtonStyle())
         .accessibilityLabel("\(day) at \(slot)")
+    }
+
+    // MARK: Blocks ("Start blank")
+
+    /// A component built from blocks, in the dashboard's order, spaced by the look's density. A button answers at once.
+    private func blocksView(_ blocks: [GraineWidgetBlock]) -> some View {
+        VStack(alignment: .leading, spacing: content.look.density == .compact ? 6 : 10) {
+            ForEach(blocks) { block in
+                GraineWidgetBlockView(block: block, look: content.look, theme: theme) {
+                    guard let answer = content.answer(block: block) else { return }
+                    model.submit(data: answer.data, summary: answer.summary)
+                }
+            }
+        }
     }
 
     // MARK: The way out
@@ -1053,18 +1096,9 @@ struct GraineWidgetRowView: View {
             .stroke(picked == true ? theme.accent : theme.border, lineWidth: picked == true ? theme.borderWidth + 1 : theme.borderWidth)
     }
 
-    private var heroHeight: CGFloat {
-        switch look.imageSize {
-        case .small: return 100
-        case .medium: return 140
-        case .large: return 180
-        }
-    }
-
     /// The large image: its own height (`auto`), or the design's shape for its width — always 100–260.
     private var imageHeight: CGFloat {
-        guard let image = theme.cards?.image, image != "auto", heroWidth > 0 else { return heroHeight }
-        return CGFloat(ChatWindowRules.imageHeight(image, width: Double(heroWidth), auto: Double(heroHeight)))
+        CGFloat(WidgetRules.pictureHeight(look.imageSize, shape: theme.cards?.image, width: Double(heroWidth)))
     }
 
     private var thumbSize: CGFloat {
@@ -1084,14 +1118,7 @@ struct GraineWidgetRowView: View {
     }
 
     private var picture: some View {
-        AsyncImage(url: URL(string: row.image)) { phase in
-            if let image = phase.image {
-                image.resizable().scaledToFill()
-            } else {
-                theme.border
-            }
-        }
-        .accessibilityHidden(true)
+        GraineWidgetPicture(url: row.image, placeholder: theme.border)
     }
 
     private func thumbnail(size: CGFloat) -> some View {
@@ -1171,32 +1198,179 @@ struct GraineWidgetRowView: View {
     }
 
     private func actionButton(wide: Bool) -> some View {
-        let outlined = look.button == .outline
-        // A filled button (the component's own look) is drawn as the design's main button.
-        let main = theme.mainButton(ownAccent: look.accent != nil)
-        let hollow = row.unavailable || outlined || main.fill == nil
+        let paint = theme.buttonPaint(outlined: look.button == .outline, ownAccent: look.accent != nil, unavailable: row.unavailable)
         let label = row.unavailable ? "Unavailable" : row.selectLabel
         let maxWidth: CGFloat? = wide ? CGFloat.infinity : nil
-        let textColor: Color = row.unavailable ? theme.muted : (outlined ? theme.accent : main.text)
-        let fill: Color = row.unavailable || outlined ? Color.clear : (main.fill ?? .clear)
-        let stroke: Color = row.unavailable ? theme.border : (outlined ? theme.accent : (main.border ?? .clear))
         let grammar = theme.grammar
         let corner = min(22, CGFloat(wide ? grammar.buttonRadius : (grammar.pillButtons ? 999 : grammar.buttonRadius)))
         return Button(action: onPick) {
             Text(label)
                 .font(theme.font(wide ? .strong : .captionStrong, .system(size: wide ? 14 : 12.5, weight: .bold)))
-                .foregroundColor(textColor)
+                .foregroundColor(paint.text)
                 .padding(.horizontal, wide ? 12 : 14)
                 .frame(maxWidth: maxWidth, minHeight: 44)
-                .background(fill, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .background(paint.fill, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
-                        .stroke(stroke, lineWidth: hollow ? (theme.designed ? max(1, theme.borderWidth) : 1.5) : 0)
+                        .stroke(paint.stroke, lineWidth: paint.lineWidth)
                 }
         }
         .buttonStyle(PlainButtonStyle())
         .disabled(row.unavailable)
         .accessibilityLabel("\(row.selectLabel): \(row.title)")
+    }
+}
+
+/**
+ * A COMPONENT'S PICTURE — a row's image or thumbnail, an image block: loaded
+ * by the system, with the border colour standing in while it loads and when
+ * it never does. It fills the frame it is given and is cut to it, as a layer
+ * over that frame, so a wide picture never makes its card wider.
+ */
+struct GraineWidgetPicture: View {
+    let url: String
+    let placeholder: Color
+
+    var body: some View {
+        Color.clear
+            .overlay {
+                AsyncImage(url: URL(string: url)) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        placeholder
+                    }
+                }
+            }
+            .clipped()
+            .accessibilityHidden(true)
+    }
+}
+
+/**
+ * ONE BLOCK OF A COMPONENT BUILT FROM BLOCKS, in the component's look: a
+ * heading, bold and larger (a heading to a screen reader); a paragraph, muted;
+ * a picture as wide as the card, cut to the look's image height; a hairline;
+ * or a button in the look's button style
+ * — the design's main button (filled), the accent's outline (outline), or a
+ * row of its own with a chevron (row) — in the phone's grammar.
+ */
+struct GraineWidgetBlockView: View {
+    let block: GraineWidgetBlock
+    let look: WidgetLook
+    let theme: GraineWidgetTheme
+    let onTap: () -> Void
+    @Environment(\.displayScale) private var displayScale
+    /// The picture's width, for a design that shapes the large image (`cards.image`).
+    @State private var pictureWidth: CGFloat = 0
+
+    var body: some View {
+        switch block.type {
+        case .heading: heading
+        case .text: paragraph
+        case .image: picture
+        case .divider: divider
+        case .button: button
+        }
+    }
+
+    private var words: String { block.content ?? "" }
+
+    private var heading: some View {
+        Text(words)
+            .font(theme.font(.title, .system(size: 16, weight: .bold)))
+            .tracking(theme.type?.tracking(.title) ?? 0)
+            .lineSpacing(theme.type?.lineSpacing(.title) ?? 0)
+            .foregroundColor(theme.text)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Body text in the muted colour, under the heading — as the dashboard's preview draws it.
+    private var paragraph: some View {
+        Text(words)
+            .font(theme.font(.body, .system(size: 14)))
+            .lineSpacing(theme.type?.lineSpacing(.body) ?? 0)
+            .foregroundColor(theme.muted)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// As wide as the card, as tall as the look's image size — or the design's shape for its width.
+    private var picture: some View {
+        let height = WidgetRules.pictureHeight(look.imageSize, shape: theme.cards?.image, width: Double(pictureWidth))
+        return GraineWidgetPicture(url: block.imageUrl ?? "", placeholder: theme.border)
+            .frame(maxWidth: .infinity)
+            .frame(height: CGFloat(height))
+            .clipShape(RoundedRectangle(cornerRadius: max(8, theme.radius - 8), style: .continuous))
+            .background(GeometryReader { g in
+                Color.clear.onAppear { pictureWidth = g.size.width }.onChange(of: g.size.width) { pictureWidth = $0 }
+            })
+    }
+
+    /// A hairline in the border colour; with a design, at least its outline's width.
+    private var divider: some View {
+        let hairline = 1 / max(1, displayScale)
+        return Rectangle()
+            .fill(theme.border)
+            .frame(maxWidth: .infinity)
+            .frame(height: theme.designed ? max(hairline, theme.borderWidth) : hairline)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var button: some View {
+        if look.button == .row {
+            rowButton
+        } else {
+            let paint = theme.buttonPaint(outlined: look.button == .outline, ownAccent: look.accent != nil)
+            let corner = min(22, CGFloat(theme.grammar.buttonRadius))
+            Button(action: onTap) {
+                Text(words)
+                    .font(theme.font(.strong, .system(size: 14, weight: .bold)))
+                    .foregroundColor(paint.text)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(paint.fill, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            .stroke(paint.stroke, lineWidth: paint.lineWidth)
+                    }
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel(words)
+        }
+    }
+
+    /// The row is the button, as a List row is: its words, a chevron, and the grammar's separator under it.
+    private var rowButton: some View {
+        let pad = (look.density == .compact ? 6 : 9) + CGFloat(theme.grammar.padBoost)
+        return Button(action: onTap) {
+            HStack(spacing: 10) {
+                Text(words)
+                    .font(theme.font(.strong, .system(size: 14.5, weight: theme.titleWeight)))
+                    .foregroundColor(theme.text)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+                Text("›")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(theme.muted)
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, pad)
+            .padding(.horizontal, 2)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) {
+                theme.border.frame(height: 1).padding(.leading, CGFloat(theme.grammar.separatorInset))
+            }
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel(words)
     }
 }
 
