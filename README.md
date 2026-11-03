@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.8")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.9")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -664,7 +664,7 @@ for problem in calls.callSetupProblems { print(problem.code, problem.message) }
 | `voip_pushes_not_enabled` | `enableVoIPPushes()` not called 15 seconds after `configure`: calls can't ring |
 | `no_voip_token` | No VoIP token 15 seconds after `enableVoIPPushes()` (never reported on the simulator) |
 | `microphone_blocked` | Only Settings can let calls hear the customer |
-| `hosted_ringing_off` | Graine can't ring this phone: no push credentials uploaded for iOS |
+| `hosted_ringing_off` | Graine can't ring this phone: no push credentials uploaded for this app's bundle ID |
 
 A problem is never an exception: calls still work where they can.
 Objective-C: `callPermissionsJSON`, `requestCallPermissionsJSONWithCompletion:`,
@@ -684,7 +684,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.8")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.9")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

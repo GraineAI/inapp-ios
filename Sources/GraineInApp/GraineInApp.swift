@@ -2472,8 +2472,8 @@ public final class GraineInApp: ObservableObject {
      * `bookingAvailable` is true. First match wins: `not_loaded` (the agent's
      * configuration has not loaded yet: a first launch, before the session
      * arrives), `rings_not_set_up` (Graine does not ring this app's iPhones —
-     * the workspace has not uploaded its push credentials, or iOS is not among
-     * the platforms it rings), `scheduling_off` (the agent does not let
+     * the workspace has no push credentials for this app's bundle ID, or iOS is
+     * not among the platforms it rings), `scheduling_off` (the agent does not let
      * customers book calls), `not_identified` (the customer is not identified with the
      * trait the agent's Identity setting names). `not_loaded` is "not yet",
      * never a final answer — it also covers a customer identified before this

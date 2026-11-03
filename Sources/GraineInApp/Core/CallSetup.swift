@@ -208,7 +208,7 @@ enum CallSetup {
         if f.hostedRinging == false {
             out.append(GraineCallSetupProblem(
                 code: "hosted_ringing_off",
-                message: "Graine can't ring this phone: no push credentials for iOS are uploaded for this agent. "
+                message: "Graine can't ring this phone: no agent's workspace has iOS push credentials for this app's bundle ID. "
                     + "Upload them in the dashboard (Workspace settings → In-app calling), unless your own server sends the call pushes."
             ))
         }

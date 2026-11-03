@@ -1,3 +1,12 @@
+## 0.14.9
+
+- **The calls setup check names the app, not the agent.** `GraineCalls.callSetupProblems` reported `hosted_ringing_off`
+  with "no push credentials for iOS are uploaded for this agent". Push credentials belong to the workspace, one set per
+  app, and Graine rings an iPhone only with the set saved for its own bundle ID, so the sentence now reads "no agent's
+  workspace has iOS push credentials for this app's bundle ID". The code and the fix it names (Workspace settings →
+  In-app calling) are unchanged; nothing else changes. `GraineInAppRTC` moves to 0.14.9 beside it, with no change of
+  its own.
+
 ## 0.14.8
 
 - **Components made with "Start blank" are drawn on iPhone.** A component built from blocks in the dashboard (kind `blank`) showed the agent's fallback sentence in `GraineWidgetView`, the bar and the chat; it is now drawn from its blocks, in order and in the component's look — its accent, corners, density and the phone's grammar: a heading, bold and larger; text; a picture as wide as the card at the look's image size (small, medium or large; the design's image shape when it sets one), cropped, with a neutral placeholder while it loads or when it cannot; a hairline divider; and buttons in the look's button style — filled, outline or a row. A tap on a button answers the agent as the dashboard's preview does: the data `["action": content]` and the button's words as the customer's sentence, through your app's "When they tap" action first when the component has one. One with no block to draw still shows the fallback sentence.
