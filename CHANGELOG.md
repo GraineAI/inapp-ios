@@ -1,3 +1,9 @@
+## 0.14.10
+
+- **The Objective-C facade says its version (`GraineObjC.sdkVersion`).** Kotlin Multiplatform reads it to tell an app when
+  Xcode links an older iOS SDK than `inapp-kmp` is built for. Nothing else changes. `GraineInAppRTC` moves to 0.14.10
+  beside it, with no change of its own.
+
 ## 0.14.9
 
 - **The calls setup check names the app, not the agent.** `GraineCalls.callSetupProblems` reported `hosted_ringing_off`

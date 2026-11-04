@@ -794,6 +794,10 @@ public final class GraineObjC: NSObject {
     // MARK: Who, and memory
 
     /// This install's id, kept in the Keychain. The agent never sees it.
+    /// This iOS SDK's version. A bridge asks it to tell which SDK the app really linked: Kotlin and Xcode resolve
+    /// theirs separately, and nothing else would notice them drifting apart. New in 0.14.10, so an older SDK has
+    /// no such selector, which says as much.
+    @objc public var sdkVersion: String { GraineVersion.name }
     @objc public var installId: String { graine.installId }
 
     /// The current user's memory choice (true until they turn it off).
