@@ -53,6 +53,18 @@ final class CallAudioWatch {
         self.act = act
     }
 
+    /**
+     * CallKit's deactivation while a call goes on: is it this call's to rescue
+     * (`GraineCalls`, half a second on)? A call the person answered: as it has
+     * always been. A call they tapped can be under way before its audio ever
+     * came on: a deactivation then is the call before's, nothing of this call's
+     * was lost, its own activation is still to come, and starting the audio here
+     * could stop CallKit ever activating it. This watch has that call.
+     */
+    static func rescuesDeactivation(answered: Bool, hadAudio: Bool) -> Bool {
+        answered || hadAudio
+    }
+
     /// Whether an open conversation is waiting for its audio.
     var isWaiting: Bool { waiting }
 

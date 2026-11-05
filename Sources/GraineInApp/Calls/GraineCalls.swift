@@ -465,6 +465,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         let proceed: (Bool) -> Void = { [weak self] granted in
             guard let self = self, self.callUUID == uuid, self.machine.state == .connecting else { return }
             if granted {
+                // The tap, for the call's rows — or the moment the customer allowed the microphone, when they were asked.
+                self.tappedUptime = ProcessInfo.processInfo.systemUptime
                 self.requestStart(uuid)
             } else {
                 target.notifyListeners { $0.onMicDenied(reason: "NotAllowedError") }
@@ -850,6 +852,12 @@ public final class GraineCalls: NSObject, ObservableObject {
 
     // MARK: - The conversation
 
+    /// When the customer's tap placed the call being started; taken by its conversation.
+    private var tappedUptime: Double?
+    /// When a call with audio last ended, whatever carried it (uptime): its deactivation may still land on the next call.
+    private var callWithAudioEndedUptime: Double?
+    private static let lateDeactivationSeconds: Double = 5
+
     private func requestStart(_ uuid: UUID) {
         let provider = ensureProvider()
         provider.configuration = providerConfiguration(for: callAgent ?? graine)
@@ -915,6 +923,10 @@ public final class GraineCalls: NSObject, ObservableObject {
         )
         self.engine = engine
         engine.setMuted(muted)
+        // Only a call placed by a tap counts from one: a start that failed left its tap here, and it is not an answered ring's.
+        if direction == .outgoing, let tapped = tappedUptime { engine.tappedBefore = max(0, ProcessInfo.processInfo.systemUptime - tapped) }
+        tappedUptime = nil
+        if let ended = callWithAudioEndedUptime { engine.afterACall = ProcessInfo.processInfo.systemUptime - ended < GraineCalls.lateDeactivationSeconds }
         engine.start()
         if audioActive { engine.startAudio() }
         unwatchContext = graine.onContext { [weak engine] frame in engine?.sendContext(frame) }
@@ -1185,6 +1197,7 @@ public final class GraineCalls: NSObject, ObservableObject {
         audioWatch.cancel()
         deactivationItem?.cancel()
         deactivationItem = nil
+        if audioActive || audioRunning { callWithAudioEndedUptime = ProcessInfo.processInfo.systemUptime }
         // Who or what ended it, on the channel still up, before the hang-up closes it.
         if let cause = endCause { engine?.sendEnded(cause) }
         engine?.hangUp()
@@ -1740,13 +1753,15 @@ extension GraineCalls: CXProviderDelegate {
 
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         GraineLog.info("Calls: CallKit deactivated the call's audio (state \(machine.state)).")
+        let hadAudio = audioActive || audioRunning
         audioActive = false
         if !activatedDirectly { audioRunning = false }
         if let engine = engine {
             engine.stopAudio()
             // While the call goes on, an interruption — not its end. And CallKit's activations are not per call: the call
             // before's late deactivation can land on this one, its media still flowing to a speaker nobody restarts.
-            if machine.state.isLive, let uuid = callUUID { armDeactivationRescue(uuid) }
+            if machine.state.isLive, let uuid = callUUID,
+               CallAudioWatch.rescuesDeactivation(answered: direction == .incoming, hadAudio: hadAudio) { armDeactivationRescue(uuid) }
         } else {
             // The call it was for is over, and nothing told WebRTC: its view of the session must follow, or the next
             // call's start believes active a session that is not.

@@ -1,3 +1,16 @@
+## 0.14.12
+
+- **A call the customer places reaches the agent's voice sooner.** A tap no longer waits for the SIP registration or for
+  CallKit to activate the call's audio before it dials: both run beside the dial. The agent's greeting still waits until
+  the phone says its audio is playing, and the phone now says so sooner. The change is in `GraineInAppRTC`: update it beside
+  `GraineInApp`.
+- **A call the person answers keeps its order, however long it rang.** Nothing is dialled and nothing plays until they pick
+  up; then its audio, then the dial, registered first.
+- **If a dial ahead of its registration is refused**, it is made once more, registered first, and the app registers first
+  until it restarts. Nothing to do.
+- **`tap_to_voice_ms` counts from the tap**, including the moment the system takes to hand the call over, so it can read a
+  little longer for the same call than it did.
+
 ## 0.14.11
 
 - **A call whose audio would not start now recovers.** On a WebRTC call, the phone's audio unit could fail to start after

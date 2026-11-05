@@ -54,6 +54,13 @@ import Foundation
      */
     public var rang: Bool
     /**
+     * A call the person answered, whenever they pick up: dialled only once they
+     * have and its audio runs, registered first, its audio watched for the full
+     * steady stretch before the greeting goes. A call the customer placed with a
+     * tap (false) waits only for what it needs.
+     */
+    public var answering = false
+    /**
      * Before each request to the call-session route — a call's mint, a
      * grant's renewal — what must be ready first is made ready (APP-IDENTITY.md
      * §2.1, §1.3: a proof of the app the agent requires, an identity token
@@ -264,7 +271,7 @@ import Foundation
     func prepare()
     /// The call is wanted now: the control channel opens and the attempt's budget starts.
     func begin()
-    /// CallKit activated the audio session (`didActivate`): enable the audio, then dial.
+    /// CallKit activated the audio session (`didActivate`): enable the audio. The dial does not wait for it.
     func audioActivated()
     /// CallKit never did: start the audio without it, once. `done` says whether it runs.
     func startAudioDirectly(_ done: @escaping (Bool) -> Void)
@@ -294,6 +301,17 @@ import Foundation
      */
     var preparedAhead: Bool { get set }
     /**
+     * How long ago the customer tapped, on the way to this `begin()`: the call's
+     * rows count from the tap, not from the moment the system handed the call
+     * over. Set before `begin()`.
+     */
+    var tapAgoSeconds: Double { get set }
+    /**
+     * A call with audio, on any transport, ended moments before this one: CallKit's deactivation for it may still land.
+     * Set before `begin()`.
+     */
+    var afterACall: Bool { get set }
+    /**
      * The call's `transport` row (GraineCallTelemetry), written by whoever
      * dials it — only it knows what the app asked for. Sent on the control
      * channel at media, just before the `connect` row; never if the call
@@ -318,6 +336,18 @@ import Foundation
     /// A call that sends no analytics rows.
     var transportRow: String? {
         get { nil }
+        set {}
+    }
+
+    /// A call that sends no analytics rows has no use for when it was tapped.
+    var tapAgoSeconds: Double {
+        get { 0 }
+        set {}
+    }
+
+    /// A leg that does not watch its audio has no use for what came before it.
+    var afterACall: Bool {
+        get { false }
         set {}
     }
 

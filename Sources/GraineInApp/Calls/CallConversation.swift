@@ -64,6 +64,10 @@ final class CallConversation {
     private var nextTimerId = 0
     /// When the customer tapped (or answered), on the scheduler's clock: the analytics rows count from it.
     private var tapAt: Double?
+    /// How long before `start()` the customer tapped: the system's own time handing the call over. Set before `start()`.
+    var tappedBefore: Double = 0
+    /// A call with audio ended moments before this one (GraineCalls, whatever carried it). Set before `start()`.
+    var afterACall = false
 
     init(
         setup: CallEngine.Setup,
@@ -109,6 +113,7 @@ final class CallConversation {
             clientTokens: setup.tokens.map { GraineRtcTokens($0) }
         )
         request.guarded(by: security, identityValue: identity?.value, answering: setup.answering)
+        request.answering = setup.answering
         return request
     }
 
@@ -126,7 +131,7 @@ final class CallConversation {
         scheduler.run { [self] in
             guard phase == .idle else { return }
             phase = .choosing
-            tapAt = scheduler.now
+            tapAt = scheduler.now - max(0, tappedBefore)
             setup.session { [weak self] session in
                 self?.scheduler.run { self?.chose(session) }
             }
@@ -323,6 +328,8 @@ final class CallConversation {
         call.setMuted(muted)
         // The screen the customer is on, for the agent's first line: queued until the channel joins.
         if let frame = setup.contextFrame(), let text = CallWire.appContextFrame(frame) { call.sendControl(text, kind: "app_context") }
+        if let tapped = tapAt { call.tapAgoSeconds = max(0, scheduler.now - tapped) }
+        call.afterACall = afterACall
         call.begin()
         if audioActive { call.audioActivated() }
         if debug { GraineLog.trace("call: trying WebRTC\(prepared == nil ? "" : " (prepared while it rang)")") }
@@ -331,8 +338,9 @@ final class CallConversation {
     private func rtcEvent(_ event: GraineRtcEvent) {
         switch event {
         case .ready:
-            // Everything but the INVITE is done; without the audio it waits — not for ever.
-            guard !audioActive, rtcAudioWatch == nil else { return }
+            // The dial is going, or about to; the audio has not come on: it is waited for — not for ever. Once the media is
+            // up the call's own audio watch has it (GraineCalls).
+            guard !audioActive, !rtcConnected, rtcAudioWatch == nil else { return }
             let watch = CallAudioWatch(schedule: { [weak self] seconds, fire in
                 guard let self = self else { return {} }
                 let id = self.schedule(after: seconds, fire)
@@ -424,7 +432,7 @@ final class CallConversation {
                 self?.scheduler.run {
                     guard let self = self, self.rtc === call else { return }
                     if started {
-                        GraineLog.info("Calls: the call's audio started directly (WebRTC): the call is dialled.")
+                        GraineLog.info("Calls: the call's audio started directly (WebRTC).")
                         self.audioActive = true
                         self.rtcAudioWatch?.audioStarted()
                         // This call's audio runs, though CallKit never said so: the call is connected once its media is up.
