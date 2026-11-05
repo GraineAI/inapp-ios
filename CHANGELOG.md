@@ -1,3 +1,12 @@
+## 0.14.11
+
+- **A call whose audio would not start now recovers.** On a WebRTC call, the phone's audio unit could fail to start after
+  CallKit had activated the call's audio. WebRTC does not try again by itself, and the SDK's restart could not bring it
+  back, so the call connected, nothing played, the agent heard nothing, and the call ended after about 5 seconds with "The
+  call's audio could not start." The SDK now asks for the audio unit again at once, up to five times, while the agent's
+  greeting waits for the audio; the call's `audio` row says `unit_failed` when it was needed. The change is in
+  `GraineInAppRTC`: update it beside `GraineInApp`.
+
 ## 0.14.10
 
 - **The Objective-C facade says its version (`GraineObjC.sdkVersion`).** Kotlin Multiplatform reads it to tell an app when
