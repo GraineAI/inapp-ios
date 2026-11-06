@@ -48,10 +48,38 @@ public final class GraineCallsHost: NSObject {
     private let device = CallsHostDevice()
     private let core: CallsHostCore
 
+    private var avatarWatch: AnyCancellable?
+
     private override init() {
         core = CallsHostCore(platform: device, store: CallsHostStore(defaults: .standard))
         super.init()
         device.core = core
+        // The agent's face, to every sink as it changes (the `avatar` event).
+        avatarWatch = GraineAvatar.shared.$state.dropFirst().removeDuplicates().sink { [weak self] state in
+            self?.core.emitAvatar(GraineCallsHost.avatarPayload(state))
+        }
+    }
+
+    // MARK: - The agent's face
+
+    /// The agent's face now: `{phase: "off"|"available"|"live", reason: String|null}` (GraineAvatar.shared.state).
+    public func avatarState() -> [String: Any] {
+        onMainSync { GraineCallsHost.avatarPayload(GraineAvatar.shared.state) }
+    }
+
+    /// The SDK's call screen draws the agent's face (GraineCalls.showsAvatar). Off by default; before `configure`, held until it runs.
+    public func setShowsAvatar(_ on: Bool) {
+        onMain {
+            GraineCallsHost.showsAvatar = on
+            GraineCalls.existing?.showsAvatar = on
+        }
+    }
+
+    /// What `setShowsAvatar` asked for, applied to the calls when they are made.
+    static var showsAvatar = false
+
+    static func avatarPayload(_ state: GraineAvatarState) -> [String: Any] {
+        ["phase": state.phase.rawValue, "reason": state.reason ?? NSNull()]
     }
 
     // MARK: - Setting up

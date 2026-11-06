@@ -182,6 +182,9 @@ public final class GraineVoice: NSObject, ObservableObject {
     private unowned let graine: GraineInApp
     private var webView: WKWebView?
     private var host: UIView?
+    /// The agent's face as the page reports it (`graine:avatar`), and whether the page was told it is on screen.
+    private var faceState = GraineAvatarState.off
+    private var faceShownToPage = false
     private weak var container: UIView?
     private var contentController: WKUserContentController?
     private var bridge: ScriptBridge?
@@ -363,6 +366,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         unwatch = []
         cancelTimers()
         teardownEngine(grace: true)
+        faceGone()
         ready = false
         startedCall = false
         pendingStart = false
@@ -652,6 +656,10 @@ public final class GraineVoice: NSObject, ObservableObject {
             return
         }
         if graine.config.debug { GraineLog.trace("← page \(raw.prefix(600))") }
+        if let object = JSON.object(from: raw), let face = AvatarWire.readHostMessage(object) {
+            faceFromPage(face)
+            return
+        }
         guard let message = GraineProtocol.parse(raw) else { return }
         handle(message)
     }
@@ -1350,6 +1358,61 @@ private final class EngineDelegate: NSObject, WKNavigationDelegate, WKUIDelegate
             return
         }
         decisionHandler(voice.mediaCaptureDecision(originHost: origin.host, type: type))
+    }
+}
+// MARK: - The agent's face, drawn by the page
+
+/*
+ * On an assistant-bar call the page draws the agent's face itself. It says
+ * when there is one (`graine:avatar` available · live · off); while an avatar
+ * view (GraineAvatarView) is on screen, the engine's own view is laid exactly
+ * over it and the page is told so (`graine:avatar-surface` shown) — it then
+ * draws the face alone, edge to edge, and hands the voice to it. Anything
+ * else puts the engine back to its invisible point and tells the page: a face
+ * nobody can see is never watched and never takes the voice. The engine stays
+ * in the window it was attached to, always: it is only moved and resized.
+ */
+extension GraineVoice: AvatarSurfaceListener {
+    fileprivate func faceFromPage(_ face: (state: String, reason: String?)) {
+        faceState = GraineAvatarState(host: face)
+        GraineAvatar.shared.listen(self)
+        GraineAvatar.shared.engineState(self, faceState)
+        layoutFace()
+    }
+
+    fileprivate func faceGone() {
+        faceState = .off
+        faceShownToPage = false
+        GraineAvatar.shared.engineGone(self)
+        GraineAvatar.shared.stopListening(self)
+    }
+
+    func avatarSurfaceChanged() { layoutFace() }
+
+    private func layoutFace() {
+        guard let hostView = host, let engine = webView, let container = container else { return }
+        if faceState.showsFace, let slot = GraineAvatar.shared.activeSlot, slot.window != nil, slot.window === container.window ?? (container as? UIWindow) {
+            let frame = slot.frame(in: container)
+            if hostView.frame != frame { hostView.frame = frame }
+            engine.frame = hostView.bounds
+            hostView.layer.cornerRadius = slot.layer.cornerRadius
+            hostView.layer.cornerCurve = slot.layer.cornerCurve
+            hostView.clipsToBounds = true
+            hostView.alpha = 1
+            if !faceShownToPage {
+                faceShownToPage = true
+                post(AvatarWire.surfaceMessage(shown: true))
+            }
+        } else {
+            let point = CGRect(x: 0, y: 0, width: 1, height: 1)
+            hostView.frame = point
+            engine.frame = point
+            hostView.alpha = 0
+            if faceShownToPage {
+                faceShownToPage = false
+                post(AvatarWire.surfaceMessage(shown: false))
+            }
+        }
     }
 }
 #endif

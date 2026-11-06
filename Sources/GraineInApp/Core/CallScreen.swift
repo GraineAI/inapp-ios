@@ -261,6 +261,9 @@ extension CallScreen {
         static let cardMinAlpha = 0.16
         static let orbScale = 2.0
         static let speakingScale = 1.06
+        /// The agent's face (GraineCalls.showsAvatar): the avatar's size times this, at least 200 pt wide, 5:4 tall.
+        static let faceScale = 2.2
+        static let faceCornerRadius = 24.0
         static let endedAlpha = 0.4
         static let bigButton = 9.0 / 8.0
         static let icon = 30.0 / 64.0

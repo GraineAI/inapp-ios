@@ -252,6 +252,25 @@ final class CallConversation {
         }
     }
 
+    // MARK: - The agent's face (Core/AvatarFace.swift) — on the scheduler's context only
+
+    /// The scheduler this conversation runs on: the call's face runs on it too, so it may read the leg directly.
+    var avatarScheduler: CallScheduler { scheduler }
+
+    /// A viewer for the agent's face on this call's media: only a call on WebRTC has one (the voice socket never does).
+    func makeAvatarViewer() -> GraineAvatarViewer? {
+        guard phase == .rtc else { return nil }
+        return rtc?.makeAvatarViewer()
+    }
+
+    /// The call's own copy of the agent's voice heard, or silenced while the face carries it.
+    func setAgentAudible(_ audible: Bool) {
+        rtc?.setAgentAudible(audible)
+    }
+
+    /// The agent's voice on the meter scale, before any silencing.
+    var agentLevelBeforeMute: Double? { phase == .rtc ? rtc?.agentLevelBeforeMute : nil }
+
     // MARK: - The choice
 
     private func chose(_ session: GraineSessionConfig?) {
@@ -472,6 +491,8 @@ final class CallConversation {
             if case let .appAction(id, name, arguments)? = CallInbound.parse(text) {
                 runAction(id: id, name: name, arguments: arguments)
             }
+        case "avatar":
+            onEvent(.avatar(object))
         default:
             // Components (`widget`, `widget_pending`) are drawn by neither engine; the rest is the channel's own.
             break

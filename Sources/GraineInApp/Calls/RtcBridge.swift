@@ -318,6 +318,20 @@ import Foundation
      * does not get there. Set before `begin()`.
      */
     var transportRow: String? { get set }
+    /**
+     * THE AGENT'S FACE (Core/AvatarFace.swift): a viewer made on this call's
+     * media, so the face's sound plays through the call's own audio — nil
+     * when the leg cannot show one.
+     */
+    func makeAvatarViewer() -> GraineAvatarViewer?
+    /**
+     * The call's own copy of the agent's voice heard (true), or silenced while
+     * the face carries it (false): the received track's volume only — the
+     * receiver, the connection and every watch keep reading it.
+     */
+    func setAgentAudible(_ audible: Bool)
+    /// The agent's voice on the meter scale (0–1), measured before any silencing; nil when unknown.
+    var agentLevelBeforeMute: Double? { get }
 }
 
 @_spi(GraineRTC) public extension GraineRtcCall {
@@ -355,6 +369,60 @@ import Foundation
     func sendEnded(cause: String) {
         if let frame = GraineCallTelemetry.endedFrame(cause: cause, transport: "rtc") { sendControl(frame, kind: nil) }
     }
+
+    /// A module from before the agent's face draws none: the call stays voice-only.
+    func makeAvatarViewer() -> GraineAvatarViewer? { nil }
+
+    /// A module from before the agent's face never silences the call.
+    func setAgentAudible(_ audible: Bool) {}
+
+    /// A module from before the agent's face does not measure it.
+    var agentLevelBeforeMute: Double? { nil }
+}
+
+// MARK: - The agent's face, on this call's media
+
+/**
+ * THE FACE'S VIEWER ON A NATIVE CALL — a second peer connection, receive-only
+ * (the face's audio and video, one data channel), made by the module from the
+ * call's own WebRTC factory so its sound plays through the call's audio. The
+ * core runs the protocol (Core/AvatarFace.swift): the requests, the clock, the
+ * hand-over of the voice; the viewer only moves media. Any thread.
+ */
+@_spi(GraineRTC) public protocol GraineAvatarViewer: AnyObject {
+    /// Where the viewer's events go.
+    var onEvent: ((GraineAvatarViewerEvent) -> Void)? { get set }
+    /**
+     * Make the peer with these ICE servers — audio and video receive-only, the
+     * data channel — and gather: `done` hears the complete offer (or what was
+     * gathered after `gatherSeconds`), or why there is none.
+     */
+    func offer(iceServers: [GraineAvatarIceServer], gatherSeconds: Double, done: @escaping (_ sdp: String?, _ error: String?) -> Void)
+    /// Apply the service's answer; `done` hears an error, or nil.
+    func applyAnswer(_ sdp: String, done: @escaping (_ error: String?) -> Void)
+    /// A text message on the data channel (dropped when it is not open).
+    func send(_ text: String)
+    /// The face's sound heard (true) or silent (false) — its own track's volume, never the call's.
+    func setAudible(_ audible: Bool)
+    /**
+     * Video frames received so far, the face's audio level 0–1 measured before
+     * any silencing, and the audio jitter buffer (seconds, emitted count) — each
+     * nil when unknown.
+     */
+    func sample(_ done: @escaping (_ frames: Double?, _ face: Double?, _ jitterBufferDelay: Double?, _ emitted: Double?) -> Void)
+    /// The view that draws the face (a UIView on iOS), made on first use. Main thread.
+    var videoView: AnyObject? { get }
+    /// Close everything. Nothing is reported after it.
+    func close()
+}
+
+@_spi(GraineRTC) public enum GraineAvatarViewerEvent {
+    /// The data channel opened.
+    case channelOpen
+    /// A text message from the service on the data channel.
+    case message(String)
+    /// The connection's state, in the standard words: new, connecting, connected, disconnected, failed, closed.
+    case connection(String)
 }
 
 /// The module itself.

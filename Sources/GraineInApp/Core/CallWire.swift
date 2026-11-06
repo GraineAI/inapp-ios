@@ -350,6 +350,8 @@ enum CallInbound {
     case text(String)
     case transcript(String, final: Bool)
     case appAction(id: String, name: String, arguments: [String: Any])
+    /// `avatar`: the agent's face is ready, or there is none (Core/Avatar.swift reads it).
+    case avatar([String: Any])
     case ignored(String)
 
     static func parse(_ raw: String) -> CallInbound? {
@@ -378,6 +380,8 @@ enum CallInbound {
             return .transcript(JSON.text(o["data"]) ?? "", final: true)
         case "interim_transcript_received":
             return .transcript(JSON.text(o["data"]) ?? "", final: false)
+        case "avatar":
+            return .avatar(o)
         case "app_action":
             guard let a = o["action"] as? [String: Any] else { return .ignored(type) }
             return .appAction(

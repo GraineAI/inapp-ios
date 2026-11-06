@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.14.12")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.15.0")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -684,7 +684,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.14.12")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.15.0")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its
@@ -719,6 +719,43 @@ that strips code nothing references can call `GraineRTC.install()` at launch.)
   in your app pins `webrtc-xcframework` to a different version, the two cannot
   be resolved together; leave the module out (calls stay on the WebSocket) or
   align the versions.
+
+## The agent's face (Avatar)
+
+When the agent has **Avatar** turned on in the dashboard (Embed & Widgets → Appearance), a call can show the
+agent's live talking face. It speaks with the agent's own voice, its lips in sync with every word: while it is on screen the call's
+own copy of the voice is silenced, and the voice moves to the face only at a pause. If the face's connection
+drops for 2 seconds, it cannot be shown, or your view leaves the screen, the call's voice comes back at once —
+the customer never hears the agent twice, and never hears nothing. With no avatar view on screen, nothing is
+connected and the call is voice-only, exactly as before. Avatar minutes are charged on top of the call, only
+while the face is on screen (see Avatar in the docs).
+
+Place a view where the face goes — transparent when there is none, so put the agent's usual picture behind it:
+
+```swift
+// SwiftUI
+@ObservedObject var face = GraineAvatar.shared
+
+ZStack {
+    Image("agent").resizable().scaledToFill()
+    if face.state.showsFace { GraineAvatarFace() }
+}
+.frame(width: 220, height: 275)
+.clipShape(RoundedRectangle(cornerRadius: 24))
+
+// UIKit
+let faceView = GraineAvatarView()          // add it to your layout
+GraineAvatar.shared.onStateChange = { state in faceView.isHidden = !state.showsFace }
+```
+
+`GraineAvatar.shared.state.phase` is `.off`, `.available` (a face is ready: show your view) or `.live` (the face
+carries the voice); `reason` says why it is off — `busy`, `off`, `failed`, `stalled`, `unsupported`, …
+
+- **Assistant-bar calls** (`GraineVoice`) draw the face with the core SDK alone: the call's engine is laid over
+  your avatar view.
+- **Native calls** (`GraineCalls`) draw it with the WebRTC module: add `GraineInAppRTC`; a call on the voice
+  socket says `unsupported` and stays voice-only. The SDK's own call screen draws the face when you opt in:
+  `GraineInApp.shared.calls.showsAvatar = true`.
 
 ## Booking a call from your app
 

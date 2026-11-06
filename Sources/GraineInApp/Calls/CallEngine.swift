@@ -200,6 +200,8 @@ final class CallEngine {
         case audioStartedDirectly
         /// The call cannot be heard (the WebRTC leg's playout watch, GraineRtcEvent.playoutFailed): it ends with this.
         case audioFailed(String)
+        /// An `avatar` frame: the agent's face is ready, or there is none (GraineCalls hands it to the call's AvatarFace).
+        case avatar([String: Any])
         case ended(Ending)
     }
 
@@ -732,6 +734,9 @@ final class CallEngine {
 
         case let .appAction(id, name, arguments):
             runAction(id: id, name: name, arguments: arguments)
+
+        case .avatar(let frame):
+            onEvent(.avatar(frame))
 
         case .ignored:
             break

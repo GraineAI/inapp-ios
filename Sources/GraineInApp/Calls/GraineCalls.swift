@@ -189,6 +189,16 @@ public final class GraineCalls: NSObject, ObservableObject {
     public var speakerByDefault = true
 
     /**
+     * THE AGENT'S FACE ON THE SDK'S CALL SCREEN (`GraineCallView`): off by
+     * default. On, and with the agent's face switched on in the dashboard, the
+     * call screen draws the face where the agent's picture goes, and the face
+     * carries the voice (`GraineAvatar`). Needs the WebRTC module
+     * (`GraineInAppRTC`) and a call on WebRTC; otherwise the call is voice-only,
+     * as it is with this off. Your own call screen: place a `GraineAvatarView`.
+     */
+    @Published public var showsAvatar = false
+
+    /**
      * WHERE THE CALL IS, in one word, as a call screen shows it — the word every
      * Graine SDK uses (`GraineCallPhase`): `idle`, `ringing`, `calling` (the
      * customer's call before the agent answers), `connecting`, `active`,
@@ -225,6 +235,9 @@ public final class GraineCalls: NSObject, ObservableObject {
     private var outgoingReason: String?
     private var outgoingVariables: [String: String] = [:]
     private var engine: CallConversation?
+    /// The call's face (Core/AvatarFace.swift), run on the conversation's own scheduler.
+    private var avatarFace: AvatarFace?
+    private var avatarScheduler: CallScheduler?
     private var ringItem: DispatchWorkItem?
     private var settleItem: DispatchWorkItem?
     /// The current call's analytics rows, folded into `connection`.
@@ -304,6 +317,8 @@ public final class GraineCalls: NSObject, ObservableObject {
     static func process(home: GraineInApp) -> GraineCalls {
         if let existing = processCalls { return existing }
         let made = GraineCalls(graine: home)
+        // A bridge's `setShowsAvatar` before the calls existed (GraineCallsHost).
+        if GraineCallsHost.showsAvatar { made.showsAvatar = true }
         processCalls = made
         for agent in home.peers where agent !== home { made.watch(agent) }
         return made
@@ -903,11 +918,12 @@ public final class GraineCalls: NSObject, ObservableObject {
             // a call the customer places does, 10 s at most.
             answering: direction == .incoming
         )
+        let scheduler = DispatchCallScheduler()
         let engine = CallConversation(
             setup: setup,
             audio: audio,
             network: URLSessionCallNetwork(),
-            scheduler: DispatchCallScheduler(),
+            scheduler: scheduler,
             transport: config.callTransport,
             debug: graine.config.debug,
             // The call prepareCall got ready for this agent, when this is it; else one prepared while it rang.
@@ -922,6 +938,7 @@ public final class GraineCalls: NSObject, ObservableObject {
             }
         )
         self.engine = engine
+        startAvatar(engine, scheduler: scheduler)
         engine.setMuted(muted)
         // Only a call placed by a tap counts from one: a start that failed left its tap here, and it is not an answered ring's.
         if direction == .outgoing, let tapped = tappedUptime { engine.tappedBefore = max(0, ProcessInfo.processInfo.systemUptime - tapped) }
@@ -975,6 +992,9 @@ public final class GraineCalls: NSObject, ObservableObject {
         case .audioFailed(let message):
             // Its playout watch: audio arrives and none of it plays, even started again. Its end first, then the hang-up.
             audioFailed(message, uuid: uuid)
+        case .avatar(let frame):
+            guard let face = avatarFace else { return }
+            avatarScheduler?.run { face.frame(frame) }
         case .ended(let ending):
             switch ending {
             case .local:
@@ -1200,6 +1220,8 @@ public final class GraineCalls: NSObject, ObservableObject {
         if audioActive || audioRunning { callWithAudioEndedUptime = ProcessInfo.processInfo.systemUptime }
         // Who or what ended it, on the channel still up, before the hang-up closes it.
         if let cause = endCause { engine?.sendEnded(cause) }
+        // The face first: its viewer rides the call's audio, which the hang-up releases.
+        stopAvatar()
         engine?.hangUp()
         engine = nil
         unwatchContext?()
@@ -1836,5 +1858,39 @@ final class SystemMicPermission: MicPermissionSource {
 private final class WeakCallsListener {
     weak var value: GraineCallsListener?
     init(_ value: GraineCallsListener) { self.value = value }
+}
+// MARK: - The agent's face on a native call
+
+extension GraineCalls: AvatarSurfaceListener {
+    /// The call's face: frames from its channel, the avatar views on screen, the viewer from its WebRTC leg.
+    fileprivate func startAvatar(_ engine: CallConversation, scheduler: CallScheduler) {
+        let debug = graine.config.debug
+        let face = AvatarFace(scheduler: scheduler, hooks: AvatarFace.Hooks(
+            makeViewer: { [weak engine] in engine?.makeAvatarViewer() },
+            agentLevel: { [weak engine] in engine?.agentLevelBeforeMute },
+            setAgentAudible: { [weak engine] audible in engine?.setAgentAudible(audible) },
+            onState: { state in DispatchQueue.main.async { GraineAvatar.shared.nativeState(state) } },
+            onViewer: { viewer in DispatchQueue.main.async { GraineAvatar.shared.nativeViewer(viewer) } },
+            log: { line in if debug { GraineLog.trace(line) } }
+        ))
+        avatarFace = face
+        avatarScheduler = scheduler
+        GraineAvatar.shared.listen(self)
+        let shown = GraineAvatar.shared.isShown
+        scheduler.run { face.surface(shown) }
+    }
+
+    fileprivate func stopAvatar() {
+        guard let face = avatarFace else { return }
+        avatarScheduler?.run { face.callEnded() }
+        avatarFace = nil
+        avatarScheduler = nil
+    }
+
+    func avatarSurfaceChanged() {
+        guard let face = avatarFace else { return }
+        let shown = GraineAvatar.shared.isShown
+        avatarScheduler?.run { face.surface(shown) }
+    }
 }
 #endif

@@ -524,6 +524,13 @@ enum CallsHostEvent {
      * then goes once more (CLIENT-TOKENS.md §2.4).
      */
     static let needClientToken = "needClientToken"
+    /**
+     * `{phase, reason}`: the agent's face (GraineAvatar) changed — `phase`
+     * `off`, `available` (show your avatar view) or `live` (it carries the
+     * voice); `reason` (or null) says why it is off. Not queued: `avatarState`
+     * reads it now.
+     */
+    static let avatar = "avatar"
 
     /**
      * `{callId, outcome, reason?, error?, durationSeconds?, hosted?, agent?, connection?}`: `reason` (local, remote,
@@ -1199,6 +1206,11 @@ final class CallsHostCore {
 
     func addSink(_ sink: @escaping Sink) -> Int {
         sinks.add(sink)
+    }
+
+    /// The agent's face changed: to every sink (never queued — a new sink asks `avatarState`).
+    func emitAvatar(_ payload: [String: Any]) {
+        sinks.emit(CallsHostEvent.avatar, payload)
     }
 
     func removeSink(_ token: Int) {

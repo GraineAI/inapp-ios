@@ -146,7 +146,8 @@ struct GraineCallScreen: View {
                 close: { calls.dismissMissedCall() }, callBack: { _ = calls.callBack() }
             ),
             restylesStatusBar: deviceDark != nil,
-            onLogoFailed: { failedLogo = $0 }
+            onLogoFailed: { failedLogo = $0 },
+            showsAvatar: calls.showsAvatar
         )
     }
 }
@@ -223,6 +224,8 @@ struct CallScreenCanvas: View {
     /// The SDK presented this screen itself: it keeps the status bar in the moment's ink.
     var restylesStatusBar = false
     var onLogoFailed: (String) -> Void = { _ in }
+    /// The app opted in (`GraineCalls.showsAvatar`): while the call has a face, it is drawn in the avatar's place.
+    var showsAvatar = false
     /// Every animation drawn as it is this far in (ms), still; nil: live.
     var frozenMs: Double? = nil
     /// The clock the timer reads; nil: now.
@@ -237,6 +240,7 @@ struct CallScreenCanvas: View {
     @State private var lastTouch = Date()
     @State private var rested = false
     @StateObject private var meter = CallLevelMeter()
+    @ObservedObject private var face = GraineAvatar.shared
 
     private var look: GraineCallLook { CallScreen.look(call, state.moment) }
     private var layout: CallScreen.LayoutSpec { CallScreen.layout(call.layout) }
@@ -477,10 +481,26 @@ struct CallScreenCanvas: View {
             avatarFace(size: size)
                 .scaleEffect(connected && state.agentSpeaking && motionMs > 0 ? CGFloat(CallScreen.Screen.speakingScale) : 1)
                 .animation(fade, value: state.agentSpeaking)
+            if drawsAgentFace {
+                // The agent's face, over its picture (seen until the first frame): the picture's shape, a size up.
+                GraineAvatarFace()
+                    .frame(width: faceSpan(size), height: faceSpan(size) * 1.25)
+                    .clipShape(RoundedRectangle(cornerRadius: CGFloat(CallScreen.Screen.faceCornerRadius), style: .continuous))
+                    .transition(.opacity)
+            }
         }
-        .frame(width: span, height: span)
+        .frame(width: drawsAgentFace ? max(span, faceSpan(size)) : span, height: drawsAgentFace ? max(span, faceSpan(size) * 1.25) : span)
+        .animation(fade, value: drawsAgentFace)
         .accessibilityHidden(true)
     }
+
+    /// The face is drawn while the app opted in, the call is connected and it has one.
+    private var drawsAgentFace: Bool {
+        showsAvatar && frozenMs == nil && state.moment == .connected && face.state.showsFace
+    }
+
+    /// The face's width: the avatar's size scaled up, never under 200 pt.
+    private func faceSpan(_ size: CGFloat) -> CGFloat { max(200, size * CGFloat(CallScreen.Screen.faceScale)) }
 
     /// The call's level on the visualiser's scale (theme.ts `callVoiceLevel()`, the design's sensitivity); nil until it reports one.
     private var voice: Double? {
