@@ -21,8 +21,18 @@ extension GraineObjC {
         let box = AvatarObservation()
         objcOnMainSync {
             box.cancellable = GraineAvatar.shared.$state.removeDuplicates().sink { state in observer(AvatarWire.stateJSON(state)) }
+            // Alive until the registration is STOPPED, not merely as long as the caller keeps the registration object:
+            // Kotlin Multiplatform 0.15.0 and 0.15.1 drop it, and the subscription went with it — the app never heard the
+            // face become available, so no avatar view was ever placed and the face never showed (7 Nov 2026).
+            AvatarObservation.live.insert(box)
         }
-        return GraineObjCRegistration { DispatchQueue.main.async { box.cancellable?.cancel(); box.cancellable = nil } }
+        return GraineObjCRegistration {
+            DispatchQueue.main.async {
+                box.cancellable?.cancel()
+                box.cancellable = nil
+                AvatarObservation.live.remove(box)
+            }
+        }
     }
 
     /// A new view that draws the agent's face (`GraineAvatarView`): place it where the face goes.
@@ -38,7 +48,11 @@ extension GraineObjC {
     }
 }
 
-private final class AvatarObservation {
+private final class AvatarObservation: Hashable {
+    /// Every observation not yet stopped (main thread): what keeps each one alive.
+    static var live = Set<AvatarObservation>()
     var cancellable: AnyCancellable?
+    static func == (a: AvatarObservation, b: AvatarObservation) -> Bool { a === b }
+    func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
 }
 #endif

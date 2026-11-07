@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.15.1")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.15.2")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -684,7 +684,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.15.1")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.15.2")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

@@ -1,3 +1,11 @@
+## 0.15.2
+
+- **The agent's face now shows in Kotlin Multiplatform apps (and any bridge using the Objective-C facade).** The face's
+  state observer (`observeAvatar:`) lived only as long as the caller kept the registration it returned; Kotlin
+  Multiplatform drops it, so the app never heard the face become available, placed no avatar view, and the face never
+  showed. The observer now lives until its registration is stopped. Nothing to change in your app.
+- `GraineInAppRTC` moves to 0.15.2 beside it, unchanged: the two always share a version. Update both together.
+
 ## 0.15.1
 
 - **Talk works on an agent that admits only your apps.** The voice bar's call page now asks the SDK for what its own
