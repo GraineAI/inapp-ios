@@ -660,6 +660,11 @@ public final class GraineVoice: NSObject, ObservableObject {
             faceFromPage(face)
             return
         }
+        // What the page cannot get itself — its Origin is Graine's: the session, and tickets minted as this app.
+        if let object = JSON.object(from: raw), let ask = HostAskWire.read(object) {
+            answerPage(ask)
+            return
+        }
         guard let message = GraineProtocol.parse(raw) else { return }
         handle(message)
     }
@@ -1360,6 +1365,58 @@ private final class EngineDelegate: NSObject, WKNavigationDelegate, WKUIDelegate
         decisionHandler(voice.mediaCaptureDecision(originHost: origin.host, type: type))
     }
 }
+// MARK: - What the page asks of the app (Core/HostAsk.swift)
+
+/*
+ * TALK AUTHENTICATES AS THIS APP. The engine page's own requests carry
+ * Graine's Origin and no declaration, so an agent that admits only its apps
+ * refused them all — the session, the ticket, the WebRTC credential — and the
+ * page fell back to a socket that proves nothing. It asks this SDK instead, and
+ * every answer is made here natively, through the same door as the SDK's own
+ * requests: no Origin, the app's declaration and proof (App Attest, a debug
+ * token), the server token, who the user is. A ticket minted so speaks for this
+ * app; the page's requests riding on it are judged as this app's, with the
+ * agent's settings — "Only my apps", "Require a verified app" — exactly as they
+ * stand. Nothing is weakened: what this app could not get, the page does not get.
+ */
+extension GraineVoice {
+    fileprivate func answerPage(_ ask: HostAskWire.Ask) {
+        switch ask {
+        case .session:
+            graine.loadSession { [weak self] session in
+                // Main thread (loadSession). None: the page asks the server itself, as it always did.
+                let served = session?.served
+                self?.post(HostAskWire.sessionAnswer(served?.isEmpty == false ? served : nil))
+            }
+        case let .ticket(mode, purpose):
+            let graine = self.graine
+            guard let url = URL(string: GraineProtocol.trimTrailingSlashes(graine.config.baseUrl) + "/api/embed/ticket") else {
+                post(HostAskWire.ticketAnswer(.direct(status: 0), mode: mode, purpose: purpose))
+                return
+            }
+            ConversationTicket.ask(
+                url: url,
+                fields: {
+                    HostAskWire.ticketFields(
+                        publishableKey: graine.config.publishableKey,
+                        mode: mode,
+                        purpose: purpose,
+                        metadata: CallWire.ticketMetadata(graine.variables.orderedForTicket().map { ($0.0, $0.1 as Any?) }),
+                        identity: graine.identityFields(callId: nil)
+                    )
+                },
+                // The app's declaration and proof, as on every conversation's ticket (APP-IDENTITY.md).
+                security: graine.security,
+                // The agent's server token: a new connection waits for a usable one.
+                tokens: graine.clientTokens,
+                network: graine.network
+            ) { [weak self] outcome in
+                DispatchQueue.main.async { self?.post(HostAskWire.ticketAnswer(outcome, mode: mode, purpose: purpose)) }
+            }
+        }
+    }
+}
+
 // MARK: - The agent's face, drawn by the page
 
 /*

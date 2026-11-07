@@ -37,6 +37,13 @@ public struct GraineSessionConfig {
     let security: SessionSecurity
     /// The parts of the answer a cold start draws from before the network does (SessionCache).
     let cacheable: [String: Any]
+    /**
+     * The answer as served — handed to the engine page inside this app when it
+     * asks (`graine:need-session`, Core/HostAsk.swift): the page's own request
+     * carries Graine's Origin, which an agent that admits only its apps refuses.
+     * Empty for a session made in code; the kept parts for one kept on the device.
+     */
+    let served: [String: Any]
 
     public init(
         agentId: String,
@@ -66,6 +73,7 @@ public struct GraineSessionConfig {
         self.calls = calls
         self.security = .none
         self.cacheable = [:]
+        self.served = [:]
     }
 
     private init(parsed data: [String: Any], agentId: String, declared: Set<String>) {
@@ -87,6 +95,7 @@ public struct GraineSessionConfig {
             if let value = JSON.unwrap(data[key]), !(value is NSNull) { keep[key] = value }
         }
         self.cacheable = keep
+        self.served = data
     }
 
     /// The identity setting in force: the session's, else `user_id`.

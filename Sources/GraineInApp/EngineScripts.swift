@@ -12,9 +12,12 @@ enum EngineScripts {
      * installed at document start, before the page's own scripts run, and
      * forwards every message to the WKScriptMessageHandler named "graine".
      * `String(s)` because a handler receives whatever type it is given.
+     * `answers()` says what this SDK answers when the page asks its host
+     * (Core/HostAsk.swift): the session and tickets minted as this app — a page
+     * whose bridge has no `answers` asks nothing, as with an older SDK.
      */
     static let bridge =
-        "window.ReactNativeWebView = { postMessage: function(s){ window.webkit.messageHandlers.graine.postMessage(String(s)); } };"
+        "window.ReactNativeWebView = { postMessage: function(s){ window.webkit.messageHandlers.graine.postMessage(String(s)); }, answers: function(){ return \"session,ticket\"; } };"
 
     /// The message handler the debug console forwarder posts to.
     static let consoleHandlerName = "graineConsole"

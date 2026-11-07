@@ -157,7 +157,7 @@ import Testing
     @Test func theBridgeIsInstalledUnderTheNameThePageLooksFor() {
         #expect(
             EngineScripts.bridge
-                == "window.ReactNativeWebView = { postMessage: function(s){ window.webkit.messageHandlers.graine.postMessage(String(s)); } };"
+                == "window.ReactNativeWebView = { postMessage: function(s){ window.webkit.messageHandlers.graine.postMessage(String(s)); }, answers: function(){ return \"session,ticket\"; } };"
         )
         #expect(EngineScripts.socketTrace.contains("String(url).split('?')[0]"))
         #expect(EngineScripts.socketTrace.hasSuffix("})(); true;"))

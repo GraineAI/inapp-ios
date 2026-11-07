@@ -165,6 +165,8 @@ public enum GraineProtocol {
             let value = JSON.unwrap(message["token"])
             return "token=" + (value == nil || value is NSNull ? "none" : "set")
         default:
+            // The session and the tickets this SDK hands the page (Core/HostAsk.swift): whether they carried anything only.
+            if let line = HostAskWire.redactForLog(message) { return line }
             return String((JSON.string(from: message) ?? "").prefix(300))
         }
     }
