@@ -2529,6 +2529,10 @@ public final class GraineInApp: ObservableObject {
         fields.append(("at", .string(Scheduling.isoTime(date))))
         if let why = Scheduling.clippedReason(reason) { fields.append(("reason", .string(why))) }
         fields.append(("timezone", .string(deviceTimezone())))
+        // What the app has set (setVariables, GraineConfig.variables) goes with the booking: the ring may wake the app
+        // before it has set anything again, and the agent still greets the person with them. The first 12 by name.
+        let variables = await MainActor.run { self.currentVariables() }.sorted { $0.key < $1.key }.prefix(12)
+        if !variables.isEmpty { fields.append(("variables", .object(variables.map { ($0.key, .string($0.value)) }))) }
         let body = try await requests.post("/api/embed/calls/schedule", fields)
         guard let call = Scheduling.booked(body) else {
             throw GraineServiceError(code: .unknown("unreadable_answer"), message: "The booking was accepted, but its answer did not describe the call.", status: 200)

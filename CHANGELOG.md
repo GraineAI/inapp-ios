@@ -1,3 +1,17 @@
+## 0.15.3
+
+- **Booked calls have sound when the app was closed, and so does a call placed right after launch.** The calling
+  library the SDK uses fixes the audio settings it applies to every call once per launch, copying them from your app's
+  audio session the first time it is used. When that happened before a call had set its mode — a booked call ringing an
+  app that was not running, or a tap a moment after launch — every call in that launch was silent and ended after
+  about five seconds. The SDK now gives the calling library the call's own settings (play and record, voice chat,
+  Bluetooth headsets) before every call, and sets the call's mode as soon as a booked call rings: nothing is activated
+  and no microphone is used before the person answers. Nothing to change in your app.
+- **A booked call carries your app's variables.** `scheduleCall(at:reason:)` sends the variables your app has set
+  (`setVariables` and `GraineConfig.variables`, the first 12 by name) with the booking, so the agent greets the person
+  by name even when the call is what starts your app.
+- `GraineInAppRTC` moves to 0.15.3 beside it: the two always share a version. Update both together.
+
 ## 0.15.2
 
 - **The agent's face now shows in Kotlin Multiplatform apps (and any bridge using the Objective-C facade).** The face's

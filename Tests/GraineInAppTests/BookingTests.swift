@@ -380,6 +380,39 @@ private func bookable(_ extra: [String: Any] = [:]) -> [String: Any] {
         #expect(more == nil, "booked: nothing more to book in this sheet")
     }
 
+    /// A ring can start the app before it has set anything again: the booking carries what the app had set, the first 12 by name.
+    @Test func aBookingCarriesTheAppsVariables() async throws {
+        let rig = tomorrowRig()
+        defer { rig.sandbox.clean() }
+        var many: [String: Any?] = ["first_name": "Asha"]
+        for i in 1...15 { many[String(format: "v%02d", i)] = "x\(i)" }
+        await MainActor.run { rig.graine.setVariables(many) }
+        var flow = BookingFlow(rules: rig.graine.schedulingRules, now: Date())
+        flow.pickDay(1)
+        let when = flow.at
+        rig.network.replies["/api/embed/calls/schedule"] = (201, #"{"call":{"id":"s2","at":"\#(Scheduling.isoTime(when))","status":"scheduled","source":"sdk","reason":null}}"#)
+        await book(&flow, on: rig.graine)
+        #expect(flow.booked != nil)
+        let body = try #require(rig.network.bodies("/api/embed/calls/schedule").first)
+        let sent = try #require(body["variables"] as? [String: Any])
+        #expect(sent.count == 12)
+        #expect(sent["first_name"] as? String == "Asha")
+        #expect(sent["v01"] as? String == "x1")
+        #expect(sent["v12"] == nil, "past the first 12 by name")
+    }
+
+    @Test func aBookingWithNoVariablesSendsNone() async throws {
+        let rig = tomorrowRig()
+        defer { rig.sandbox.clean() }
+        var flow = BookingFlow(rules: rig.graine.schedulingRules, now: Date())
+        flow.pickDay(1)
+        let when = flow.at
+        rig.network.replies["/api/embed/calls/schedule"] = (201, #"{"call":{"id":"s3","at":"\#(Scheduling.isoTime(when))","status":"scheduled","source":"sdk","reason":null}}"#)
+        await book(&flow, on: rig.graine)
+        let body = try #require(rig.network.bodies("/api/embed/calls/schedule").first)
+        if rig.graine.currentVariables().isEmpty { #expect(body["variables"] == nil) }
+    }
+
     @Test func eachRefusalFromGraineIsItsLineInTheSheet() async throws {
         let refusals: [(Int, String, String)] = [
             (422, "outside_window", "That time is outside the hours we can call — pick another"),

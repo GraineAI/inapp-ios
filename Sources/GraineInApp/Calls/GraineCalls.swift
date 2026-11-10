@@ -607,6 +607,14 @@ public final class GraineCalls: NSObject, ObservableObject {
             ringer.ringArrived()
             // A fresh server token, in the background, before anyone answers (CLIENT-TOKENS.md §2.3): the answer finds one.
             ringer.clientTokens.ring()
+            // A CALL'S AUDIO MODE BEFORE ANYTHING IS PREPARED. The ring prepares the call while it rings, and WebRTC makes
+            // its audio unit then. When the ring is what started the app, nothing in it has set a mode yet (solo
+            // ambient), and that unit keeps it: on the answer iOS puts the session back to solo ambient, the call's
+            // settings are refused (-50), the speaker and the microphone never start, and every call in that launch of
+            // the app ends with no sound (10 Nov 2026, booked calls ringing an app that was closed). Set here — the
+            // category only: nothing is activated and no microphone is taken before the answer; the app's own mode
+            // comes back when the call ends (releaseCall → restoreAudioSession).
+            configureAudioSession()
             prepareRing(call, agent: ringer)
         }
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(name: name)) { [weak self] error in
