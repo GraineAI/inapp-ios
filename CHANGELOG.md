@@ -1,3 +1,20 @@
+## 0.15.4
+
+- **The face is drawn inside the avatar view.** On the voice bar's calls the agent's face now plays inside your
+  `GraineAvatarView` / `GraineAvatarFace`, under anything else in it, so whatever you draw above it (your transcript,
+  your buttons, the SDK's bar) is drawn over the face. Before, it was drawn over the whole window. The native call's
+  face sits under the view's other subviews too. Nothing to change in your app.
+- **The face stage.** `GraineAvatarStage` (SwiftUI) and `GraineAvatarStageViewController` (UIKit): the agent's face
+  edge to edge with the call drawn over it — name and role, LIVE and the call's duration, the line being said, the
+  component the agent drew, and Call, Mute, Chat, End (Cancel, Decline) and Speaker. `onChat` draws the Chat button,
+  `onClose` a close control; neither ends a call.
+- **All of it is public state:** `GraineInApp.stage` (`GraineStage`, `GraineStageState`, `GraineStageCall`,
+  `GraineStagePhase`, `GraineStageControl`, `GraineStageCalls`, `GraineStageCaption`), and for Objective-C and bridges
+  `stageStateJSON`, `observeStage:` and the stage's actions.
+- **The voice bar's loudspeaker:** `GraineVoice.speaker` and `setSpeaker(_:)` (loudspeaker or earpiece for the call; the
+  next one starts on the loudspeaker again), and `GraineVoice.startedAt`, when the call went live.
+- `GraineInAppRTC` moves to 0.15.4 beside it: the two always share a version. Update both together.
+
 ## 0.15.3
 
 - **Booked calls have sound when the app was closed, and so does a call placed right after launch.** The calling

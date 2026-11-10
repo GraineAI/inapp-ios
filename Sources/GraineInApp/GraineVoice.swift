@@ -97,6 +97,19 @@ public final class GraineVoice: NSObject, ObservableObject {
     @Published private(set) var fault: String?
     /// A call that connected is over, and nothing has started since.
     @Published private(set) var callEnded = false
+    /**
+     * When the call went live — the agent answered and its audio flows. The
+     * face stage's clock counts from it. Kept while the call comes back from a
+     * drop; nil with no call.
+     */
+    @Published public private(set) var startedAt: Date?
+    /**
+     * The call's audio comes out of the loudspeaker. Calls start on it (the
+     * phone is held away from the ear, the bar on the screen); `setSpeaker(false)`
+     * moves the audio to the earpiece. False while a headset or Bluetooth
+     * device carries it. With no call, what the next call starts on.
+     */
+    @Published public private(set) var speaker = true
 
     /**
      * Why the call failed, in a sentence, while `status` is `failed` — the
@@ -117,6 +130,22 @@ public final class GraineVoice: NSObject, ObservableObject {
         GraineVoiceStatus.of(
             phase: phase, calling: connecting || connected || reconnecting, connected: connected, muted: muted,
             failed: error != nil, ended: callEnded
+        )
+    }
+
+    /**
+     * `status` as the face stage reads it (contract/PUBLIC-STATE.md "The face
+     * stage"): a misconfiguration the call survived — the transport's
+     * `not_configured`, which `error` keeps reporting for the rest of the call
+     * — is the developer's to hear, never a "Couldn’t connect" over a call the
+     * customer is on: the stage keeps that call, and its End button. Only a
+     * call that could not start or go on is a failure there.
+     */
+    var stageStatus: GraineVoiceStatus {
+        GraineVoiceStatus.of(
+            phase: phase, calling: connecting || connected || reconnecting, connected: connected, muted: muted,
+            failed: VoiceFailure.sentence(fault: nil, micDenied: micDenied, connectivity: connectivity, callFailed: callFailed) != nil,
+            ended: callEnded
         )
     }
 
@@ -224,6 +253,9 @@ public final class GraineVoice: NSObject, ObservableObject {
     private var backgroundConfirmItem: DispatchWorkItem?
     private var audioRestoreItem: DispatchWorkItem?
     private var savedAudio: SavedAudioSession?
+    /// The loudspeaker or the earpiece, as the customer chose for this call (`setSpeaker`); back to the loudspeaker when it ends.
+    private var wantsSpeaker = true
+    private var routeObserver: NSObjectProtocol?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     /// The last component the agent drew that nobody has answered — for a widget view that mounts later. The instance keeps it, for either conversation.
@@ -294,6 +326,10 @@ public final class GraineVoice: NSObject, ObservableObject {
         // the one place a UIKit app's light/dark switch (or override) can be heard.
         hostView.onStyleChange = { [weak self] style in
             self?.graine.deviceAppearanceChanged(dark: GraineInApp.isDark(style))
+        }
+        // Inside an avatar view that left the window: straight back to the resting place, in the same turn.
+        hostView.onLeftWindow = { [weak self] in
+            self?.engineLeftWindow()
         }
         hostView.alpha = 0
         hostView.isUserInteractionEnabled = false
@@ -374,6 +410,8 @@ public final class GraineVoice: NSObject, ObservableObject {
         if !captions.isEmpty { captions = [] }
         if awaitingAgent { awaitingAgent = false }
         setAttempt(attempt.after(.ended))
+        // No engine, nothing coming back: a call taken down mid-recovery leaves no clock for the next one.
+        if reconnecting { reconnecting = false }
         setCall(connected: false, connecting: false)
         // No engine, no call: nothing of the last one is news.
         freshAttempt()
@@ -473,6 +511,35 @@ public final class GraineVoice: NSObject, ObservableObject {
         }
         muted = value
         post(GraineProtocol.out(GraineProtocol.Out.setMuted, ["muted": value]))
+    }
+
+    /**
+     * The loudspeaker (true) or the earpiece (false) for the call's audio —
+     * the face stage's speaker button. Takes effect at once on a call and
+     * lasts until it ends; chosen with no call, it waits for the next one. The
+     * call after starts on the loudspeaker again, as every call does. A
+     * connected headset or Bluetooth device still carries the audio on false;
+     * `speaker` says where it really is.
+     */
+    public func setSpeaker(_ on: Bool) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setSpeaker(on) }
+            return
+        }
+        wantsSpeaker = on
+        // No call holds the audio yet: the next call starts where the customer chose.
+        guard savedAudio != nil else {
+            refreshSpeaker()
+            return
+        }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, mode: .default, options: callAudioOptions())
+            try session.overrideOutputAudioPort(on ? .speaker : .none)
+        } catch {
+            GraineLog.warning("Could not move the call's audio to the \(on ? "loudspeaker" : "earpiece"): \(GraineInApp.describe(error))")
+        }
+        refreshSpeaker()
     }
 
     /**
@@ -839,8 +906,20 @@ public final class GraineVoice: NSObject, ObservableObject {
     private func setCall(connected isConnected: Bool, connecting isConnecting: Bool) {
         let changed = isConnected != connected || isConnecting != connecting
         let liveChanged = isConnected != connected
+        let wasOn = connected || connecting
         if connected != isConnected { connected = isConnected }
         if connecting != isConnecting { connecting = isConnecting }
+        // The face stage's clock: from the moment the call went live, through a drop it comes back from, to its end.
+        if isConnected, startedAt == nil {
+            startedAt = Date()
+        } else if !isConnected, !isConnecting, !reconnecting, startedAt != nil {
+            startedAt = nil
+        }
+        // The loudspeaker choice was this call's: the next one starts on the loudspeaker, as every call does.
+        if wasOn, !isConnected, !isConnecting, !reconnecting, !wantsSpeaker {
+            wantsSpeaker = true
+            refreshSpeaker()
+        }
         // Off a call there is nothing to measure.
         if !isConnected { heard(agent: 0, mic: 0) }
         // The friction clock runs only during a live call.
@@ -1137,6 +1216,18 @@ public final class GraineVoice: NSObject, ObservableObject {
         if savedAudio == nil {
             savedAudio = SavedAudioSession(category: session.category, mode: session.mode, options: session.categoryOptions)
         }
+        do {
+            try session.setCategory(.playAndRecord, mode: .default, options: callAudioOptions())
+            try session.setActive(true, options: [])
+        } catch {
+            GraineLog.warning("Could not configure the audio session: \(GraineInApp.describe(error))")
+        }
+        watchAudioRoute()
+        refreshSpeaker()
+    }
+
+    /// Play and record with Bluetooth headsets allowed — out of the loudspeaker unless the customer chose the earpiece.
+    private func callAudioOptions() -> AVAudioSession.CategoryOptions {
         // The same option (0x4) under two names: the iOS 26 SDK renamed allowBluetooth to
         // allowBluetoothHFP (available from iOS 1.0) and deprecated the old one. Consumers build
         // this source with their own Xcode, and only Xcode 26 (Swift 6.2) has the new name.
@@ -1145,12 +1236,28 @@ public final class GraineVoice: NSObject, ObservableObject {
         #else
         let bluetooth: AVAudioSession.CategoryOptions = .allowBluetooth
         #endif
-        do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, bluetooth])
-            try session.setActive(true, options: [])
-        } catch {
-            GraineLog.warning("Could not configure the audio session: \(GraineInApp.describe(error))")
+        return wantsSpeaker ? [.defaultToSpeaker, bluetooth] : [bluetooth]
+    }
+
+    /// A headset plugged in or taken out, the loudspeaker chosen: `speaker` follows where the audio really goes.
+    private func watchAudioRoute() {
+        guard routeObserver == nil else { return }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshSpeaker()
         }
+    }
+
+    /// On a call: whether its audio is on the loudspeaker now. With none: what the next call starts on.
+    private func refreshSpeaker() {
+        let on: Bool
+        if savedAudio != nil {
+            on = AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        } else {
+            on = wantsSpeaker
+        }
+        if speaker != on { speaker = on }
     }
 
     /// After the goodbye has had a moment to finish playing.
@@ -1184,6 +1291,7 @@ public final class GraineVoice: NSObject, ObservableObject {
             GraineLog.warning("Calls: the in-app voice call still holds the audio session (\(GraineCalls.describeAudioError(error))); CallKit may not activate the native call's audio.")
         }
         if let saved = saved { try? session.setCategory(saved.category, mode: saved.mode, options: saved.options) }
+        refreshSpeaker()
     }
 
     private func restoreAudioSession() {
@@ -1206,6 +1314,7 @@ public final class GraineVoice: NSObject, ObservableObject {
         } catch {
             if graine.config.debug { GraineLog.trace("audio session restore: \(GraineInApp.describe(error))") }
         }
+        refreshSpeaker()
     }
 
     static func micGranted() -> Bool {
@@ -1246,15 +1355,34 @@ public final class GraineVoice: NSObject, ObservableObject {
 /// The engine's host view, which also reports the window's light or dark as it changes.
 private final class EngineHostView: UIView {
     var onStyleChange: ((UIUserInterfaceStyle) -> Void)?
+    /**
+     * Out of every window while it was inside an avatar view (the view went, and
+     * this with it, by a path the view's own hand-back did not see). Called at
+     * once, so the engine is back in the window within the same turn — WebKit
+     * hears no change, and the call never goes deaf.
+     */
+    var onLeftWindow: (() -> Void)?
+    /**
+     * Whose light or dark this hears: only the window's. Inside an avatar view
+     * it takes the traits of the screen around the face (a stage drawn dark),
+     * which are not the app's.
+     */
+    var hearsStyle = true {
+        didSet { if hearsStyle && !oldValue && window != nil { onStyleChange?(traitCollection.userInterfaceStyle) } }
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { onStyleChange?(traitCollection.userInterfaceStyle) }
+        if window == nil {
+            onLeftWindow?()
+            return
+        }
+        if hearsStyle { onStyleChange?(traitCollection.userInterfaceStyle) }
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
-        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+        if hearsStyle, previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
             onStyleChange?(traitCollection.userInterfaceStyle)
         }
     }
@@ -1422,12 +1550,16 @@ extension GraineVoice {
 /*
  * On an assistant-bar call the page draws the agent's face itself. It says
  * when there is one (`graine:avatar` available · live · off); while an avatar
- * view (GraineAvatarView) is on screen, the engine's own view is laid exactly
- * over it and the page is told so (`graine:avatar-surface` shown) — it then
- * draws the face alone, edge to edge, and hands the voice to it. Anything
- * else puts the engine back to its invisible point and tells the page: a face
- * nobody can see is never watched and never takes the voice. The engine stays
- * in the window it was attached to, always: it is only moved and resized.
+ * view (GraineAvatarView) is on screen, the engine's own view is moved INTO it,
+ * under everything else in it, and the page is told so (`graine:avatar-surface`
+ * shown) — it then draws the face alone, edge to edge, and hands the voice to
+ * it. Whatever the app draws above the avatar view (captions, buttons, the
+ * SDK's bar or face stage) is drawn over the face. Anything else puts the
+ * engine back to its invisible point in the window it was attached to, and
+ * tells the page: a face nobody can see is never watched and never takes the
+ * voice. The engine never leaves that window for longer than the moment an
+ * avatar view does: the view hands it back as it goes (`avatarSlotLeaving`),
+ * and the engine's own view comes straight back if it is taken out with it.
  */
 extension GraineVoice: AvatarSurfaceListener {
     fileprivate func faceFromPage(_ face: (state: String, reason: String?)) {
@@ -1446,14 +1578,46 @@ extension GraineVoice: AvatarSurfaceListener {
 
     func avatarSurfaceChanged() { layoutFace() }
 
+    /// Tests: the page said this of the face (`graine:avatar`), as its message would.
+    func faceFromPageForTests(_ state: String, reason: String? = nil) { faceFromPage((state, reason)) }
+
+    /// Tests: the engine's own view, wherever it is.
+    var engineHostForTests: UIView? { host }
+
+    /// Tests: a message from the page, as it would arrive.
+    func receiveForTests(_ raw: String) { receive(raw) }
+
+    /// The avatar view holding the engine is about to leave its window: the engine goes back to its place now.
+    func avatarSlotLeaving(_ slot: GraineAvatarView) {
+        guard let hostView = host, hostView.superview === slot else { return }
+        rest()
+    }
+
+    /// The engine's view was taken out of every window inside an avatar view: back to its place, in this turn.
+    fileprivate func engineLeftWindow() {
+        guard let hostView = host, let container = container, hostView.superview !== container else { return }
+        rest()
+        if faceShownToPage {
+            faceShownToPage = false
+            post(AvatarWire.surfaceMessage(shown: false))
+        }
+    }
+
     private func layoutFace() {
-        guard let hostView = host, let engine = webView, let container = container else { return }
-        if faceState.showsFace, let slot = GraineAvatar.shared.activeSlot, slot.window != nil, slot.window === container.window ?? (container as? UIWindow) {
-            let frame = slot.frame(in: container)
+        guard let hostView = host as? EngineHostView, let engine = webView, let container = container else { return }
+        let window = container.window ?? (container as? UIWindow)
+        if faceState.showsFace, let slot = GraineAvatar.shared.activeSlot, slot.window != nil, slot.window === window {
+            // Inside the avatar view, under whatever else is in it: anything drawn above it is drawn over the face.
+            hostView.hearsStyle = false
+            if hostView.superview !== slot {
+                slot.insertSubview(hostView, at: 0)
+            } else if slot.subviews.first !== hostView {
+                slot.sendSubviewToBack(hostView)
+            }
+            let frame = slot.bounds
             if hostView.frame != frame { hostView.frame = frame }
             engine.frame = hostView.bounds
-            hostView.layer.cornerRadius = slot.layer.cornerRadius
-            hostView.layer.cornerCurve = slot.layer.cornerCurve
+            hostView.layer.cornerRadius = 0
             hostView.clipsToBounds = true
             hostView.alpha = 1
             if !faceShownToPage {
@@ -1461,15 +1625,23 @@ extension GraineVoice: AvatarSurfaceListener {
                 post(AvatarWire.surfaceMessage(shown: true))
             }
         } else {
-            let point = CGRect(x: 0, y: 0, width: 1, height: 1)
-            hostView.frame = point
-            engine.frame = point
-            hostView.alpha = 0
+            rest()
             if faceShownToPage {
                 faceShownToPage = false
                 post(AvatarWire.surfaceMessage(shown: false))
             }
         }
+    }
+
+    /// Where the engine waits: in the window it was attached to, 1×1 and invisible.
+    private func rest() {
+        guard let hostView = host as? EngineHostView, let engine = webView, let container = container else { return }
+        if hostView.superview !== container { container.addSubview(hostView) }
+        let point = CGRect(x: 0, y: 0, width: 1, height: 1)
+        hostView.frame = point
+        engine.frame = point
+        hostView.alpha = 0
+        hostView.hearsStyle = true
     }
 }
 #endif

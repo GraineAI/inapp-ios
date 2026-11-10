@@ -380,6 +380,12 @@ public final class GraineInApp: ObservableObject {
     public private(set) lazy var voice: GraineVoice = GraineVoice(graine: self)
 
     /**
+     * THE FACE STAGE, AS STATE — everything `GraineAvatarStage` reads and its
+     * buttons do, for a screen of your own over the agent's face. Main thread.
+     */
+    public private(set) lazy var stage: GraineStage = GraineStage(graine: self)
+
+    /**
      * Calls like WhatsApp, on CallKit and VoIP pushes: the customer calling
      * your agent (`startCall`), or your agent ringing the customer (a push).
      * The audio runs in your app's own process, so the call keeps going with

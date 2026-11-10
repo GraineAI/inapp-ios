@@ -133,12 +133,17 @@ struct LiveWav {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("graine-e2e-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("q.wav")
+        #if os(macOS)
         let say = Process()
         say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
         say.arguments = ["-o", file.path, "--data-format=LEI16@16000", "[[slnc 3000]] Hi. What can you help me with in this app?"]
         try say.run()
         say.waitUntilExit()
         try #require(say.terminationStatus == 0, "say failed")
+        #else
+        // A simulator has no `say` (the package's tests also build for iOS, to run the UIKit ones there): pass a WAV.
+        try #require(Bool(false), "GRAINE_E2E_WAV must name a WAV off a Mac")
+        #endif
         return try read(file)
     }
 

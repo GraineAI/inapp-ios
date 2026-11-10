@@ -6,6 +6,12 @@ import UIKit
 /// Told when the avatar views on screen change (GraineCalls, GraineVoice). Main thread.
 protocol AvatarSurfaceListener: AnyObject {
     func avatarSurfaceChanged()
+    /// An avatar view is about to leave its window: take back anything of yours it holds, now.
+    func avatarSlotLeaving(_ slot: GraineAvatarView)
+}
+
+extension AvatarSurfaceListener {
+    func avatarSlotLeaving(_ slot: GraineAvatarView) {}
 }
 
 /**
@@ -19,7 +25,7 @@ protocol AvatarSurfaceListener: AnyObject {
  * nothing is watched: the call is voice-only, exactly as before.
  *
  *   - the assistant bar's calls: the face is drawn by the call's own engine,
- *     in the avatar view's place;
+ *     inside the avatar view;
  *   - the SDK's native calls (GraineCalls): the face needs the WebRTC module
  *     (`GraineInAppRTC`) and a call on WebRTC; otherwise `state.reason` is
  *     `unsupported` and the call stays voice-only.
@@ -80,6 +86,11 @@ public final class GraineAvatar: ObservableObject {
     }
 
     func listen(_ listener: AvatarSurfaceListener) { listeners.add(listener) }
+
+    /// `slot` is about to leave its window: whatever it hosts goes back where it lives first.
+    func slotLeaving(_ slot: GraineAvatarView) {
+        for case let l as AvatarSurfaceListener in listeners.allObjects { l.avatarSlotLeaving(slot) }
+    }
     func stopListening(_ listener: AvatarSurfaceListener) { listeners.remove(listener) }
 
     // MARK: - Sources
@@ -135,9 +146,12 @@ public final class GraineAvatar: ObservableObject {
 /**
  * WHERE THE AGENT'S FACE IS DRAWN — place it in your layout (a square or
  * portrait area reads best) and the face plays here during calls whose agent
- * has one. Transparent when there is none: put your own picture of the agent
- * behind it. Hiding it, or taking it off screen, gives the voice back to the
- * call at once. One on screen at a time is used: the last one shown.
+ * has one. The face is drawn INSIDE this view, under anything else in it: draw
+ * your own captions and buttons above it and they are drawn over the face
+ * (`GraineAvatarStage` does exactly that, from `GraineInApp.stage`).
+ * Transparent when there is none: put your own picture of the agent behind
+ * it. Hiding it, or taking it off screen, gives the voice back to the call at
+ * once. One on screen at a time is used: the last one shown.
  */
 public final class GraineAvatarView: UIView {
     private weak var hosted: UIView?
@@ -171,6 +185,12 @@ public final class GraineAvatarView: UIView {
         return true
     }
 
+    public override func willMove(toWindow newWindow: UIWindow?) {
+        // Leaving: the face's engine goes back to its window before this view takes it out of it.
+        if newWindow == nil || newWindow !== window { GraineAvatar.shared.slotLeaving(self) }
+        super.willMove(toWindow: newWindow)
+    }
+
     public override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil { GraineAvatar.shared.register(self) } else { GraineAvatar.shared.unregister(self) }
@@ -190,7 +210,7 @@ public final class GraineAvatarView: UIView {
         didSet { if (oldValue > 0.01) != (alpha > 0.01) { GraineAvatar.shared.slotsChanged() } }
     }
 
-    /// The native face's video view, or nil.
+    /// The native face's video view, or nil — under anything else in this view.
     func host(_ view: UIView?) {
         if hosted === view { return }
         if let old = hosted, old.superview === self { old.removeFromSuperview() }
@@ -199,14 +219,14 @@ public final class GraineAvatarView: UIView {
         view.frame = bounds
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.isUserInteractionEnabled = false
-        addSubview(view)
+        insertSubview(view, at: 0)
     }
 
     func stateChanged() {
         accessibilityValue = GraineAvatar.shared.state.phase == .live ? "Speaking" : nil
     }
 
-    /// Where this view is, in `container`'s coordinates (the assistant bar's engine is laid over it).
+    /// Where this view is, in `container`'s coordinates.
     func frame(in container: UIView) -> CGRect { convert(bounds, to: container) }
 }
 
