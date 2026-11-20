@@ -408,12 +408,14 @@ final class EngineRig {
     var identity: IdentityWire.Fields?
     /// The agent's server tokens; none by default, as before server tokens existed.
     var tokens: ClientTokens?
+    /// Where the app points the SDK: Graine's own platform unless a test says otherwise (an install).
+    var baseUrl = "https://www.graine.ai"
 
     private func makeEngine() -> CallEngine {
         CallEngine(
             setup: CallEngine.Setup(
                 publishableKey: "pk_test_rig",
-                baseUrl: "https://www.graine.ai",
+                baseUrl: baseUrl,
                 variables: variables,
                 contextFrame: { [unowned self] in self.contextFrame },
                 session: { [unowned self] done in done(self.session) },

@@ -204,7 +204,7 @@ import Testing
         #expect(JSON.object(from: bare)?["metadata"] == nil, "no metadata is no key")
 
         let template = try #require(f["directUrl"]?.string)
-        let url = CallWire.directUrl(wsHost: "{wsHost}", agentId: "AGENT")
+        let url = CallWire.directUrl(wsHost: "{wsHost}", baseUrl: "https://www.graine.ai", agentId: "AGENT")
         #expect(url == template.replacingOccurrences(of: "{agentId}", with: "AGENT"))
     }
 
@@ -240,8 +240,10 @@ import Testing
     }
 
     @Test func theDirectUrlDefaultsToGrainesHostAndEncodesTheAgent() {
-        #expect(CallWire.directUrl(wsHost: nil, agentId: "a b") == "wss://ws.graine.ai/chat/v1/a%20b?webcall=1")
-        #expect(CallWire.directUrl(wsHost: "wss://ws.graine.ai/", agentId: "x") == "wss://ws.graine.ai/chat/v1/x?webcall=1")
+        // On Graine's own platform, as always; an install never gets this default (OwnInstallTests).
+        let hosted = "https://www.graine.ai"
+        #expect(CallWire.directUrl(wsHost: nil, baseUrl: hosted, agentId: "a b") == "wss://ws.graine.ai/chat/v1/a%20b?webcall=1")
+        #expect(CallWire.directUrl(wsHost: "wss://ws.graine.ai/", baseUrl: hosted, agentId: "x") == "wss://ws.graine.ai/chat/v1/x?webcall=1")
     }
 
     @Test func aTokenKeyIsTrimmedAndAnEmptyOneDropped() throws {

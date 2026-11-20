@@ -102,7 +102,8 @@ final class CallConversation {
         let security = setup.security
         var request = GraineRtcRequest(
             baseUrl: setup.baseUrl,
-            controlHost: controlHost(session),
+            // Empty when an install's session named no host: the module then opens no control channel (`chose`).
+            controlHost: controlHost(session, baseUrl: setup.baseUrl) ?? "",
             mintBody: { sessionId in
                 RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: callVariables, variables: variables,
                                  identity: identity, credentials: security)
@@ -117,9 +118,13 @@ final class CallConversation {
         return request
     }
 
-    /// The control channel's host: the agent's socket host, without a trailing slash.
-    static func controlHost(_ session: GraineSessionConfig) -> String {
-        var host = session.wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? CallWire.defaultWsHost
+    /**
+     * The control channel's host: the agent's socket host, without a trailing
+     * slash (`CallWire.socketHost`). Nil on an install whose session named
+     * none — never Graine's own host there.
+     */
+    static func controlHost(_ session: GraineSessionConfig, baseUrl: String) -> String? {
+        guard var host = CallWire.socketHost(wsHost: session.wsHost, baseUrl: baseUrl) else { return nil }
         while host.hasSuffix("/") { host.removeLast() }
         return host
     }
@@ -283,6 +288,14 @@ final class CallConversation {
         guard choice == .webrtc, let module = module, let session = session,
               !(session.webcallAgentId.isEmpty && session.agentId.isEmpty) else {
             startSocket(CallTransportReport(transport: .websocket), skipped: Self.skippedReason(requested: requested, session: session, rtcAvailable: module != nil))
+            return
+        }
+        // An install whose session named no conversation host: WebRTC's control channel has nowhere to go, and
+        // never Graine's own host. As any WebRTC failure before media, the call goes on the WebSocket — which
+        // opens only on the install's ticket, or ends with the same reason.
+        guard Self.controlHost(session, baseUrl: setup.baseUrl) != nil else {
+            GraineLog.warning("The call could not be carried on WebRTC (\(GraineRtcFallback.error.rawValue)): \(CallWire.noSocketHost) It continues on the WebSocket.")
+            startSocket(CallTransportReport(transport: .websocket, requested: .webrtc, reason: GraineRtcFallback.error.rawValue))
             return
         }
         startRtc(module, session: session)

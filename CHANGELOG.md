@@ -1,3 +1,15 @@
+## 0.15.5
+
+- **The agent's greeting no longer waits out its hold when the call's control connection reconnects.** The agent
+  waits to greet until your app's call audio is really playing, which the SDK tells it over the call's control
+  connection. If that connection closed and opened again before the agent was heard, the word could go with it,
+  and the greeting then started only once the wait ran out, about four seconds later. The SDK now says it again on
+  the reopened connection. Nothing to change in your app.
+- **An app on its own Graine install never falls back to Graine's own socket host.** When your `baseUrl` is your
+  install's, a session that names no socket host is an error your app sees, never a connection to Graine's cloud.
+  Apps on Graine's platform are unchanged.
+- `GraineInAppRTC` moves to 0.15.5 beside it: the two always share a version. Update both together.
+
 ## 0.15.4
 
 - **The face is drawn inside the avatar view.** On the voice bar's calls the agent's face now plays inside your

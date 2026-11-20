@@ -15,7 +15,7 @@ In Xcode: **File → Add Package Dependencies…**, enter
 your app target. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.15.4")
+.package(url: "https://github.com/GraineAI/inapp-ios", from: "0.15.5")
 ```
 
 Integration guide: https://www.graine.ai/docs/in-app/ios
@@ -56,6 +56,13 @@ struct MyApp: App {
     var body: some Scene { WindowGroup { RootView() } }
 }
 ```
+
+**On your own Graine install**, `baseUrl` is your install's dashboard address
+(`https://agents.example.com`), in every `GraineConfig` — every named agent's
+too. The SDK then opens conversations only where your install says: if its
+answer names no conversation address (`wsHost`), the chat or call does not
+open and says why — it never falls back to Graine's cloud. On Graine's cloud
+keep `https://www.graine.ai`.
 
 ## Several agents in one app
 
@@ -684,7 +691,7 @@ canceller runs on the call. It is its own package, so an app that does not add
 it never downloads it, and `GraineInApp` keeps no dependencies:
 
 ```swift
-.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.15.4")
+.package(url: "https://github.com/GraineAI/inapp-ios-rtc", from: "0.15.5")
 ```
 
 In Xcode, add `https://github.com/GraineAI/inapp-ios-rtc` and its

@@ -11,7 +11,13 @@ public struct GraineSessionConfig {
     public let variables: [String: Any]
     /// The engine page's deployment id — its cache key.
     public let pageVersion: String?
-    /// Where the conversation socket lives, for a native call that could not mint a ticket. Nil: `wss://ws.graine.ai`.
+    /**
+     * Where the conversation socket lives, for a native call or chat that could
+     * not mint a ticket, and for a WebRTC call's control channel. Nil on
+     * Graine's own platform: `wss://ws.graine.ai`. Nil (or not a `ws://` or
+     * `wss://` address) for an install: that conversation is not opened —
+     * never on Graine's host.
+     */
     public let wsHost: String?
     /// The in-app actions the dashboard declares for this agent.
     public let declaredActions: Set<String>

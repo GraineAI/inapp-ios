@@ -474,7 +474,13 @@ final class ChatConnection {
             // signed claims and reads nothing else, so a token here would only reach the access logs.
         } else {
             let agent = session.webcallAgentId.isEmpty ? session.agentId : session.webcallAgentId
-            address = CallWire.directUrl(wsHost: session.wsHost, agentId: agent, textChat: true)
+            // No host for the direct socket on an install: the chat does not open — never on Graine's own host.
+            guard let direct = CallWire.directUrl(wsHost: session.wsHost, baseUrl: setup.baseUrl, agentId: agent, textChat: true) else {
+                GraineLog.warning(CallWire.noSocketHost)
+                failedToOpen(CallWire.noSocketHost)
+                return
+            }
+            address = direct
             via = .direct
             // The direct socket reads the variables off its URL.
             let token = CallWire.contextToken(variables.map { ($0.0, $0.1 as Any?) }, callType: ChatWire.callType)

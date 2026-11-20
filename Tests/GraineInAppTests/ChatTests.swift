@@ -163,11 +163,13 @@ final class ChatRig {
     var variables: [(String, String)] = [("name", "Asha")]
     var identity: IdentityWire.Fields? = IdentityWire.Fields(value: "P-1", installId: "i-1", memory: true, timezone: "Asia/Kolkata", callId: nil)
     var actionRunner: (String, [String: Any], @escaping (GraineActionResult) -> Void) -> Void = { _, _, answer in answer(.ok("done")) }
+    /// Where the app points the SDK: Graine's own platform unless a test says otherwise (an install).
+    var baseUrl = "https://www.graine.ai"
     private(set) var events: [ChatConnection.Event] = []
     lazy var chat: ChatConnection = ChatConnection(
         setup: ChatConnection.Setup(
             publishableKey: "pk_test_chat",
-            baseUrl: "https://www.graine.ai",
+            baseUrl: baseUrl,
             variables: { [unowned self] in self.variables },
             identity: { [unowned self] in self.identity },
             contextFrame: { [unowned self] in self.contextFrame },

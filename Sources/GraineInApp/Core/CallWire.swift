@@ -130,15 +130,61 @@ enum CallWire {
         return fields
     }
 
+    // MARK: - Where the conversation runs
+
+    /// The hosted dashboard's own names: a `baseUrl` on one of them, over https, is Graine's own platform.
+    static let graineCloudHosts: Set<String> = ["graine.ai", "www.graine.ai", "app.graine.ai"]
+
+    /**
+     * Is `baseUrl` GRAINE'S OWN PLATFORM? https, on one of the hosted
+     * dashboard's names, on the default port. Anything else — an install of
+     * the customer's own, a dedicated instance, an address that does not parse —
+     * is a deployment of its own, and nothing there falls back to Graine's hosts.
+     */
+    static func isGraineCloud(_ baseUrl: String) -> Bool {
+        guard let parts = URLComponents(string: baseUrl.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parts.scheme?.lowercased() == "https", let host = parts.host?.lowercased() else { return false }
+        if let port = parts.port, port != 443 { return false }
+        return graineCloudHosts.contains(host)
+    }
+
+    /// A WebSocket address with a host: `ws://` or `wss://`.
+    static func isSocketAddress(_ address: String) -> Bool {
+        guard let parts = URLComponents(string: address), let scheme = parts.scheme?.lowercased(),
+              scheme == "wss" || scheme == "ws", let host = parts.host, !host.isEmpty else { return false }
+        return true
+    }
+
+    /**
+     * WHERE THE CONVERSATION'S SOCKETS LIVE — the session's `wsHost`, for the
+     * direct socket and WebRTC's control channel.
+     *
+     * On Graine's own platform, exactly as always: the host the session names,
+     * else Graine's own. Anywhere else only a WebSocket address the session
+     * names: nil without one, and the conversation is not opened — an app on
+     * an install never sends its users to Graine's cloud by default.
+     */
+    static func socketHost(wsHost: String?, baseUrl: String) -> String? {
+        if isGraineCloud(baseUrl) { return wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? defaultWsHost }
+        let host = (wsHost ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return isSocketAddress(host) ? host : nil
+    }
+
+    /// Why a conversation on an install did not open: its session named no conversation host (`socketHost` is nil).
+    static let noSocketHost =
+        "The conversation was not opened: this deployment's session did not say where its conversations run (no usable wsHost). " +
+        "An SDK whose baseUrl is your own Graine install never falls back to Graine's cloud."
+
     // MARK: - URLs
 
     /**
      * The direct socket, used when no ticket could be minted:
      * `{wsHost}/chat/v1/{agentId}?webcall=1` — or `?text_chat=1` for the chat,
-     * which the runtime runs turn-based with no synthesizer.
+     * which the runtime runs turn-based with no synthesizer. Nil when there is
+     * no host to open it on (`socketHost`): never Graine's for an install.
      */
-    static func directUrl(wsHost: String?, agentId: String, textChat: Bool = false) -> String {
-        var host = wsHost.flatMap { $0.isEmpty ? nil : $0 } ?? defaultWsHost
+    static func directUrl(wsHost: String?, baseUrl: String, agentId: String, textChat: Bool = false) -> String? {
+        guard var host = socketHost(wsHost: wsHost, baseUrl: baseUrl) else { return nil }
         if host.hasSuffix("/") { host.removeLast() }
         return host + "/chat/v1/" + GraineProtocol.encode(agentId) + (textChat ? "?text_chat=1" : "?webcall=1")
     }

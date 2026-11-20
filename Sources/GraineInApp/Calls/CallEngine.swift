@@ -574,7 +574,14 @@ final class CallEngine {
             // No variables on this URL: the gateway builds the call's context from the ticket's signed
             // claims and reads nothing else, so a token here would only reach the access logs.
         } else {
-            address = CallWire.directUrl(wsHost: session.wsHost, agentId: session.webcallAgentId.isEmpty ? session.agentId : session.webcallAgentId)
+            let agent = session.webcallAgentId.isEmpty ? session.agentId : session.webcallAgentId
+            // No host for the direct socket on an install: the call does not open — never on Graine's own host.
+            guard let direct = CallWire.directUrl(wsHost: session.wsHost, baseUrl: setup.baseUrl, agentId: agent) else {
+                GraineLog.warning(CallWire.noSocketHost)
+                finish(.couldNotOpen(CallWire.noSocketHost), closeSocket: false)
+                return
+            }
+            address = direct
             transport = .direct
             // The direct socket reads the variables off its URL.
             address = CallWire.withContextToken(address, token: CallWire.contextToken(setup.variables.map { ($0.0, $0.1 as Any?) }))

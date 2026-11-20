@@ -32,11 +32,30 @@ import Foundation
     case error
 }
 
+/**
+ * GRAINE'S OWN PLATFORM OR AN INSTALL — the rule every socket address follows
+ * (CallWire.socketHost), for the module's own addresses: only on Graine's own
+ * platform may an address that is missing or does not parse become Graine's.
+ */
+@_spi(GraineRTC) public enum GraineRtcHosts {
+    /// `baseUrl` is Graine's own platform (https, one of the hosted dashboard's names).
+    public static func isGraineCloud(_ baseUrl: String) -> Bool { CallWire.isGraineCloud(baseUrl) }
+    /// A `ws://` or `wss://` address with a host.
+    public static func isSocketAddress(_ address: String) -> Bool { CallWire.isSocketAddress(address) }
+    /// Why a conversation on an install did not open: no conversation host.
+    public static var noSocketHost: String { CallWire.noSocketHost }
+}
+
 /// What the core hands the module for one call.
 @_spi(GraineRTC) public struct GraineRtcRequest {
     /// "https://www.graine.ai" unless self-hosted: where the call session is minted.
     public var baseUrl: String
-    /// The agent's socket host (`wss://ws.graine.ai`): the control channel lives beside it.
+    /**
+     * The agent's socket host (`wss://ws.graine.ai` on Graine's own platform):
+     * the control channel lives beside it. Empty when an install's session
+     * named none: the module then opens no control channel — never one on
+     * Graine's host (`GraineRtcHosts`) — and the call goes on the WebSocket.
+     */
     public var controlHost: String
     /// The mint's JSON body for a session id: the key, the call's variables and who the customer is.
     public var mintBody: (_ sessionId: String) -> Data

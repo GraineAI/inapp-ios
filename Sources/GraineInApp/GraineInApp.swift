@@ -2292,7 +2292,8 @@ public final class GraineInApp: ObservableObject {
         let security = self.security
         var request = GraineRtcRequest(
             baseUrl: config.baseUrl,
-            controlHost: CallConversation.controlHost(session),
+            // A grant needs no control channel; empty when an install's session named no host.
+            controlHost: CallConversation.controlHost(session, baseUrl: config.baseUrl) ?? "",
             mintBody: { sessionId in
                 RtcMintBody.json(publishableKey: key, sessionId: sessionId, callVariables: [], variables: [], identity: identity,
                                  credentials: security)

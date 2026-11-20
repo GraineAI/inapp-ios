@@ -81,6 +81,8 @@ final class ConversationRig {
     /// What the answer would mint with, as it asked for the prepared leg; and what that leg was minted with (nil: anything).
     private(set) var takenMints: [Data] = []
     var preparedMint: Data?
+    /// Where the app points the SDK: Graine's own platform unless a test says otherwise (an install).
+    var baseUrl = "https://www.graine.ai"
     var actionRunner: (String, [String: Any], @escaping (GraineActionResult) -> Void) -> Void = { _, _, answer in answer(.ok("done")) }
     private(set) var events: [CallEngine.Event] = []
     private(set) var reports: [CallTransportReport] = []
@@ -99,7 +101,7 @@ final class ConversationRig {
         CallConversation(
             setup: CallEngine.Setup(
                 publishableKey: "pk_test_rig",
-                baseUrl: "https://www.graine.ai",
+                baseUrl: baseUrl,
                 variables: [("who_called", "customer"), ("call_reason", "card_blocked"), ("plan", "gold")],
                 contextFrame: { [unowned self] in self.contextFrame },
                 session: { [unowned self] done in done(self.session) },
